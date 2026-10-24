@@ -166,8 +166,8 @@ impl Bus for UsbBus {
                 if alt.class() != USB_CLASS_VENDOR || !named_dap {
                     continue;
                 }
-                let endpoints: Vec<_> = alt.endpoints().collect();
-                let [out_ep, in_ep, ..] = endpoints.as_slice() else {
+                let mut endpoints = alt.endpoints();
+                let (Some(out_ep), Some(in_ep)) = (endpoints.next(), endpoints.next()) else {
                     continue;
                 };
                 if out_ep.transfer_type() != TransferType::Bulk
@@ -255,7 +255,7 @@ impl Bus for UsbBus {
         cfg!(windows)
     }
 
-    /// Only Linux ties a HID device to its USB device ([`rom_path`]).
+    /// Only Linux ties a HID device to its USB device.
     fn tells_bootloaders_apart(&self) -> bool {
         cfg!(target_os = "linux")
     }

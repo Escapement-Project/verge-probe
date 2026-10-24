@@ -71,11 +71,8 @@ pub fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every stock image in `dirs`, newest version first.
-#[must_use]
-pub fn find(dirs: &[PathBuf]) -> Vec<StockImage> {
-    let mut images: Vec<StockImage> = dirs
-        .iter()
+fn images(dirs: &[PathBuf]) -> impl Iterator<Item = StockImage> + '_ {
+    dirs.iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flatten()
         .filter_map(Result::ok)
@@ -86,26 +83,59 @@ pub fn find(dirs: &[PathBuf]) -> Vec<StockImage> {
                 version,
             })
         })
-        .collect();
-    images.sort_by(|a, b| b.version.cmp(&a.version).then_with(|| a.path.cmp(&b.path)));
+}
+
+fn newest_first(a: &StockImage, b: &StockImage) -> std::cmp::Ordering {
+    b.version.cmp(&a.version).then_with(|| a.path.cmp(&b.path))
+}
+
+/// Every stock image in `dirs`, newest version first.
+#[must_use]
+pub fn find(dirs: &[PathBuf]) -> Vec<StockImage> {
+    let mut images: Vec<_> = images(dirs).collect();
+    images.sort_by(newest_first);
     images
+}
+
+/// The newest image in `dirs`, choosing the first path alphabetically on a version tie.
+#[must_use]
+pub fn newest_from(dirs: &[PathBuf]) -> Option<StockImage> {
+    images(dirs).min_by(newest_first)
 }
 
 /// The newest stock image in LinkServer's usual places.
 #[must_use]
 pub fn newest() -> Option<StockImage> {
-    find(&search_dirs()).into_iter().next()
+    newest_from(&search_dirs())
 }
 
 /// The stock image in a directory the user named.
 #[must_use]
 pub fn newest_in(dir: &Path) -> Option<StockImage> {
-    find(&[dir.to_path_buf()]).into_iter().next()
+    newest_from(&[dir.to_path_buf()])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_uses_the_version_then_the_path() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = [root.path().join("z"), root.path().join("a")];
+        for dir in &dirs {
+            std::fs::create_dir(dir).unwrap();
+            for version in ["3_99", "3_172"] {
+                std::fs::write(dir.join(format!("MCU-LINK_CMSIS-DAP_V{version}.s19")), b"")
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            newest_from(&dirs).unwrap().path,
+            dirs[1].join("MCU-LINK_CMSIS-DAP_V3_172.s19")
+        );
+        assert_eq!(newest_from(&[]), None);
+    }
 
     #[test]
     fn names() {

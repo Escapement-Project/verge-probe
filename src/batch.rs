@@ -8,7 +8,7 @@
 //! pauses the batch too.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -683,7 +683,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
     /// and the units waiting their turn. A unit that left before it was settled is not counted.
     #[must_use]
     pub fn tally(&self) -> Tally {
-        let waiting: Vec<usize> = self
+        let waiting: HashSet<usize> = self
             .entries
             .iter()
             .filter(|e| e.status == Status::Waiting && !self.closed)
@@ -901,8 +901,8 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                 .get(&e.port)
                 .is_some_and(|d| d.instance == e.device.instance)
         });
-        let tracked: Vec<String> = self.entries.iter().map(|e| e.port.clone()).collect();
-        self.queue.retain(|p| tracked.contains(p));
+        let tracked: HashSet<&str> = self.entries.iter().map(|e| e.port.as_str()).collect();
+        self.queue.retain(|p| tracked.contains(p.as_str()));
         self.bus
             .seen
             .borrow_mut()
@@ -918,7 +918,11 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         let first_seen = |d: &UsbDevice| seen.get(&port(d)).map_or(now, |(_, at)| *at);
         let mut arrivals: Vec<&UsbDevice> = devices
             .iter()
-            .filter(|d| d.location.is_some() && !tracked.contains(&port(d)))
+            .filter(|d| {
+                d.location
+                    .as_deref()
+                    .is_some_and(|at| !tracked.contains(at))
+            })
             .collect();
         arrivals.sort_by_key(|d| (first_seen(d), port(d)));
         for device in arrivals {

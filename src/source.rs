@@ -367,7 +367,7 @@ fn load_stock(dir: Option<&PathBuf>) -> Result<Loaded, LoadError> {
         Some(dir) => vec![dir.clone()],
         None => stock::search_dirs(),
     };
-    let Some(found) = stock::find(&dirs).into_iter().next() else {
+    let Some(found) = stock::newest_from(&dirs) else {
         let searched = if dirs.is_empty() {
             "found no LinkServer install".to_owned()
         } else {

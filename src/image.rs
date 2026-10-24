@@ -234,27 +234,26 @@ impl Image {
     /// `None` where it has none. Two of them, or one that does not hold together, make the image
     /// malformed.
     pub fn declaration(&self) -> Result<Option<Declaration>, ImageError> {
-        let mut found: Vec<(&Chunk, usize)> = Vec::new();
-        for chunk in &self.chunks {
-            let mut offset = ((4 - chunk.address % 4) % 4) as usize;
-            while offset + DECLARATION_MAGIC.len() <= chunk.data.len() {
-                if chunk.data[offset..].starts_with(DECLARATION_MAGIC) {
-                    found.push((chunk, offset));
-                }
-                offset += 4;
-            }
-        }
-        let address = |(chunk, offset): (&Chunk, usize)| chunk.address + offset as u32;
-        let (chunk, offset) = match found.as_slice() {
-            [] => return Ok(None),
-            [one] => *one,
-            [first, second, ..] => {
-                return Err(ImageError::TwoDeclarations {
-                    first: address(*first),
-                    second: address(*second),
-                });
-            }
+        let mut found = self.chunks.iter().flat_map(|chunk| {
+            let start = ((4 - chunk.address % 4) % 4) as usize;
+            (start..chunk.data.len())
+                .step_by(4)
+                .filter_map(move |offset| {
+                    chunk.data[offset..]
+                        .starts_with(DECLARATION_MAGIC)
+                        .then_some((chunk, offset))
+                })
+        });
+        let Some((chunk, offset)) = found.next() else {
+            return Ok(None);
         };
+        let address = |(chunk, offset): (&Chunk, usize)| chunk.address + offset as u32;
+        if let Some(second) = found.next() {
+            return Err(ImageError::TwoDeclarations {
+                first: address((chunk, offset)),
+                second: address(second),
+            });
+        }
         let record = &chunk.data[offset..];
         let bad = |reason: String| ImageError::BadDeclaration {
             address: address((chunk, offset)),
@@ -471,10 +470,12 @@ fn merge(mut pieces: Vec<Chunk>) -> Result<Vec<Chunk>, ImageError> {
             .expect("an overlap within one 32-bit address space fits usize");
         let shared = overlap.min(piece.data.len());
         let tail_start = last.data.len() - overlap;
-        for i in 0..shared {
-            if last.data[tail_start + i] != piece.data[i] {
-                return Err(ImageError::Overlap(piece.address + i as u32));
-            }
+        if let Some(offset) = last.data[tail_start..]
+            .iter()
+            .zip(&piece.data[..shared])
+            .position(|(a, b)| a != b)
+        {
+            return Err(ImageError::Overlap(piece.address + offset as u32));
         }
         last.data.extend_from_slice(&piece.data[shared..]);
     }
