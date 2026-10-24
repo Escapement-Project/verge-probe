@@ -1480,11 +1480,10 @@ fn parse_spi_response(
     response: &[u8],
     expected_count: usize,
 ) -> Result<SpiTransferResult, DebugProbeError> {
-    check_dap_status(response)?;
-    let status = ProBusStatus::from_byte(response_byte(response, 1)?);
-    let count = usize::from(u16::from_le_bytes(response_array(response, 2..4)?));
+    let status = ProBusStatus::from_byte(response_byte(response, 0)?);
+    let count = usize::from(u16::from_le_bytes(response_array(response, 1..3)?));
     let data = response
-        .get(4..4 + count)
+        .get(3..3 + count)
         .ok_or_else(|| protocol_error("short SPI data response"))?;
     if status == ProBusStatus::Ok && count != expected_count {
         return Err(protocol_error(
@@ -1536,11 +1535,10 @@ fn parse_i2c_response(
     response: &[u8],
     expected_count: usize,
 ) -> Result<I2cTransferResult, DebugProbeError> {
-    check_dap_status(response)?;
-    let status = ProBusStatus::from_byte(response_byte(response, 1)?);
-    let count = usize::from(u16::from_le_bytes(response_array(response, 2..4)?));
+    let status = ProBusStatus::from_byte(response_byte(response, 0)?);
+    let count = usize::from(u16::from_le_bytes(response_array(response, 1..3)?));
     let data = response
-        .get(4..4 + count)
+        .get(3..3 + count)
         .ok_or_else(|| protocol_error("short I2C data response"))?;
     if status == ProBusStatus::Ok && count != expected_count {
         return Err(protocol_error(
@@ -1841,12 +1839,12 @@ mod tests {
             .is_err()
         );
 
-        let parsed = parse_spi_response(&[0, 0, 2, 0, 0xA5, 0x5A], 2).unwrap();
+        let parsed = parse_spi_response(&[0, 2, 0, 0xA5, 0x5A], 2).unwrap();
         assert_eq!(parsed.status, ProBusStatus::Ok);
         assert_eq!(parsed.rx, [0xA5, 0x5A]);
-        assert!(parse_spi_response(&[0, 0, 1, 0, 0xA5], 2).is_err());
+        assert!(parse_spi_response(&[0, 1, 0, 0xA5], 2).is_err());
         assert_eq!(
-            parse_spi_response(&[0, 3, 0, 0], 2).unwrap().status,
+            parse_spi_response(&[3, 0, 0], 2).unwrap().status,
             ProBusStatus::Busy
         );
     }
@@ -1861,14 +1859,14 @@ mod tests {
         assert!(encode_i2c_request(0x50, 100_000, &vec![0; I2C_MAX_WRITE + 1], 0).is_err());
         assert!(encode_i2c_request(0x50, 100_000, &[], I2C_MAX_READ + 1).is_err());
 
-        let parsed = parse_i2c_response(&[0, 0, 2, 0, 0xAA, 0xBB], 2).unwrap();
+        let parsed = parse_i2c_response(&[0, 2, 0, 0xAA, 0xBB], 2).unwrap();
         assert_eq!(parsed.status, ProBusStatus::Ok);
         assert_eq!(parsed.rx, [0xAA, 0xBB]);
         assert_eq!(
-            parse_i2c_response(&[0, 5, 0, 0], 1).unwrap().status,
+            parse_i2c_response(&[5, 0, 0], 1).unwrap().status,
             ProBusStatus::Nack
         );
-        assert!(parse_i2c_response(&[0, 0, 1, 0, 0xAA], 2).is_err());
+        assert!(parse_i2c_response(&[0, 1, 0, 0xAA], 2).is_err());
     }
 
     #[test]
