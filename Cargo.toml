@@ -3,12 +3,36 @@ name = "verge-probe"
 edition = "2024"
 license = "Apache-2.0"
 version = "0.1.0"
+description = "Host library for MCU-Link probes running Verge firmware"
 
 [dependencies]
-probe-rs = { version = "0.32.0", path = "../../../probe-rs/probe-rs" }
+dirs = "7.0.0"
+hex = "0.4.3"
+hidapi = "2.6.7"
+humantime = "2.4.0"
+minisign = { version = "0.10.0", optional = true }
+minisign-verify = "0.3.0"
+nusb = "0.2.8"
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+probe-rs = { version = "0.32.0", path = "../../probe-rs/probe-rs", default-features = false, features = ["builtin-targets", "builtin-formats", "coredump", "cmsisdap_v1"] }
+rblhost = "0.2.0"
+semver = "1.0.28"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+srec = "0.2.0"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+ureq = "3.4.2"
 
 [lints.rust]
 unsafe_code = "forbid"
 
-[workspace]
-resolver = "3"
+[lints.clippy]
+enum_glob_use = "deny"
+
+[features]
+simulate = ["dep:minisign"]
+
+[dev-dependencies]
+verge-probe = { path = ".", features = ["simulate"] }

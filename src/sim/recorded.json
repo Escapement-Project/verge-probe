@@ -1,0 +1,88 @@
+{
+ "source": "bench/throughput/2026-10-20-{clang,gcc,stock}.json in the firmware repository, the 'firmware' block of each, copied verbatim",
+ "records": [
+  {
+   "file": "2026-10-20-gcc.json",
+   "label": "gcc",
+   "taken": "2026-10-20T13:07:12+01:00",
+   "serial": "CJ3E7A91C2",
+   "dap_info": {
+    "vendor": "Escapement Project",
+    "product": "MCU-Link Verge CMSIS-DAP",
+    "serial": "CJ3E7A91C2",
+    "protocol version": "2.1.2",
+    "target device vendor": "",
+    "target device name": "",
+    "target board vendor": "",
+    "target board name": "",
+    "firmware version": "14d05d4",
+    "capabilities": "3700",
+    "test domain timer": 150000000,
+    "UART rx buffer": null,
+    "UART tx buffer": null,
+    "SWO trace buffer": 7168,
+    "max packet count": 3,
+    "max packet size": 512
+   },
+   "ours": {
+    "format": 2,
+    "flags": 61,
+    "build": "14d05d4"
+   }
+  },
+  {
+   "file": "2026-10-20-clang.json",
+   "label": "clang",
+   "taken": "2026-10-20T13:14:02+01:00",
+   "serial": "CJ3E7A91C2",
+   "dap_info": {
+    "vendor": "Escapement Project",
+    "product": "MCU-Link Verge CMSIS-DAP",
+    "serial": "CJ3E7A91C2",
+    "protocol version": "2.1.2",
+    "target device vendor": "",
+    "target device name": "",
+    "target board vendor": "",
+    "target board name": "",
+    "firmware version": "14d05d4",
+    "capabilities": "3700",
+    "test domain timer": 150000000,
+    "UART rx buffer": null,
+    "UART tx buffer": null,
+    "SWO trace buffer": 7168,
+    "max packet count": 3,
+    "max packet size": 512
+   },
+   "ours": {
+    "format": 2,
+    "flags": 61,
+    "build": "14d05d4"
+   }
+  },
+  {
+   "file": "2026-10-20-stock.json",
+   "label": "stock",
+   "taken": "2026-10-20T13:20:49+01:00",
+   "serial": "QK7RM2VTX8D41",
+   "dap_info": {
+    "vendor": "NXP Semiconductors",
+    "product": "MCU-Link CMSIS-DAP V3.172",
+    "serial": "QK7RM2VTX8D41",
+    "protocol version": "2.1.1",
+    "target device vendor": "",
+    "target device name": "",
+    "target board vendor": "",
+    "target board name": "",
+    "firmware version": "3.172",
+    "capabilities": "3701",
+    "test domain timer": 150000000,
+    "UART rx buffer": null,
+    "UART tx buffer": null,
+    "SWO trace buffer": 4096,
+    "max packet count": 8,
+    "max packet size": 512
+   },
+   "ours": null
+  }
+ ]
+}

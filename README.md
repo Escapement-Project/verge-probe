@@ -1,36 +1,61 @@
 # verge-probe
 
-Host-side operations for probes running Verge firmware. The crate builds on probe-rs and sends Verge
-commands through the same attached session used for target access. It includes typed helpers for
-firmware info and cJTAG scan-format selection (`0x82`–`0x83`), J8 pins (`0x84`), reboot (`0x85`),
-target sensing (`0x86`), SWD sampling and code lab (`0x87`–`0x88`), SWD/JTAG code generation and
-diagnostics (`0x89`–`0x8D`), DIO (`0x8E`), target power (`0x8F`) and energy capture (`0x90`). Code-lab
-calls require firmware built with `CODE_LAB`. The generic command method keeps newer or specialized
-firmware commands reachable through the same session.
+`verge-probe` is the shared library for the Verge CLI and GUI. It provides probe discovery,
+firmware identification, debug commands, GPIO and bus bridges, energy monitoring, reset and
+bootloader entry, firmware image and release handling, updates and batch operations. It contains
+no user interface.
 
-Install cJTAG support on the opened probe before selecting the cJTAG wire protocol and attaching.
-Then wrap the attached session when you need Verge operations. The wrapper also returns access to
-the ordinary probe-rs session:
+The library keeps update and ROM-bootloader operations behind its `Bus` API. For target debugging,
+it uses probe-rs. `VergeSession` adds typed commands for Verge firmware while keeping the attached
+probe-rs session available for normal target access:
 
-```rust
-use probe_rs::Permissions;
-use verge_probe::{VergeSession, install_cjtag_support, set_cjtag_scan_formats};
+```rust,no_run
+use verge_probe::probe_rs::{Permissions, probe::list::Lister};
+use verge_probe::{VergeProbe, VergeSession, install_cjtag_support};
 
-set_cjtag_scan_formats(&mut probe, scan_format_mask)?;
+let lister = Lister::new();
+let info = lister.list_all().into_iter().next().expect("no probe found");
+let mut probe = info.open()?;
 install_cjtag_support(&mut probe)?;
-let mut session = probe.attach(target, Permissions::default())?;
+{
+    let mut verge = VergeProbe::new(&mut probe);
+    let info = verge.info()?.expect("probe does not run Verge firmware");
+    if info.supports_target_power() {
+        verge.set_target_power(true)?;
+    }
+}
+let mut session = probe.attach("MSPM0L1306", Permissions::default())?;
 let mut verge = VergeSession::new(&mut session);
 let info = verge.info()?;
-let mut core = verge.session().core(0)?;
+let target_sense = verge.read_target_sense()?;
+let spi = verge.spi_transfer(100_000, verge_probe::SpiMode::Mode0, false, &[0xA5])?;
+let i2c = verge.i2c_transfer(0x50, 100_000, &[0], 2)?;
+let _target_core = verge.session().core(0)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Check this crate from a checkout that also has the probe-rs working tree:
+The same library exposes the workflows used by both frontends:
 
-```sh
-cargo check --manifest-path probe/Cargo.toml
+```rust,no_run
+use std::path::{Path, PathBuf};
+use verge_probe::{Source, UsbBus, detect, image::Image};
+
+let bus = UsbBus::default();
+let units = detect(&bus)?;
+let image = Image::from_path(Path::new("firmware.s19"))?;
+let source = Source::File(PathBuf::from("firmware.s19"));
+let _ = (units, source);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The manifest points to that neighboring checkout because the session vendor-command API and
-CMSIS-DAP cJTAG extension are not released yet. Replace the local path with the probe-rs revision or
-release that contains `Session::send_vendor_command` and `CmsisDapCjtagExtension` before building
-this crate elsewhere.
+`examples/pro_bridges.rs` shows capability checks, SPI/I2C result handling and a cancellable energy
+monitor loop. The monitor runs in the calling thread; UI code should run it in a worker. Firmware
+acquisition stays active between host polls, and the probe's accumulator covers pairs the host did
+not poll individually.
+
+Run the library tests with `cargo test --features simulate`. The simulation backend is available
+only with that feature; release builds leave it disabled.
+
+The probe-rs APIs needed for CMSIS-DAP vendor commands and cJTAG are not in a published release
+yet. During development, `Cargo.toml` points to the probe-rs checkout. The release dependency must
+pin the probe-rs commit that provides those APIs.
