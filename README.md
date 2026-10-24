@@ -48,10 +48,20 @@ let _ = (units, source);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`examples/pro_bridges.rs` shows capability checks, SPI/I2C result handling and a cancellable energy
-monitor loop. The monitor runs in the calling thread; UI code should run it in a worker. Firmware
-acquisition stays active between host polls, and the probe's accumulator covers pairs the host did
-not poll individually.
+`examples/pro_bridges.rs` requires a probe serial and runs only the operations named on its command
+line. It can send a one-byte SPI transfer, read one byte from a selected 7-bit I2C address, or run a
+cancellable energy monitor for five seconds. It does not change target power. The monitor runs in
+the calling thread; UI code should run it in a worker. Firmware acquisition stays active between
+host polls, and the probe's accumulator covers pairs the host did not poll individually.
+
+```sh
+cargo run --example pro_bridges -- CJ8C2F60A3 --spi
+cargo run --example pro_bridges -- CJ8C2F60A3 --i2c 0x50
+cargo run --example pro_bridges -- CJ8C2F60A3 --energy
+```
+
+Use `--i2c` only with a known device on the bridge pins. The example performs a read-only
+transaction.
 
 Run the library tests with `cargo test --features simulate`. The simulation backend is available
 only with that feature; release builds leave it disabled.
