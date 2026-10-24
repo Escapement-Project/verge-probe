@@ -107,18 +107,18 @@ dependencies = [
 
 [[package]]
 name = "bitfield"
-version = "0.19.5"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b45721c9db4c7a20899d05efb7ad9235f50b256e980db30ffb229abf732934c3"
+checksum = "2b56e92e42c7e82416925c583156d76ae1d3d83fa5133c379173319dbe1ad51e"
 dependencies = [
  "bitfield-macros",
 ]
 
 [[package]]
 name = "bitfield-macros"
-version = "0.19.5"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0cb6f3d4773a2107b94cbeccaa5b5f0b35a88389b5d522d13d659f64317b22d"
+checksum = "11499bf38d9079be6f0f993f9d033ab3cc4dbd66bd5a51a63b6310ea689f534b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1216,6 +1216,7 @@ checksum = "9a65843dfefbafd3c879c683306959a6de478443ffe9c9adf02f5976432402d7"
 [[package]]
 name = "probe-rs"
 version = "0.32.0"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=a0b3e56ab#a0b3e56ab3c7f1205d5971f8858aee754f2cdec4"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1248,6 +1249,7 @@ dependencies = [
 [[package]]
 name = "probe-rs-target"
 version = "0.32.0"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=a0b3e56ab#a0b3e56ab3c7f1205d5971f8858aee754f2cdec4"
 dependencies = [
  "base64",
  "bincode",
