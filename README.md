@@ -34,11 +34,16 @@ let _target_core = verge.session().core(0)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+SPI and I2C calls return received bytes on success. `CommandError` distinguishes transport errors
+from firmware failures. Energy readings are `Sample`, `NoSample` or `Stopped`; a sample contains
+the raw pair and any calibrated values.
+
 The same library exposes the workflows used by both frontends:
 
 ```rust,no_run
 use std::path::{Path, PathBuf};
-use verge_probe::{Source, UsbBus, detect, image::Image};
+use verge_probe::{Source, detect, image::Image};
+use verge_probe::usb::UsbBus;
 
 let bus = UsbBus::default();
 let units = detect(&bus)?;
@@ -69,6 +74,4 @@ transaction.
 Run the library tests with `cargo test --features simulate`. The simulation backend is available
 only with that feature; release builds leave it disabled.
 
-The probe-rs APIs needed for CMSIS-DAP vendor commands and cJTAG are not in a published release
-yet. During development, `Cargo.toml` points to the probe-rs checkout. The release dependency must
-pin the probe-rs commit that provides those APIs.
+`Cargo.toml` pins the probe-rs Git revision that provides CMSIS-DAP vendor commands and cJTAG.
