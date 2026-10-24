@@ -98,7 +98,7 @@ fn a_release_is_downloaded_only_when_agreed_and_then_kept() {
     let again = next
         .download(&release, Download::CachedOnly, &mut Quiet)
         .unwrap();
-    assert_eq!(again.chunks, image.chunks);
+    assert_eq!(again.chunks(), image.chunks());
     assert_eq!(downloads(&http), 3);
     std::fs::remove_dir_all(cache.root()).unwrap();
 }

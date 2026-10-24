@@ -18,9 +18,9 @@ fn elf_reads_as_objcopy_writes_it() {
     let srec = Image::from_path(&fixture("layout.s19")).unwrap();
     assert_eq!(elf.format, Format::Elf);
     assert_eq!(srec.format, Format::SRecord);
-    assert_eq!(elf.chunks, srec.chunks);
+    assert_eq!(elf.chunks(), srec.chunks());
     // The layout this fixture exists for: vectors, a gap, code with .data after it, and CPU 1.
-    let starts: Vec<u32> = srec.chunks.iter().map(|c| c.address).collect();
+    let starts: Vec<u32> = srec.chunks().iter().map(|c| c.address).collect();
     assert_eq!(starts, [0x0, 0x200, 0x40000]);
     assert_eq!(elf.page_runs(), srec.page_runs());
     elf.check_for_mculink().unwrap();
@@ -56,10 +56,10 @@ fn our_firmware_elf_reads_as_objcopy_writes_it() {
     let path = PathBuf::from(std::env::var("VERGE_FIRMWARE_ELF").expect("VERGE_FIRMWARE_ELF"));
     let elf = Image::from_path(&path).unwrap();
     let srec = objcopy_srec(&path, None);
-    assert_eq!(elf.chunks, srec.chunks);
+    assert_eq!(elf.chunks(), srec.chunks());
     elf.check_for_mculink().unwrap();
     assert!(
-        elf.chunks.iter().any(|c| c.address == 0x40000),
+        elf.chunks().iter().any(|c| c.address == 0x40000),
         "no CPU 1 image at 0x40000"
     );
 }
@@ -71,13 +71,13 @@ fn stock_srecord_reads_as_objcopy_reads_it() {
     let path = PathBuf::from(std::env::var("VERGE_STOCK_S19").expect("VERGE_STOCK_S19"));
     let ours = Image::from_path(&path).unwrap();
     let theirs = objcopy_srec(&path, Some("srec"));
-    assert_eq!(ours.chunks, theirs.chunks);
+    assert_eq!(ours.chunks(), theirs.chunks());
     ours.check_for_mculink().unwrap();
     println!(
         "{}: {} bytes in {} chunks, header {:?}",
         path.display(),
         ours.data_len(),
-        ours.chunks.len(),
+        ours.chunks().len(),
         ours.header
     );
 }

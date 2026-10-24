@@ -128,14 +128,20 @@ pub enum ImageError {
 pub struct Image {
     pub format: Format,
     /// Sorted by address, merged where they touch, none overlapping.
-    pub chunks: Vec<Chunk>,
+    chunks: Vec<Chunk>,
     /// The S0 header of an S-record.
     pub header: Option<String>,
     /// SHA-256 of the file as given, which is what a release's checksum covers.
-    pub file_sha256: [u8; 32],
+    file_sha256: [u8; 32],
 }
 
 impl Image {
+    /// The image's sorted, merged, nonoverlapping flash chunks.
+    #[must_use]
+    pub fn chunks(&self) -> &[Chunk] {
+        &self.chunks
+    }
+
     pub fn from_path(path: &Path) -> Result<Image, ImageError> {
         let bytes = std::fs::read(path).map_err(|error| ImageError::Read {
             path: path.display().to_string(),
@@ -628,6 +634,22 @@ mod tests {
         ]
         .concat();
         assert_eq!(parse(up_to_the_end), Ok(()));
+    }
+
+    #[test]
+    fn unordered_records_cannot_hide_data_outside_flash() {
+        let text = [
+            s3(0, &vectors(0x2001_0000, 0x9)),
+            s3(APP_FLASH_END, &[0xAA]),
+            s3(8, &[0x70, 0x47]),
+        ]
+        .concat();
+        let image = Image::parse(text.as_bytes()).unwrap();
+        assert_eq!(image.chunks().last().unwrap().address, APP_FLASH_END);
+        assert!(matches!(
+            image.check_for_mculink(),
+            Err(ImageError::OutsideFlash { .. })
+        ));
     }
 
     /// A declaration as the firmware lays it out, written out by hand: magic, format, length, two

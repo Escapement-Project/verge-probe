@@ -382,10 +382,21 @@ fn an_erased_page_read_drops_the_bootloader() {
 #[test]
 fn an_image_that_does_not_boot_is_reported() {
     // A valid vector table and no simulator marker: flashed and verified, then nothing enumerates.
-    let mut image = firmware_image(&ours("x"));
-    let code = &mut image.chunks[0].data;
-    let at = code.windows(6).position(|w| w == b"SIMFW:").unwrap();
-    code[at..at + 6].fill(0);
+    let image = firmware_image(&ours("x"));
+    let records: Vec<_> = image
+        .to_srecord("no simulator marker")
+        .lines()
+        .map(|line| {
+            let mut record: srec::Record = line.parse().unwrap();
+            if let srec::Record::S3(data) = &mut record
+                && let Some(at) = data.data.windows(6).position(|w| w == b"SIMFW:")
+            {
+                data.data[at..at + 6].fill(0);
+            }
+            record
+        })
+        .collect();
+    let image = verge_probe::Image::parse(srec::generate_srec_file(&records).as_bytes()).unwrap();
     image.check_for_mculink().unwrap();
     let bus = SimBus::scenario("isp").unwrap();
     let result = update::flash_now(

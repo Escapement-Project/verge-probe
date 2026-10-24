@@ -239,11 +239,11 @@ fn the_latest_release_downloads_and_checks_out() {
         .download(&release, Download::Agreed, &mut Quiet)
         .unwrap();
     assert_eq!(
-        image.chunks,
+        image.chunks(),
         firmware_image(&SimFirmware::Ours {
             build: "v0.3.0".into()
         })
-        .chunks
+        .chunks()
     );
     // Public downloads go to the public URLs and carry no token.
     assert!(http.requests().iter().all(|u| !u.contains("/assets/")));
@@ -613,11 +613,11 @@ fn an_old_signed_image_republished_under_a_newer_tag_is_refused() {
     );
     match loaded {
         Ok(loaded) => {
-            let is_old = loaded.image.chunks
+            let is_old = loaded.image.chunks()
                 == firmware_image(&SimFirmware::Ours {
                     build: "v0.2.0".into(),
                 })
-                .chunks;
+                .chunks();
             panic!(
                 "installed as {:?}, {}; image is v0.2.0's: {is_old}",
                 loaded.version, loaded.name

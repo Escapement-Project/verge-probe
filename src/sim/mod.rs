@@ -111,22 +111,17 @@ fn srecord(firmware: &SimFirmware, boards: Option<u32>) -> String {
     code.extend_from_slice(&[0x70, 0x47]); // bx lr, at the reset vector
     code.resize(0x1234, 0x5A);
     let core1 = vec![0xC1; 0x600];
-    let image = Image {
-        format: crate::image::Format::SRecord,
-        chunks: vec![
-            crate::image::Chunk {
-                address: 0,
-                data: code,
-            },
-            crate::image::Chunk {
-                address: 0x40000,
-                data: core1,
-            },
-        ],
-        header: None,
-        file_sha256: [0; 32],
-    };
-    image.to_srecord("simulated")
+    let mut records = vec![srec::Record::S0("simulated".into())];
+    for (base, data) in [(0, code), (0x40000, core1)] {
+        records.extend(data.chunks(32).enumerate().map(|(index, bytes)| {
+            srec::Record::S3(srec::Data {
+                address: srec::Address32(base + (index * 32) as u32),
+                data: bytes.to_vec(),
+            })
+        }));
+    }
+    records.push(srec::Record::S7(srec::Address32(0x200)));
+    srec::generate_srec_file(&records)
 }
 
 #[must_use]
