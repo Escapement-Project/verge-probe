@@ -21,34 +21,49 @@ use crate::protocol::{
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
-/// A result code returned by an energy-capture command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A transport or firmware failure from a typed command.
+#[derive(Debug, Error)]
+pub enum CommandError<E: std::error::Error + 'static> {
+    #[error(transparent)]
+    Probe(#[from] DebugProbeError),
+    #[error(transparent)]
+    Firmware(E),
+}
+
+/// A firmware failure from an energy-capture command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum EnergyStatus {
-    /// The operation succeeded.
-    Ok,
+pub enum EnergyError {
     /// Capture has not started or is stopped.
+    #[error("capture is stopped")]
     Stopped,
     /// Capture has started but has no valid pair yet.
+    #[error("capture has no sample yet")]
     NoSample,
     /// The operation is unavailable.
+    #[error("operation is unavailable")]
     Unavailable,
     /// The requested rate is unsupported.
+    #[error("unsupported capture rate")]
     BadRate,
     /// The request has an invalid argument.
+    #[error("invalid capture argument")]
     BadArgument,
     /// ADC calibration failed.
+    #[error("ADC calibration failed")]
     AdcError,
     /// DMA failed.
+    #[error("DMA failed")]
     DmaError,
     /// An unrecognized result code.
+    #[error("unknown firmware status {0:#04x}")]
     Unknown(u8),
 }
 
-impl EnergyStatus {
-    fn from_byte(value: u8) -> Self {
-        match value {
-            0 => Self::Ok,
+impl EnergyError {
+    fn check(value: u8) -> Result<(), Self> {
+        Err(match value {
+            0 => return Ok(()),
             1 => Self::Stopped,
             2 => Self::NoSample,
             3 => Self::Unavailable,
@@ -57,41 +72,45 @@ impl EnergyStatus {
             6 => Self::AdcError,
             7 => Self::DmaError,
             other => Self::Unknown(other),
-        }
+        })
     }
 }
 
-/// Result code returned by the Pro SPI and I2C bridges.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A firmware failure from a Pro SPI or I2C transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum ProBusStatus {
-    /// The transfer completed.
-    Ok,
+pub enum ProBusError {
     /// The bridge is unavailable on this board or with the current jumper setting.
+    #[error("operation is unavailable")]
     Unavailable,
     /// The request arguments are not supported.
+    #[error("invalid bridge arguments")]
     Invalid,
     /// Another firmware feature currently owns the bus pins.
+    #[error("bridge pins are busy")]
     Busy,
     /// The peripheral transfer failed.
+    #[error("peripheral transfer failed")]
     TransferError,
     /// The I2C target did not acknowledge.
+    #[error("I2C target did not acknowledge")]
     Nack,
     /// An unrecognized result code.
+    #[error("unknown firmware status {0:#04x}")]
     Unknown(u8),
 }
 
-impl ProBusStatus {
-    fn from_byte(value: u8) -> Self {
-        match value {
-            0 => Self::Ok,
+impl ProBusError {
+    fn check(value: u8) -> Result<(), Self> {
+        Err(match value {
+            0 => return Ok(()),
             1 => Self::Unavailable,
             2 => Self::Invalid,
             3 => Self::Busy,
             4 => Self::TransferError,
             5 => Self::Nack,
             other => Self::Unknown(other),
-        }
+        })
     }
 }
 
@@ -119,58 +138,22 @@ impl SpiMode {
     }
 }
 
-/// Result of one full-duplex Pro SPI transfer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpiTransferResult {
-    /// Firmware result code.
-    pub status: ProBusStatus,
-    /// Bytes received during the transfer.
-    pub rx: Vec<u8>,
-}
-
-/// Result of one Pro I2C transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct I2cTransferResult {
-    /// Firmware result code.
-    pub status: ProBusStatus,
-    /// Bytes read during the transaction.
-    pub rx: Vec<u8>,
-}
-
-/// Why a background energy monitor stopped.
+/// Why an energy monitor stopped.
 #[derive(Debug, Error)]
 pub enum EnergyMonitorError {
-    /// The polling interval must be greater than zero.
     #[error("energy monitor poll interval must be greater than zero")]
     InvalidPollInterval,
-    /// Sending the start request failed.
     #[error("starting energy capture failed: {0}")]
-    StartProbe(#[source] DebugProbeError),
-    /// The firmware refused to start capture.
-    #[error("energy capture start returned {0:?}")]
-    Start(EnergyStatus),
-    /// A poll failed. The monitor still attempted to stop capture.
+    Start(#[source] CommandError<EnergyError>),
     #[error("energy sample poll failed: {0}")]
-    Poll(#[source] DebugProbeError),
-    /// Polling failed and stopping capture also failed.
-    #[error("energy poll failed: {poll}; stopping capture returned {stop:?}")]
-    PollAndStop {
-        #[source]
-        poll: DebugProbeError,
-        stop: EnergyStatus,
-    },
-    /// Polling and stopping both failed at the probe transport.
+    Poll(#[source] CommandError<EnergyError>),
     #[error("energy poll failed: {poll}; stopping capture failed: {stop}")]
-    PollAndStopProbe {
-        poll: DebugProbeError,
-        stop: DebugProbeError,
+    PollAndStop {
+        poll: CommandError<EnergyError>,
+        stop: CommandError<EnergyError>,
     },
-    /// Stopping the probe failed.
     #[error("stopping energy capture failed: {0}")]
-    StopProbe(#[source] DebugProbeError),
-    /// The firmware refused to stop capture.
-    #[error("energy capture stop returned {0:?}")]
-    Stop(EnergyStatus),
+    Stop(#[source] CommandError<EnergyError>),
 }
 
 /// One raw voltage/current pair.
@@ -198,28 +181,28 @@ pub struct CalibratedEnergySample {
 /// Result of starting an energy capture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnergyCaptureStart {
-    /// Firmware result code.
-    pub status: EnergyStatus,
     /// Effective voltage/current pairs per second.
     pub actual_rate_pairs_per_second: u32,
 }
 
-/// Result of requesting the latest complete voltage/current pair.
+/// One complete voltage/current pair with optional calibration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EnergyCaptureSample {
-    /// Firmware result code.
-    pub status: EnergyStatus,
-    /// Raw pair when the result is `Ok`.
-    pub sample: Option<RawEnergySample>,
-    /// Calibrated values when advertised and valid.
+pub struct EnergySample {
+    pub raw: RawEnergySample,
     pub calibrated: Option<CalibratedEnergySample>,
+}
+
+/// The latest energy reading, including normal states without a sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnergyCaptureSample {
+    Sample(EnergySample),
+    NoSample,
+    Stopped,
 }
 
 /// Accumulated energy since the last successful capture start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnergyAccumulator {
-    /// Firmware result code.
-    pub status: EnergyStatus,
     /// Accumulated energy in nanojoules.
     pub energy_nanojoules: u64,
     /// Number of valid calibrated pairs included in the total.
@@ -684,10 +667,10 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         mode: SpiMode,
         lsb_first: bool,
         tx: &[u8],
-    ) -> Result<SpiTransferResult, DebugProbeError> {
+    ) -> Result<Vec<u8>, CommandError<ProBusError>> {
         self.require_capability(CAP_SPI, "SPI bridge")?;
         let request = encode_spi_request(clock_hz, mode, lsb_first, tx)?;
-        parse_spi_response(&self.send(SPI_COMMAND, &request)?, tx.len())
+        parse_bus_response(&self.send(SPI_COMMAND, &request)?, tx.len())
     }
 
     /// Runs one Pro I2C write, read, or combined write/read transaction.
@@ -697,10 +680,10 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         clock_hz: u32,
         write: &[u8],
         read_len: usize,
-    ) -> Result<I2cTransferResult, DebugProbeError> {
+    ) -> Result<Vec<u8>, CommandError<ProBusError>> {
         self.require_capability(CAP_I2C, "I2C bridge")?;
         let request = encode_i2c_request(address, clock_hz, write, read_len)?;
-        parse_i2c_response(&self.send(I2C_COMMAND, &request)?, read_len)
+        parse_bus_response(&self.send(I2C_COMMAND, &request)?, read_len)
     }
 
     /// Reboots the probe into its firmware or ROM bootloader.
@@ -719,7 +702,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     pub fn start_energy_capture(
         &mut self,
         rate_pairs_per_second: u32,
-    ) -> Result<EnergyCaptureStart, DebugProbeError> {
+    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
         let request = energy_capture_start_request(rate_pairs_per_second);
         parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
@@ -738,17 +721,13 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     ) -> Result<(), EnergyMonitorError>
     where
         Stop: FnMut() -> bool,
-        Sample: FnMut(EnergyCaptureSample),
+        Sample: FnMut(EnergySample),
     {
         if poll_interval.is_zero() {
             return Err(EnergyMonitorError::InvalidPollInterval);
         }
-        let start = self
-            .start_energy_capture(rate_pairs_per_second)
-            .map_err(EnergyMonitorError::StartProbe)?;
-        if start.status != EnergyStatus::Ok {
-            return Err(EnergyMonitorError::Start(start.status));
-        }
+        self.start_energy_capture(rate_pairs_per_second)
+            .map_err(EnergyMonitorError::Start)?;
 
         let mut last_sequence = None;
         let poll_result = loop {
@@ -760,16 +739,15 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
                 break Ok(());
             }
             match self.latest_energy_sample() {
-                Ok(sample) => {
-                    if sample.status == EnergyStatus::Ok
-                        && let Some(raw) = sample.sample
-                        && last_sequence != Some(raw.sequence)
-                    {
-                        last_sequence = Some(raw.sequence);
+                Ok(EnergyCaptureSample::Sample(sample)) => {
+                    if last_sequence != Some(sample.raw.sequence) {
+                        last_sequence = Some(sample.raw.sequence);
                         on_sample(sample);
-                    } else if !matches!(sample.status, EnergyStatus::Ok | EnergyStatus::NoSample) {
-                        break Err(protocol_error("energy sample acquisition failed"));
                     }
+                }
+                Ok(EnergyCaptureSample::NoSample) => {}
+                Ok(EnergyCaptureSample::Stopped) => {
+                    break Err(CommandError::Firmware(EnergyError::Stopped));
                 }
                 Err(error) => break Err(error),
             }
@@ -777,24 +755,24 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
 
         let stop_result = self.stop_energy_capture();
         match (poll_result, stop_result) {
-            (Err(poll), Ok(EnergyStatus::Ok)) => Err(EnergyMonitorError::Poll(poll)),
-            (Err(poll), Ok(status)) => Err(EnergyMonitorError::PollAndStop { poll, stop: status }),
-            (Err(poll), Err(stop)) => Err(EnergyMonitorError::PollAndStopProbe { poll, stop }),
-            (Ok(()), Err(error)) => Err(EnergyMonitorError::StopProbe(error)),
-            (Ok(()), Ok(EnergyStatus::Ok)) => Ok(()),
-            (Ok(()), Ok(status)) => Err(EnergyMonitorError::Stop(status)),
+            (Err(poll), Ok(())) => Err(EnergyMonitorError::Poll(poll)),
+            (Err(poll), Err(stop)) => Err(EnergyMonitorError::PollAndStop { poll, stop }),
+            (Ok(()), Err(error)) => Err(EnergyMonitorError::Stop(error)),
+            (Ok(()), Ok(())) => Ok(()),
         }
     }
 
     /// Stops voltage/current capture.
-    pub fn stop_energy_capture(&mut self) -> Result<EnergyStatus, DebugProbeError> {
+    pub fn stop_energy_capture(&mut self) -> Result<(), CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
         let response = self.send(ENERGY_COMMAND, &[2])?;
         parse_energy_status(&response)
     }
 
     /// Reads the latest complete voltage/current pair.
-    pub fn latest_energy_sample(&mut self) -> Result<EnergyCaptureSample, DebugProbeError> {
+    pub fn latest_energy_sample(
+        &mut self,
+    ) -> Result<EnergyCaptureSample, CommandError<EnergyError>> {
         let calibrated_supported = self
             .require_capability(CAP_ENERGY_CAPTURE, "energy capture")?
             .supports_calibrated_energy();
@@ -803,7 +781,9 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads the energy total without resetting it.
-    pub fn read_energy_accumulator(&mut self) -> Result<EnergyAccumulator, DebugProbeError> {
+    pub fn read_energy_accumulator(
+        &mut self,
+    ) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_ACCUMULATOR, "energy accumulator")?;
         let response = self.send(ENERGY_COMMAND, &[3])?;
         parse_energy_accumulator(&response)
@@ -1150,40 +1130,43 @@ fn energy_capture_start_request(rate_pairs_per_second: u32) -> [u8; 5] {
     request
 }
 
-fn parse_energy_capture_start(response: &[u8]) -> Result<EnergyCaptureStart, DebugProbeError> {
+fn parse_energy_capture_start(
+    response: &[u8],
+) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
     check_vendor_status(reader.u8()?)?;
+    let status = reader.u8()?;
+    let actual_rate_pairs_per_second = reader.u32()?;
+    EnergyError::check(status).map_err(CommandError::Firmware)?;
     Ok(EnergyCaptureStart {
-        status: EnergyStatus::from_byte(reader.u8()?),
-        actual_rate_pairs_per_second: reader.u32()?,
+        actual_rate_pairs_per_second,
     })
 }
 
-fn parse_energy_status(response: &[u8]) -> Result<EnergyStatus, DebugProbeError> {
+fn parse_energy_status(response: &[u8]) -> Result<(), CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
     check_vendor_status(reader.u8()?)?;
-    Ok(EnergyStatus::from_byte(reader.u8()?))
+    EnergyError::check(reader.u8()?).map_err(CommandError::Firmware)
 }
 
 fn parse_energy_capture_sample(
     response: &[u8],
     calibrated_supported: bool,
-) -> Result<EnergyCaptureSample, DebugProbeError> {
+) -> Result<EnergyCaptureSample, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
     check_vendor_status(reader.u8()?)?;
-    let status = EnergyStatus::from_byte(reader.u8()?);
+    let status = reader.u8()?;
     let raw_sample = RawEnergySample {
         voltage_code: reader.u16()?,
         current_code: reader.u16()?,
         sequence: reader.u32()?,
     };
-    let sample = (status == EnergyStatus::Ok).then_some(raw_sample);
     let calibrated = if calibrated_supported {
         let voltage_millivolts = reader.u32()?;
         let current_microamps = reader.i32()?;
         let range_id = reader.u8()?;
         let valid = read_bool(&mut reader, "calibrated-valid flag")?;
-        if status == EnergyStatus::Ok && valid {
+        if valid {
             Some(CalibratedEnergySample {
                 voltage_millivolts,
                 current_microamps,
@@ -1195,21 +1178,29 @@ fn parse_energy_capture_sample(
     } else {
         None
     };
-    Ok(EnergyCaptureSample {
-        status,
-        sample,
-        calibrated,
-    })
+    match EnergyError::check(status) {
+        Ok(()) => Ok(EnergyCaptureSample::Sample(EnergySample {
+            raw: raw_sample,
+            calibrated,
+        })),
+        Err(EnergyError::NoSample) => Ok(EnergyCaptureSample::NoSample),
+        Err(EnergyError::Stopped) => Ok(EnergyCaptureSample::Stopped),
+        Err(error) => Err(CommandError::Firmware(error)),
+    }
 }
 
-fn parse_energy_accumulator(response: &[u8]) -> Result<EnergyAccumulator, DebugProbeError> {
+fn parse_energy_accumulator(
+    response: &[u8],
+) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
     check_vendor_status(reader.u8()?)?;
-    Ok(EnergyAccumulator {
-        status: EnergyStatus::from_byte(reader.u8()?),
+    let status = reader.u8()?;
+    let accumulator = EnergyAccumulator {
         energy_nanojoules: reader.u64()?,
         integrated_pairs: reader.u64()?,
-    })
+    };
+    EnergyError::check(status).map_err(CommandError::Firmware)?;
+    Ok(accumulator)
 }
 
 fn encode_spi_request(
@@ -1235,27 +1226,24 @@ fn encode_spi_request(
     Ok(request)
 }
 
-fn parse_spi_response(
+fn parse_bus_response(
     response: &[u8],
     expected_count: usize,
-) -> Result<SpiTransferResult, DebugProbeError> {
-    let status = ProBusStatus::from_byte(response_byte(response, 0)?);
-    let count = usize::from(u16::from_le_bytes(response_array(response, 1..3)?));
+) -> Result<Vec<u8>, CommandError<ProBusError>> {
+    let mut reader = ResponseReader::new(response);
+    let status = reader.u8()?;
+    let count = usize::from(reader.u16()?);
     let data = response
         .get(3..3 + count)
-        .ok_or_else(|| protocol_error("short SPI data response"))?;
-    if status == ProBusStatus::Ok && count != expected_count {
-        return Err(protocol_error(
-            "SPI response length does not match the request",
-        ));
+        .ok_or_else(|| protocol_error("short bridge data response"))?;
+    if status == 0 && count != expected_count {
+        return Err(protocol_error("bridge response length does not match the request").into());
     }
-    if status != ProBusStatus::Ok && count != 0 {
-        return Err(protocol_error("failed SPI response contains data"));
+    if status != 0 && count != 0 {
+        return Err(protocol_error("failed bridge response contains data").into());
     }
-    Ok(SpiTransferResult {
-        status,
-        rx: data.to_vec(),
-    })
+    ProBusError::check(status).map_err(CommandError::Firmware)?;
+    Ok(data.to_vec())
 }
 
 fn encode_i2c_request(
@@ -1288,29 +1276,6 @@ fn encode_i2c_request(
     request.extend_from_slice(&read_count.to_le_bytes());
     request.extend_from_slice(write);
     Ok(request)
-}
-
-fn parse_i2c_response(
-    response: &[u8],
-    expected_count: usize,
-) -> Result<I2cTransferResult, DebugProbeError> {
-    let status = ProBusStatus::from_byte(response_byte(response, 0)?);
-    let count = usize::from(u16::from_le_bytes(response_array(response, 1..3)?));
-    let data = response
-        .get(3..3 + count)
-        .ok_or_else(|| protocol_error("short I2C data response"))?;
-    if status == ProBusStatus::Ok && count != expected_count {
-        return Err(protocol_error(
-            "I2C response length does not match the request",
-        ));
-    }
-    if status != ProBusStatus::Ok && count != 0 {
-        return Err(protocol_error("failed I2C response contains data"));
-    }
-    Ok(I2cTransferResult {
-        status,
-        rx: data.to_vec(),
-    })
 }
 
 fn parse_swd_codegen_state(response: &[u8]) -> Result<SwdCodegenState, DebugProbeError> {
@@ -1599,13 +1564,12 @@ mod tests {
             .is_err()
         );
 
-        let parsed = parse_spi_response(&[0, 2, 0, 0xA5, 0x5A], 2).unwrap();
-        assert_eq!(parsed.status, ProBusStatus::Ok);
-        assert_eq!(parsed.rx, [0xA5, 0x5A]);
-        assert!(parse_spi_response(&[0, 1, 0, 0xA5], 2).is_err());
+        let parsed = parse_bus_response(&[0, 2, 0, 0xA5, 0x5A], 2).unwrap();
+        assert_eq!(parsed, [0xA5, 0x5A]);
+        assert!(parse_bus_response(&[0, 1, 0, 0xA5], 2).is_err());
         assert_eq!(
-            parse_spi_response(&[3, 0, 0], 2).unwrap().status,
-            ProBusStatus::Busy
+            parse_bus_response(&[3, 0, 0], 2).unwrap_err().to_string(),
+            ProBusError::Busy.to_string()
         );
     }
 
@@ -1619,14 +1583,13 @@ mod tests {
         assert!(encode_i2c_request(0x50, 100_000, &vec![0; I2C_MAX_WRITE + 1], 0).is_err());
         assert!(encode_i2c_request(0x50, 100_000, &[], I2C_MAX_READ + 1).is_err());
 
-        let parsed = parse_i2c_response(&[0, 2, 0, 0xAA, 0xBB], 2).unwrap();
-        assert_eq!(parsed.status, ProBusStatus::Ok);
-        assert_eq!(parsed.rx, [0xAA, 0xBB]);
+        let parsed = parse_bus_response(&[0, 2, 0, 0xAA, 0xBB], 2).unwrap();
+        assert_eq!(parsed, [0xAA, 0xBB]);
         assert_eq!(
-            parse_i2c_response(&[5, 0, 0], 1).unwrap().status,
-            ProBusStatus::Nack
+            parse_bus_response(&[5, 0, 0], 1).unwrap_err().to_string(),
+            ProBusError::Nack.to_string()
         );
-        assert!(parse_i2c_response(&[0, 1, 0, 0xAA], 2).is_err());
+        assert!(parse_bus_response(&[0, 1, 0, 0xAA], 2).is_err());
     }
 
     #[test]
@@ -1651,6 +1614,8 @@ mod tests {
         latest.extend_from_slice(&3300u32.to_le_bytes());
         latest.extend_from_slice(&100i32.to_le_bytes());
         latest.extend_from_slice(&[0, 1]);
+        let mut next = latest.clone();
+        next[6..10].copy_from_slice(&8u32.to_le_bytes());
         let mut transport = FakeTransport {
             replies: [
                 info_reply(
@@ -1661,7 +1626,9 @@ mod tests {
                     CAP_ENERGY_CAPTURE | CAP_CALIBRATED_ENERGY,
                 ),
                 [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                latest.clone(),
                 latest,
+                next,
                 vec![0, 0],
             ]
             .into(),
@@ -1680,19 +1647,20 @@ mod tests {
                 || !stop.get(),
                 |sample| {
                     samples.push(sample);
-                    sample_running.set(false);
+                    sample_running.set(samples.len() < 2);
                 },
             )
             .unwrap();
 
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].sample.unwrap().sequence, 7);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[1].raw.sequence, 8);
+        assert_eq!(samples[0].raw.sequence, 7);
         assert_eq!(
             transport.commands[1],
             (ENERGY_COMMAND, vec![0, 0xE8, 3, 0, 0])
         );
         assert_eq!(transport.commands[2], (ENERGY_COMMAND, vec![1]));
-        assert_eq!(transport.commands[3], (ENERGY_COMMAND, vec![2]));
+        assert_eq!(transport.commands[5], (ENERGY_COMMAND, vec![2]));
     }
 
     #[test]
@@ -1720,6 +1688,72 @@ mod tests {
 
         assert!(matches!(error, EnergyMonitorError::Poll(_)));
         assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+    }
+
+    #[test]
+    fn energy_monitor_preserves_firmware_and_cleanup_errors() {
+        for status in [1, 3, 4, 5, 6, 7, 0x7f] {
+            for stop_reply in [vec![0, 0], vec![0, 7], vec![0]] {
+                let mut sample = vec![0; 10];
+                sample[1] = status;
+                let mut transport = FakeTransport {
+                    replies: [
+                        info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
+                        vec![0, 0, 0xe8, 3, 0, 0],
+                        sample,
+                        stop_reply.clone(),
+                    ]
+                    .into(),
+                    commands: Vec::new(),
+                };
+                let error = VergeControl::new(&mut transport)
+                    .monitor_energy(
+                        1000,
+                        Duration::from_millis(1),
+                        || false,
+                        |_| panic!("failed capture produced a sample"),
+                    )
+                    .unwrap_err();
+                let expected = EnergyError::check(status).unwrap_err();
+                match error {
+                    EnergyMonitorError::Poll(CommandError::Firmware(poll)) => {
+                        assert_eq!(poll, expected);
+                        assert_eq!(stop_reply, [0, 0]);
+                    }
+                    EnergyMonitorError::PollAndStop {
+                        poll: CommandError::Firmware(poll),
+                        stop,
+                    } => {
+                        assert_eq!(poll, expected);
+                        match stop {
+                            CommandError::Firmware(EnergyError::DmaError) => {
+                                assert_eq!(stop_reply, [0, 7])
+                            }
+                            CommandError::Probe(_) => assert_eq!(stop_reply, [0]),
+                            error => panic!("unexpected cleanup error: {error}"),
+                        }
+                    }
+                    error => panic!("unexpected monitor error: {error}"),
+                }
+                assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+            }
+        }
+    }
+
+    #[test]
+    fn bridge_errors_preserve_unknown_codes_and_reject_data() {
+        assert!(matches!(
+            parse_bus_response(&[0x7f, 0, 0], 1),
+            Err(CommandError::Firmware(ProBusError::Unknown(0x7f)))
+        ));
+        assert!(matches!(
+            parse_bus_response(&[5, 1, 0, 42], 1),
+            Err(CommandError::Probe(_))
+        ));
+        assert!(matches!(
+            parse_bus_response(&[0, 2, 0, 42], 2),
+            Err(CommandError::Probe(_))
+        ));
     }
 
     #[test]
@@ -1803,7 +1837,6 @@ mod tests {
         );
 
         let start = parse_energy_capture_start(&[0, 0, 0x78, 0x56, 0x34, 0x12]).unwrap();
-        assert_eq!(start.status, EnergyStatus::Ok);
         assert_eq!(start.actual_rate_pairs_per_second, 0x1234_5678);
 
         let mut accumulator_reply = vec![0, 0];
@@ -1824,15 +1857,18 @@ mod tests {
         reply.extend_from_slice(&(-1250i32).to_le_bytes());
         reply.extend_from_slice(&[3, 1]);
 
-        let sample = parse_energy_capture_sample(&reply, true).unwrap();
-        assert_eq!(sample.status, EnergyStatus::Ok);
+        let EnergyCaptureSample::Sample(sample) =
+            parse_energy_capture_sample(&reply, true).unwrap()
+        else {
+            panic!("expected sample")
+        };
         assert_eq!(
-            sample.sample,
-            Some(RawEnergySample {
+            sample.raw,
+            RawEnergySample {
                 voltage_code: 0x1234,
                 current_code: 0x5678,
                 sequence: 0x1122_3344,
-            })
+            }
         );
         assert_eq!(
             sample.calibrated,
@@ -1843,8 +1879,12 @@ mod tests {
             })
         );
 
-        let raw_only = parse_energy_capture_sample(&reply[..10], false).unwrap();
-        assert_eq!(raw_only.sample, sample.sample);
+        let EnergyCaptureSample::Sample(raw_only) =
+            parse_energy_capture_sample(&reply[..10], false).unwrap()
+        else {
+            panic!("expected raw sample")
+        };
+        assert_eq!(raw_only.raw, sample.raw);
         assert_eq!(raw_only.calibrated, None);
 
         let mut invalid_calibrated_flag = reply.clone();
@@ -1855,9 +1895,7 @@ mod tests {
         no_sample_reply[1] = 2;
         no_sample_reply[19] = 0;
         let no_sample = parse_energy_capture_sample(&no_sample_reply, true).unwrap();
-        assert_eq!(no_sample.status, EnergyStatus::NoSample);
-        assert_eq!(no_sample.sample, None);
-        assert_eq!(no_sample.calibrated, None);
+        assert_eq!(no_sample, EnergyCaptureSample::NoSample);
     }
 
     #[test]
@@ -1961,6 +1999,6 @@ mod tests {
     #[test]
     fn unknown_status_codes_are_preserved() {
         assert_eq!(VendorStatus::from_byte(0x7F), VendorStatus::Unknown(0x7F));
-        assert_eq!(EnergyStatus::from_byte(0x7F), EnergyStatus::Unknown(0x7F));
+        assert_eq!(EnergyError::check(0x7F), Err(EnergyError::Unknown(0x7F)));
     }
 }
