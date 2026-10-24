@@ -49,13 +49,15 @@ let _ = (units, source);
 ```
 
 `examples/pro_bridges.rs` requires a probe serial and runs only the operations named on its command
-line. It can send a one-byte SPI transfer, read one byte from a selected 7-bit I2C address, or run a
-cancellable energy monitor for five seconds. It does not change target power. The monitor runs in
-the calling thread; UI code should run it in a worker. Firmware acquisition stays active between
-host polls, and the probe's accumulator covers pairs the host did not poll individually.
+line. It can check GPIO direction and readback, send a one-byte SPI transfer, read one byte from a
+selected 7-bit I2C address, or run a cancellable energy monitor for five seconds. It does not change
+target power. The monitor runs in the calling thread; UI code should run it in a worker. Firmware
+acquisition stays active between host polls, and the probe's accumulator covers pairs the host did
+not poll individually.
 
 ```sh
 cargo run --example pro_bridges -- CJ8C2F60A3 --spi
+cargo run --example pro_bridges -- CJ8C2F60A3 --dio
 cargo run --example pro_bridges -- CJ8C2F60A3 --i2c 0x50
 cargo run --example pro_bridges -- CJ8C2F60A3 --energy
 ```
