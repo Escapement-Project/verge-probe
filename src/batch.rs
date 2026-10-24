@@ -415,6 +415,21 @@ pub fn open_record(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Appends complete JSON lines and flushes each result before the next unit starts.
+pub struct RecordWriter<W: std::io::Write>(W);
+
+impl<W: std::io::Write> RecordWriter<W> {
+    pub fn new(writer: W) -> Self {
+        Self(writer)
+    }
+
+    pub fn write(&mut self, record: &Record) -> std::io::Result<()> {
+        serde_json::to_writer(&mut self.0, record)?;
+        self.0.write_all(b"\n")?;
+        self.0.flush()
+    }
+}
+
 /// How many units the batch has met ended each way, each counted once, and how many wait their
 /// turn. A unit that did not restart counts as failed: it needs a person.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -1152,6 +1167,49 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_writer_reports_write_newline_and_flush_failures() {
+        struct Failing(&'static str);
+        impl std::io::Write for Failing {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.0 == "json" || (self.0 == "newline" && bytes == b"\n") {
+                    return Err(std::io::Error::other(self.0));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other(self.0))
+            }
+        }
+        let record = Record {
+            time: "2026-10-24T00:00:00Z".into(),
+            port: "1-1".into(),
+            serial_before: None,
+            firmware_before: "stock".into(),
+            serial_after: None,
+            firmware_after: None,
+            result: Settled::Updated,
+            reason: None,
+            seconds: None,
+        };
+        for phase in ["json", "newline", "flush"] {
+            assert_eq!(
+                RecordWriter::new(Failing(phase))
+                    .write(&record)
+                    .unwrap_err()
+                    .to_string(),
+                phase
+            );
+        }
+        let mut bytes = Vec::new();
+        RecordWriter::new(&mut bytes).write(&record).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["result"],
+            "updated"
+        );
+    }
 
     /// The names the README gives for the record's `result`.
     #[test]
