@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, SystemTime};
 
@@ -318,6 +319,13 @@ pub struct Entry {
     pub seen: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryState {
+    NotNeeded,
+    Pending,
+    Attempted,
+}
+
 /// A unit the batch has met, however often it left the bus and came back.
 #[derive(Clone, Debug)]
 struct Met {
@@ -325,9 +333,8 @@ struct Met {
     serials: Vec<String>,
     /// How it ended, as far as it has: see [`ended`].
     ended: Option<Settled>,
-    /// It did not come back from an update. `Some(true)` once it has been taken once more, after
-    /// which it is left alone.
-    lost: Option<bool>,
+    /// A unit that did not return gets one further attempt.
+    retry: RetryState,
     /// It ran ours when the batch saw it, so its serial is ours' and finds it again.
     ran_ours: bool,
 }
@@ -595,7 +602,7 @@ pub struct Batch<'b, B: Bus> {
     records: Vec<Record>,
     stop: Cancel,
     cancel: Cancel,
-    limit: Option<usize>,
+    limit: Option<NonZeroUsize>,
     updated: usize,
     /// Every unit the batch has met. An entry is forgotten when its unit leaves the bus; the unit
     /// stays here, so that it is counted once and known again if it comes back.
@@ -619,7 +626,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         timing: Timing,
         stop: Cancel,
         cancel: Cancel,
-        limit: Option<usize>,
+        limit: Option<NonZeroUsize>,
     ) -> Result<Batch<'b, B>, ArmError> {
         armed.check(&filter)?;
         Ok(Batch {
@@ -725,7 +732,8 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                 ..
             }
         );
-        let image_went_on = met.ended == Some(Settled::NotRestarted) || met.lost.is_some();
+        let image_went_on =
+            met.ended == Some(Settled::NotRestarted) || met.retry != RetryState::NotNeeded;
         let runs_image = *verdict == Verdict::Current
             || (self.armed.version == ImageVersion::Unknown
                 && runs_ours
@@ -738,7 +746,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
     /// between steps.
     #[must_use]
     pub fn finished(&self) -> bool {
-        self.stop.is_cancelled() || self.limit.is_some_and(|limit| self.updated >= limit)
+        self.stop.is_cancelled() || self.limit.is_some_and(|limit| self.updated >= limit.get())
     }
 
     fn entry(&mut self, port: &str) -> Option<&mut Entry> {
@@ -946,7 +954,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                         self.met.push(Met {
                             serials: Vec::new(),
                             ended: None,
-                            lost: None,
+                            retry: RetryState::NotNeeded,
                             ran_ours: false,
                         });
                         self.met.len() - 1
@@ -963,7 +971,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                     }
                 );
                 match verdict {
-                    Verdict::Take if met.lost == Some(true) => Status::Skipped(
+                    Verdict::Take if met.retry == RetryState::Attempted => Status::Skipped(
                         "it did not come back from its update, and failed again when it was taken once more, so the batch leaves it alone".into(),
                     ),
                     Verdict::Take => {
@@ -971,7 +979,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                         Status::Waiting
                     }
                     Verdict::Current => {
-                        met.lost = None;
+                        met.retry = RetryState::NotNeeded;
                         Status::Current
                     }
                     Verdict::Skip(reason) => Status::Skipped(reason),
@@ -1038,9 +1046,9 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         let started = self.bus.now();
         // A unit that did not come back is taken once more, and this is that time.
         let index = self.met_at.get(at).copied();
-        let was_lost = index.and_then(|i| self.met[i].lost);
-        if let (Some(i), Some(false)) = (index, was_lost) {
-            self.met[i].lost = Some(true);
+        let previous_retry = index.map_or(RetryState::NotNeeded, |i| self.met[i].retry);
+        if let (Some(i), RetryState::Pending) = (index, previous_retry) {
+            self.met[i].retry = RetryState::Attempted;
         }
         let finished = self.finished_units();
         let (inner, lit, period) = (self.bus.bus, self.lit, self.timing.poll);
@@ -1069,7 +1077,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         self.lit = lit;
         if matches!(result, Err(UpdateError::Stopped)) {
             if let Some(i) = index {
-                self.met[i].lost = was_lost;
+                self.met[i].retry = previous_retry;
             }
             self.queue.push_front(at.to_owned());
             return Ok(());
@@ -1084,9 +1092,14 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
             .and_then(|devices| devices.iter().find(|d| port(d) == at).cloned());
         if let Some(met) = index.and_then(|i| self.met.get_mut(i)) {
             match &result {
-                Ok(_) => met.lost = None,
+                Ok(_) => met.retry = RetryState::NotNeeded,
                 // The first time, it may be taken once more; after that, never.
-                Err(UpdateError::NoReturn(_)) => met.lost = Some(met.lost.is_some()),
+                Err(UpdateError::NoReturn(_)) => {
+                    met.retry = match met.retry {
+                        RetryState::NotNeeded => RetryState::Pending,
+                        _ => RetryState::Attempted,
+                    }
+                }
                 Err(_) => {}
             }
         }

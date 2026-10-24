@@ -151,7 +151,7 @@ fn blinking_beside_an_update_with_exclusive_opens() {
         timing,
         Cancel::new(),
         Cancel::new(),
-        Some(4),
+        std::num::NonZeroUsize::new(4),
     )
     .unwrap();
     let mut seen = Seen::default();

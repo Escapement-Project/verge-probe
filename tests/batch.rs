@@ -152,7 +152,7 @@ fn arm<B: Bus + Sync>(bus: &B, filter: Filter, limit: Option<usize>) -> Batch<'_
         Timing::default(),
         Cancel::new(),
         Cancel::new(),
-        limit,
+        limit.map(|count| std::num::NonZeroUsize::new(count).unwrap()),
     )
     .unwrap()
 }
@@ -1169,7 +1169,7 @@ fn a_finished_unit_keeps_blinking_while_another_updates() {
         timing,
         Cancel::new(),
         Cancel::new(),
-        Some(2),
+        std::num::NonZeroUsize::new(2),
     )
     .unwrap();
     let mut seen = Seen::default();

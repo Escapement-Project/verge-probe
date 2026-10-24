@@ -566,11 +566,25 @@ impl VergeTransport for Session {
     }
 }
 
+enum InfoCache {
+    Unread,
+    NotVerge,
+    Verge(VergeInfo),
+}
+
+impl InfoCache {
+    fn info(&self) -> Option<&VergeInfo> {
+        match self {
+            Self::Verge(info) => Some(info),
+            _ => None,
+        }
+    }
+}
+
 /// Verge firmware operations on an opened probe or an attached probe-rs session.
 pub struct VergeControl<'a, T: VergeTransport> {
     transport: &'a mut T,
-    info_loaded: bool,
-    info: Option<VergeInfo>,
+    info: InfoCache,
 }
 
 /// Verge commands sent through an opened probe, before attaching to its target.
@@ -584,26 +598,28 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     pub fn new(transport: &'a mut T) -> Self {
         Self {
             transport,
-            info_loaded: false,
-            info: None,
+            info: InfoCache::Unread,
         }
     }
 
     /// Reads the firmware identity and capabilities.
     pub fn info(&mut self) -> Result<Option<&VergeInfo>, DebugProbeError> {
-        if !self.info_loaded {
+        if matches!(self.info, InfoCache::Unread) {
             self.refresh_info()?;
         }
-        Ok(self.info.as_ref())
+        Ok(self.info.info())
     }
 
     /// Reads firmware identity and capabilities again, replacing the cached values.
     pub fn refresh_info(&mut self) -> Result<Option<&VergeInfo>, DebugProbeError> {
-        self.info = read_info(&mut |command_id, payload| {
+        let info = read_info(&mut |command_id, payload| {
             self.transport.send_vendor_command(command_id, payload)
         })?;
-        self.info_loaded = true;
-        Ok(self.info.as_ref())
+        self.info = match info {
+            Some(info) => InfoCache::Verge(info),
+            None => InfoCache::NotVerge,
+        };
+        Ok(self.info.info())
     }
 
     /// Sends a Verge vendor command directly for firmware features without a typed wrapper.
@@ -1542,6 +1558,41 @@ mod tests {
             transport.commands,
             [(INFO_COMMAND, vec![]), (TARGET_POWER_COMMAND, vec![1])]
         );
+    }
+
+    #[test]
+    fn identity_cache_remembers_absence_and_refreshes_it() {
+        let mut transport = FakeTransport {
+            replies: [Vec::new(), info_reply(6, CAP_DIO, 1, 0, 0)].into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+        assert!(verge.info().unwrap().is_none());
+        assert!(verge.info().unwrap().is_none());
+        assert!(verge.refresh_info().unwrap().unwrap().supports_dio());
+        assert!(verge.info().unwrap().unwrap().supports_dio());
+        assert_eq!(transport.commands.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_identity_read_can_be_retried() {
+        struct Flaky(u8);
+        impl VergeTransport for Flaky {
+            fn send_vendor_command(&mut self, _: u8, _: &[u8]) -> Result<Vec<u8>, DebugProbeError> {
+                self.0 += 1;
+                if self.0 == 1 {
+                    Err(protocol_error("read failed"))
+                } else {
+                    Ok(info_reply(6, CAP_DIO, 1, 0, 0))
+                }
+            }
+        }
+        let mut transport = Flaky(0);
+        let mut verge = VergeControl::new(&mut transport);
+        assert!(verge.info().is_err());
+        assert!(verge.info().unwrap().unwrap().supports_dio());
+        assert!(verge.info().unwrap().unwrap().supports_dio());
+        assert_eq!(transport.0, 2);
     }
 
     #[test]
