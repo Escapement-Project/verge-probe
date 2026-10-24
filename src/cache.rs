@@ -3,6 +3,7 @@
 //! it is used, as a fresh download is ([`crate::release::GitHub::download`]), so deleting the
 //! cache is always safe.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::release::{Asset, Release, Repo};
@@ -57,13 +58,12 @@ impl Cache {
     pub fn write(&self, repo: &Repo, tag: &str, name: &str, bytes: &[u8]) -> std::io::Result<()> {
         let dir = self.release_dir(repo, tag);
         std::fs::create_dir_all(&dir)?;
-        let partial = dir.join(format!(
-            ".{}.{}.partial",
-            component(name),
-            std::process::id()
-        ));
-        std::fs::write(&partial, bytes)?;
-        std::fs::rename(&partial, self.path(repo, tag, name))
+        let mut partial = tempfile::NamedTempFile::new_in(dir)?;
+        partial.write_all(bytes)?;
+        partial
+            .persist(self.path(repo, tag, name))
+            .map(|_| ())
+            .map_err(|error| error.error)
     }
 
     /// Deletes every cached asset of `repo`'s release `tag`.
@@ -106,6 +106,50 @@ fn component(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_cache_writes_publish_one_complete_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::at(dir.path());
+        let repo = Repo::default();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for byte in 0..8 {
+                let (cache, repo, barrier) = (&cache, &repo, &barrier);
+                scope.spawn(move || {
+                    let bytes = vec![byte; 1 << 20];
+                    barrier.wait();
+                    cache.write(repo, "v1", "image", &bytes).unwrap();
+                });
+            }
+        });
+        let bytes = std::fs::read(cache.path(&repo, "v1", "image")).unwrap();
+        assert_eq!(bytes.len(), 1 << 20);
+        assert!(bytes.iter().all(|&byte| byte == bytes[0]));
+        assert_eq!(
+            std::fs::read_dir(cache.release_dir(&repo, "v1"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_failed_cache_rename_removes_its_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::at(dir.path());
+        let repo = Repo::default();
+        let destination = cache.path(&repo, "v1", "image");
+        std::fs::create_dir_all(&destination).unwrap();
+        assert!(cache.write(&repo, "v1", "image", b"image bytes").is_err());
+        assert!(destination.is_dir());
+        assert_eq!(
+            std::fs::read_dir(cache.release_dir(&repo, "v1"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn no_name_leaves_its_directory() {
