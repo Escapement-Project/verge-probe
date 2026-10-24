@@ -144,7 +144,7 @@ impl Hardware {
     /// the plain board.
     #[must_use]
     pub fn from_ours(ours: &Ours) -> Hardware {
-        match ours.board {
+        match ours.board.map(crate::BoardKind::number) {
             None => Hardware::Board(Board::McuLink),
             Some(number) => match Board::from_number(number) {
                 Some(board) => Hardware::Board(board),
@@ -192,7 +192,7 @@ impl Unit {
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } => Some(Build::parse(&ours.build)),
+            } => Some(Build::parse(&ours.firmware)),
             _ => None,
         }
     }
@@ -235,11 +235,11 @@ impl fmt::Display for State {
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } if ours.build.is_empty() => write!(f, "ours, identify format {}", ours.format),
+            } if ours.firmware.is_empty() => write!(f, "ours, identify format {}", ours.version),
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } => write!(f, "ours, build {}", ours.build),
+            } => write!(f, "ours, build {}", ours.firmware),
             State::Probe {
                 firmware: Firmware::Stock { version: Some(v) },
                 ..

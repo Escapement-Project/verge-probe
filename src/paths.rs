@@ -209,11 +209,12 @@ mod tests {
         unit(State::Probe {
             identity: Identity::default(),
             firmware: Firmware::Ours(Ours {
-                format: 2,
-                flags: 0,
-                build: "14d05d4".into(),
+                version: 2,
+                capabilities: 0,
+                firmware: "14d05d4".into(),
                 board: None,
-                scan_formats: None,
+                scan_formats: 0,
+                extended_capabilities: 0,
             }),
         })
     }

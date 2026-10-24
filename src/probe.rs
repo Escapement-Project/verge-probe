@@ -10,164 +10,16 @@ use probe_rs::{
 use std::time::Duration;
 use thiserror::Error;
 
-const INFO_COMMAND: u8 = 0x82;
-const CJTAG_CONTROL_COMMAND: u8 = 0x83;
-const ENERGY_COMMAND: u8 = 0x90;
-const TARGET_SENSE_COMMAND: u8 = 0x86;
-const TARGET_POWER_COMMAND: u8 = 0x8F;
-const DIO_COMMAND: u8 = 0x8E;
-const REBOOT_COMMAND: u8 = 0x85;
-const J8_COMMAND: u8 = 0x84;
-const SAMPLE_COMMAND: u8 = 0x87;
-const CODE_LAB_COMMAND: u8 = 0x88;
-const SWD_CODEGEN_COMMAND: u8 = 0x89;
-const JTAG_CODEGEN_COMMAND: u8 = 0x8A;
-const JTAG_PACING_COMMAND: u8 = 0x8B;
-const CPU_STAGING_COMMAND: u8 = 0x8C;
-const JTAG_LOG_COMMAND: u8 = 0x8D;
-const SPI_COMMAND: u8 = 0x91;
-const I2C_COMMAND: u8 = 0x92;
-const CAP_OSCAN1: u8 = 1 << 0;
-const CAP_OSCAN1_ACTIVE: u8 = 1 << 1;
-const CAP_OSCAN1_AFTER_ACTIVATION: u8 = 1 << 4;
-const CAP_TARGET_SENSE: u8 = 1 << 2;
-const CAP_SWD_CODEGEN: u8 = 1 << 3;
-const CAP_JTAG_CODEGEN: u8 = 1 << 5;
-const CAP_DIO: u8 = 1 << 6;
-const CAP_TARGET_POWER: u8 = 1 << 7;
-const CAP_ENERGY_CAPTURE: u32 = 1 << 0;
-const CAP_CALIBRATED_ENERGY: u32 = 1 << 1;
-const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
-const CAP_SPI: u32 = 1 << 3;
-const CAP_I2C: u32 = 1 << 4;
-const SPI_SOURCE_HZ: u32 = 96_000_000;
-const SPI_MIN_CLOCK_HZ: u32 = SPI_SOURCE_HZ / 4096;
-const SPI_MAX_CLOCK_HZ: u32 = SPI_SOURCE_HZ / 2;
-const I2C_MIN_CLOCK_HZ: u32 = 10_000;
-const I2C_MAX_CLOCK_HZ: u32 = 1_000_000;
-const SPI_MAX_TRANSFER: usize = 504;
-const I2C_MAX_WRITE: usize = 502;
-const I2C_MAX_READ: usize = 508;
-const TAP_RUN_TEST_IDLE: u8 = 1;
-const SAMPLE_FILL_MAX: u8 = 32;
-
-/// Firmware identity and capabilities returned by vendor command `0x82`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VergeInfo {
-    /// Info format version.
-    pub version: u8,
-    /// Firmware capability byte.
-    pub capabilities: u8,
-    /// Firmware build string.
-    pub firmware: String,
-    /// Board kind reported by info format version 3 and later.
-    pub board: Option<BoardKind>,
-    /// Bit `n` is set when the probe frames scan format `n`.
-    pub scan_formats: u32,
-    /// Energy and other extended capability bits.
-    pub extended_capabilities: u32,
-}
-
-/// Board kind reported by Verge firmware info.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum BoardKind {
-    /// Standalone MCU-Link probe.
-    Plain,
-    /// MCU-Link Pro.
-    Pro,
-    /// MCU-Link integrated on a development board.
-    OnBoard,
-    /// A board kind added by a newer firmware.
-    Unknown(u8),
-}
-
-impl BoardKind {
-    fn from_byte(value: u8) -> Self {
-        match value {
-            0 => Self::Plain,
-            1 => Self::Pro,
-            2 => Self::OnBoard,
-            other => Self::Unknown(other),
-        }
-    }
-}
-
-impl VergeInfo {
-    /// Whether the firmware frames OScan1 after host activation.
-    pub fn frames_after_host_activation(&self) -> bool {
-        self.capabilities & CAP_OSCAN1_AFTER_ACTIVATION != 0
-    }
-
-    /// Whether the firmware frames `format` after host activation.
-    pub fn frames(&self, format: ScanFormat) -> bool {
-        if format == ScanFormat::OScan1 {
-            self.frames_after_host_activation()
-        } else {
-            self.scan_formats & (1 << format.number()) != 0
-        }
-    }
-
-    /// Whether the firmware implements OScan1 framing.
-    pub fn supports_oscan1(&self) -> bool {
-        self.capabilities & CAP_OSCAN1 != 0
-    }
-
-    /// Whether the firmware has OScan1 framing active.
-    pub fn oscan1_active(&self) -> bool {
-        self.capabilities & CAP_OSCAN1_ACTIVE != 0
-    }
-
-    /// Whether the firmware supports target sensing.
-    pub fn supports_target_sense(&self) -> bool {
-        self.capabilities & CAP_TARGET_SENSE != 0
-    }
-
-    /// Whether the firmware can generate SWD paths.
-    pub fn supports_swd_codegen(&self) -> bool {
-        self.capabilities & CAP_SWD_CODEGEN != 0
-    }
-
-    /// Whether the firmware can generate JTAG paths.
-    pub fn supports_jtag_codegen(&self) -> bool {
-        self.capabilities & CAP_JTAG_CODEGEN != 0
-    }
-
-    /// Whether the firmware exposes its DIO pins.
-    pub fn supports_dio(&self) -> bool {
-        self.capabilities & CAP_DIO != 0
-    }
-
-    /// Whether the firmware can switch the target supply.
-    pub fn supports_target_power(&self) -> bool {
-        self.capabilities & CAP_TARGET_POWER != 0
-    }
-
-    /// Whether the firmware supports voltage/current capture.
-    pub fn supports_energy_capture(&self) -> bool {
-        self.extended_capabilities & CAP_ENERGY_CAPTURE != 0
-    }
-
-    /// Whether latest-sample replies contain calibrated fields.
-    pub fn supports_calibrated_energy(&self) -> bool {
-        self.extended_capabilities & CAP_CALIBRATED_ENERGY != 0
-    }
-
-    /// Whether the firmware supports reading its accumulated energy counter.
-    pub fn supports_energy_accumulator(&self) -> bool {
-        self.extended_capabilities & CAP_ENERGY_ACCUMULATOR != 0
-    }
-
-    /// Whether the firmware exposes the Pro SPI bridge.
-    pub fn supports_spi(&self) -> bool {
-        self.extended_capabilities & CAP_SPI != 0
-    }
-
-    /// Whether the firmware exposes the Pro I2C bridge.
-    pub fn supports_i2c(&self) -> bool {
-        self.extended_capabilities & CAP_I2C != 0
-    }
-}
+use crate::protocol::{
+    self, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_SPI,
+    CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND,
+    CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MAX_READ,
+    I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND,
+    JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, REBOOT_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX,
+    SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER, SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND,
+    TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+};
+pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
 /// A result code returned by an energy-capture command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,23 +239,6 @@ pub struct TargetSenseReading {
     pub detected: bool,
 }
 
-/// State of the Verge Pro's DIO pins.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DioState {
-    /// Whether the requested pin update was accepted.
-    pub status: VendorStatus,
-    /// Pins currently configured as outputs.
-    pub outputs: u8,
-    /// Output latch values.
-    pub levels: u8,
-    /// Sampled pin levels.
-    pub read: u8,
-    /// Pins present on this board.
-    pub pins: u8,
-    /// Pin masks that must change direction together.
-    pub groups: Vec<u8>,
-}
-
 /// Verge firmware reboot destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RebootMode {
@@ -593,28 +428,6 @@ pub struct CodegenMeasurement {
     pub consistent_latencies: u64,
     /// Failed connections recovered by the sweep.
     pub rescues: u32,
-}
-
-/// Result status reported by a Verge vendor command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum VendorStatus {
-    /// The firmware accepted the request.
-    Ok,
-    /// The firmware refused the request.
-    Error,
-    /// An unrecognized status byte.
-    Unknown(u8),
-}
-
-impl VendorStatus {
-    fn from_byte(value: u8) -> Self {
-        match value {
-            0 => Self::Ok,
-            0xFF => Self::Error,
-            other => Self::Unknown(other),
-        }
-    }
 }
 
 /// Position at which the SWD sample instrument samples SWDIO.
@@ -860,24 +673,8 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         levels: u8,
     ) -> Result<DioState, DebugProbeError> {
         self.require_flag(CAP_DIO, "DIO pins")?;
-        let response = self.send(DIO_COMMAND, &[mask, outputs & mask, levels & mask])?;
-        if response.len() < 6 {
-            return Err(protocol_error("short DIO response"));
-        }
-        let status = VendorStatus::from_byte(response_byte(&response, 0)?);
-        let groups_len = usize::from(response[5]);
-        let groups = response
-            .get(6..6 + groups_len)
-            .ok_or_else(|| protocol_error("short DIO groups response"))?
-            .to_vec();
-        Ok(DioState {
-            status,
-            outputs: response[1],
-            levels: response[2],
-            read: response[3],
-            pins: response[4],
-            groups,
-        })
+        let response = self.send(DIO_COMMAND, &protocol::encode_dio(mask, outputs, levels))?;
+        protocol::decode_dio(&response).map_err(protocol_error)
     }
 
     /// Runs one full-duplex transaction on the Pro SPI bridge.
@@ -1292,8 +1089,7 @@ pub fn set_cjtag_scan_formats(
     probe: &mut Probe,
     formats: u32,
 ) -> Result<VendorStatus, DebugProbeError> {
-    let mut request = vec![4];
-    request.extend_from_slice(&formats.to_le_bytes());
+    let request = protocol::encode_scan_formats(formats);
     let response = probe.send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?;
     Ok(VendorStatus::from_byte(response_byte(&response, 0)?))
 }
@@ -1341,44 +1137,7 @@ fn read_info(
     send_vendor_command: &mut VendorCommandSender<'_>,
 ) -> Result<Option<VergeInfo>, DebugProbeError> {
     let reply = send_vendor_command(INFO_COMMAND, &[])?;
-    let Some(rest) = reply.strip_prefix(b"CJTAG") else {
-        return Ok(None);
-    };
-    let version = response_byte(rest, 0)?;
-    let capabilities = response_byte(rest, 1)?;
-    let build_len = usize::from(response_byte(rest, 2)?);
-    let build = rest
-        .get(3..3 + build_len)
-        .ok_or_else(|| protocol_error("short firmware build field"))?;
-    let mut fields = 3 + build_len;
-    let board = if version >= 3 {
-        let board = response_byte(rest, fields)?;
-        fields += 1;
-        Some(BoardKind::from_byte(board))
-    } else {
-        None
-    };
-    let after_board = rest
-        .get(fields..)
-        .ok_or_else(|| protocol_error("short cJTAG info reply"))?;
-    let scan_formats = if version >= 4 {
-        u32::from_le_bytes(response_array(after_board, 0..4)?)
-    } else {
-        0
-    };
-    let extended_capabilities = if version >= 6 {
-        u32::from_le_bytes(response_array(after_board, 4..8)?)
-    } else {
-        0
-    };
-    Ok(Some(VergeInfo {
-        version,
-        capabilities,
-        firmware: String::from_utf8_lossy(build).into_owned(),
-        board,
-        scan_formats,
-        extended_capabilities,
-    }))
+    protocol::decode_info(&reply).map_err(protocol_error)
 }
 
 fn check_dap_status(response: &[u8]) -> Result<(), DebugProbeError> {
@@ -1761,6 +1520,7 @@ fn protocol_error(message: &str) -> DebugProbeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::CAP_CALIBRATED_ENERGY;
     use std::collections::VecDeque;
 
     struct FakeTransport {
@@ -1978,11 +1738,51 @@ mod tests {
             };
             let info = read_info(&mut send).unwrap().unwrap();
             assert_eq!(info.version, version);
-            assert_eq!(info.capabilities, 0xA5);
-            assert_eq!(info.firmware, "test-build");
+            assert_eq!(info.capabilities, if version < 2 { 0 } else { 0xA5 });
+            assert_eq!(info.firmware, if version < 2 { "" } else { "test-build" });
             assert_eq!(info.board, board);
             assert_eq!(info.scan_formats, scan_formats);
             assert_eq!(info.extended_capabilities, extended_capabilities);
+        }
+    }
+
+    #[test]
+    fn both_transports_decode_the_same_identity_and_gpio_payloads() {
+        for payload in [
+            b"CJTAG\x01".to_vec(),
+            info_reply(3, CAP_DIO, 1, 0, 0),
+            info_reply(6, CAP_TARGET_POWER, 1, 0x600, 0x1f),
+            b"CJTAG\x06\x00\x05x".to_vec(),
+            Vec::new(),
+        ] {
+            let mut packet = vec![INFO_COMMAND];
+            packet.extend_from_slice(&payload);
+            let raw = crate::dap::parse_identify(&packet);
+            let mut send = |_, _: &[u8]| Ok(payload.clone());
+            let probe = read_info(&mut send);
+            match (raw, probe) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b),
+                (Err(_), Err(_)) => {}
+                replies => panic!("decoders disagree: {replies:?}"),
+            }
+        }
+        for payload in [
+            vec![0, 7, 5, 13, 15, 2, 7, 8],
+            vec![0x42, 0, 0, 0, 0, 0],
+            vec![0],
+        ] {
+            let mut packet = vec![DIO_COMMAND];
+            packet.extend_from_slice(&payload);
+            let mut transport = FakeTransport {
+                replies: [info_reply(6, CAP_DIO, 1, 0, 0), payload].into(),
+                commands: Vec::new(),
+            };
+            let probe = VergeControl::new(&mut transport).access_dio(0, 0, 0);
+            match (crate::dap::parse_dio(&packet), probe) {
+                (Ok(Some(a)), Ok(b)) => assert_eq!(a, b),
+                (Err(_), Err(_)) => {}
+                replies => panic!("decoders disagree: {replies:?}"),
+            }
         }
     }
 

@@ -222,7 +222,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             firmware: Firmware::Ours(ours),
             ..
         } => {
-            let build = Build::parse(&ours.build);
+            let build = Build::parse(&ours.firmware);
             if let ImageVersion::Ours(tag) = version
                 && build.compare(tag) == Relation::UpToDate
             {

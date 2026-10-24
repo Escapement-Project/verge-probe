@@ -581,7 +581,7 @@ fn from_release_to_running() {
     else {
         panic!("{:?}", back.state);
     };
-    assert_eq!(ours.build, release.tag);
+    assert_eq!(ours.firmware, release.tag);
     assert_eq!(
         back.build().unwrap().compare(&release.tag),
         Relation::UpToDate

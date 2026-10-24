@@ -16,7 +16,7 @@ fn a_pro_keeps_its_dio_pins_until_it_restarts() {
 
     let mut link = bus.open_dap(&device).unwrap();
     let set = dap::dio(&mut link, 0x0F, 0x08, 0x08).unwrap().unwrap();
-    assert!(set.accepted);
+    assert!(set.accepted());
     drop(link);
 
     // Another host, later, sees what the first left driving.

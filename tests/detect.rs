@@ -71,9 +71,15 @@ fn the_bench_reads_back_as_recorded() {
         );
         match (firmware, &record["ours"]) {
             (Firmware::Ours(ours), Value::Object(recorded)) => {
-                assert_eq!(u64::from(ours.format), recorded["format"].as_u64().unwrap());
-                assert_eq!(u64::from(ours.flags), recorded["flags"].as_u64().unwrap());
-                assert_eq!(ours.build, recorded["build"].as_str().unwrap());
+                assert_eq!(
+                    u64::from(ours.version),
+                    recorded["format"].as_u64().unwrap()
+                );
+                assert_eq!(
+                    u64::from(ours.capabilities),
+                    recorded["flags"].as_u64().unwrap()
+                );
+                assert_eq!(ours.firmware, recorded["build"].as_str().unwrap());
             }
             (Firmware::Stock { version }, Value::Null) => {
                 assert_eq!(*version, StockVersion::parse("3.172"));

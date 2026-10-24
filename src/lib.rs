@@ -35,5 +35,7 @@ pub use progress::{Cancel, Progress, Step};
 pub use source::{Loaded, Source};
 pub use update::{Outcome, Timing, UpdateError};
 
+mod protocol;
+
 pub mod probe;
 pub use probe::*;

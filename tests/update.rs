@@ -121,7 +121,7 @@ fn ours_updates_itself_without_the_jumper() {
     let Firmware::Ours(now) = running(&outcome) else {
         panic!("{outcome:?}");
     };
-    assert_eq!(now.build, "v0.3.0");
+    assert_eq!(now.firmware, "v0.3.0");
     let started: Vec<Step> = steps.started.iter().map(|s| s.0).collect();
     assert_eq!(started, steps.plan);
 
@@ -158,7 +158,7 @@ fn stock_takes_the_request_linkserver_sends() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
     // Its serial changes with the firmware, so the tool finds it by port, not by serial.
     let Outcome::Running(back) = &outcome else {
         unreachable!()
@@ -311,7 +311,7 @@ fn the_jumper_path_flashes_and_says_the_jumper_is_still_on() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn a_unit_back_between_two_looks_at_the_bus_is_seen() {
         if jumper {
             assert_eq!(outcome, Outcome::JumperStillFitted);
         } else {
-            assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+            assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
         }
     }
 }
@@ -440,7 +440,7 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn without_ports_the_unit_back_is_taken_only_as_the_one_new_device() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
 
     // The stranger is the first unit on the bench, so it is listed first.
     let bus = SimBus::default();
@@ -679,7 +679,7 @@ fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
 }
 
 /// Where a device that comes back gets a new instance, a bootloader still there under its own
@@ -830,7 +830,7 @@ fn the_update_itself_checks_the_board() {
         &Cancel::new(),
     )
     .unwrap();
-    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
 
     let back = detect(&bus).unwrap().remove(0);
     let stock_image = firmware_image(&stock("3.172"));

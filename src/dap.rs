@@ -12,10 +12,10 @@ pub const ID_DAP_INVALID: u8 = 0xFF;
 pub const DAP_OK: u8 = 0x00;
 
 /// Ours answers this with its identity; stock does not know it.
-pub const VENDOR_IDENTIFY: u8 = 0x82;
+pub const VENDOR_IDENTIFY: u8 = crate::protocol::INFO_COMMAND;
 /// Ours' two-pin (cJTAG) control. Mode 4 sets the scan formats the unit offers a host until it
 /// restarts: a little-endian mask after the mode, bit n for SCNFMT n.
-pub const VENDOR_CJTAG_CONTROL: u8 = 0x83;
+pub const VENDOR_CJTAG_CONTROL: u8 = crate::protocol::CJTAG_CONTROL_COMMAND;
 pub const CJTAG_SET_FORMATS: u8 = 4;
 /// The scan formats by their IEEE 1149.7 SCNFMT numbers.
 pub const SCNFMT_OSCAN1: u32 = 9;
@@ -25,7 +25,7 @@ pub const IDENTIFY_MAGIC: &[u8; 5] = b"CJTAG";
 /// Ours' DIO pins on the MCU-Link Pro's J19: `mask, outputs, levels` sets the direction and the
 /// level of each pin in `mask`, bit n for DIOn; a mask of 0 only reads. Always three bytes after
 /// the id, so it can sit inside `DAP_ExecuteCommands`.
-pub const VENDOR_DIO: u8 = 0x8E;
+pub const VENDOR_DIO: u8 = crate::protocol::DIO_COMMAND;
 
 /// Stock's jumper-free way into the bootloader, as LinkServer's `probe update` sends it.
 pub const STOCK_BOOTLOADER_REQUEST: [u8; 2] = [0x81, 0x01];
@@ -158,64 +158,7 @@ pub fn read_identity(link: &mut dyn DapLink) -> Result<Identity, DapError> {
     })
 }
 
-/// Ours, as its identify reply describes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ours {
-    /// The reply's format version: 2 carries flags and the build string, 3 the board as well.
-    pub format: u8,
-    pub flags: u8,
-    /// `git describe` of the image; empty before format 2.
-    pub build: String,
-    /// The board byte, from format 3 on: [`Ours::BOARD_MCU_LINK`] or another board.
-    pub board: Option<u8>,
-    /// The two-pin scan formats the unit offers, from format 4 on: bit n for SCNFMT n.
-    pub scan_formats: Option<u32>,
-}
-
-impl Ours {
-    pub const FLAG_OSCAN1: u8 = 1 << 0;
-    pub const FLAG_OSCAN1_ACTIVE: u8 = 1 << 1;
-    pub const FLAG_TARGET_SENSE: u8 = 1 << 2;
-    pub const FLAG_SWD_CODEGEN: u8 = 1 << 3;
-    pub const FLAG_OSCAN1_ENTER: u8 = 1 << 4;
-    pub const FLAG_JTAG_CODEGEN: u8 = 1 << 5;
-    /// [`VENDOR_DIO`] acts: a Pro whose USB-SIO jumper, J15, was not fitted when it started.
-    pub const FLAG_DIO: u8 = 1 << 6;
-
-    /// The board byte's values (`BOARD_KIND_*` in the firmware's `src/board_straps.h`).
-    pub const BOARD_MCU_LINK: u8 = 0;
-    pub const BOARD_MCU_LINK_PRO: u8 = 1;
-    pub const BOARD_ON_BOARD: u8 = 2;
-
-    /// The capability flags by name, for display.
-    #[must_use]
-    pub fn flag_names(&self) -> Vec<&'static str> {
-        [
-            (Self::FLAG_OSCAN1, "OScan1"),
-            (Self::FLAG_OSCAN1_ACTIVE, "OScan1 active"),
-            (Self::FLAG_TARGET_SENSE, "target sense"),
-            (Self::FLAG_SWD_CODEGEN, "generated SWD"),
-            (Self::FLAG_OSCAN1_ENTER, "host-driven OScan1 entry"),
-            (Self::FLAG_JTAG_CODEGEN, "generated JTAG"),
-            (Self::FLAG_DIO, "DIO pins"),
-        ]
-        .into_iter()
-        .filter(|(bit, _)| self.flags & bit != 0)
-        .map(|(_, name)| name)
-        .collect()
-    }
-
-    /// The two-pin scan formats offered, by name, or `None` before format 4.
-    #[must_use]
-    pub fn scan_format_names(&self) -> Option<Vec<String>> {
-        self.scan_formats.map(|mask| {
-            (0..32)
-                .filter(|n| mask >> n & 1 != 0)
-                .map(scan_format_name)
-                .collect()
-        })
-    }
-}
+pub use crate::protocol::{DioState as Dio, VergeInfo as Ours};
 
 /// A scan format's name: OScan1 for SCNFMT 9, and so on.
 #[must_use]
@@ -243,54 +186,18 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
             });
         }
     }
-    let body = &reply[1..];
-    if body.get(..IDENTIFY_MAGIC.len()) != Some(IDENTIFY_MAGIC.as_slice()) {
-        return Ok(None);
-    }
-    let short = || DapError::Short {
+    crate::protocol::decode_info(&reply[1..]).map_err(|_| DapError::Short {
         command: VENDOR_IDENTIFY,
         len: reply.len(),
-    };
-    let format = *body.get(5).ok_or_else(short)?;
-    if format < 2 {
-        return Ok(Some(Ours {
-            format,
-            flags: 0,
-            build: String::new(),
-            board: None,
-            scan_formats: None,
-        }));
-    }
-    let flags = *body.get(6).ok_or_else(short)?;
-    let len = usize::from(*body.get(7).ok_or_else(short)?);
-    let build = body.get(8..8 + len).ok_or_else(short)?;
-    // A reply read over v1 HID is padded to the report, so a format 2 image has a byte here too.
-    let board = if format >= 3 {
-        Some(*body.get(8 + len).ok_or_else(short)?)
-    } else {
-        None
-    };
-    let scan_formats = if format >= 4 {
-        let bytes = body.get(9 + len..13 + len).ok_or_else(short)?;
-        Some(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
-    } else {
-        None
-    };
-    Ok(Some(Ours {
-        format,
-        flags,
-        build: String::from_utf8_lossy(build).into_owned(),
-        board,
-        scan_formats,
-    }))
+    })
 }
 
 /// Limits the two-pin scan formats ours offers a host to `mask` (bit n for SCNFMT n) until the
 /// unit restarts. The unit keeps OScan1 whatever the mask, and drops formats its image does not
 /// frame; `u32::MAX` offers every one it does.
 pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapError> {
-    let mut request = vec![VENDOR_CJTAG_CONTROL, CJTAG_SET_FORMATS];
-    request.extend_from_slice(&mask.to_le_bytes());
+    let mut request = vec![VENDOR_CJTAG_CONTROL];
+    request.extend_from_slice(&crate::protocol::encode_scan_formats(mask));
     let reply = command(link, &request)?;
     match reply.get(1) {
         Some(&DAP_OK) => Ok(()),
@@ -301,36 +208,6 @@ pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapErro
             command: VENDOR_CJTAG_CONTROL,
             len: reply.len(),
         }),
-    }
-}
-
-/// The DIO pins as a [`VENDOR_DIO`] reply describes them, bit n for DIOn throughout.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dio {
-    /// Whether the unit made the change asked for. A refused one changes nothing.
-    pub accepted: bool,
-    /// The pins there are: none on a board without them, or on a Pro started with J15 fitted.
-    pub pins: u8,
-    /// The pins the unit drives.
-    pub outputs: u8,
-    /// Each pin's output level: what it drives, or will once it is an output.
-    pub levels: u8,
-    /// The levels on the unit's side of the pins' translators, so an output reads its own drive.
-    pub read: u8,
-    /// The pins that change direction together.
-    pub groups: Vec<u8>,
-}
-
-impl Dio {
-    /// The group that setting the pins in `mask` to the directions in `outputs` would leave
-    /// partly driven, which the unit refuses.
-    #[must_use]
-    pub fn split(&self, mask: u8, outputs: u8) -> Option<u8> {
-        let next = (self.outputs & !mask) | (outputs & mask);
-        self.groups
-            .iter()
-            .copied()
-            .find(|&group| next & group != 0 && next & group != group)
     }
 }
 
@@ -346,20 +223,12 @@ pub fn parse_dio(reply: &[u8]) -> Result<Option<Dio>, DapError> {
             });
         }
     }
-    let short = || DapError::Short {
-        command: VENDOR_DIO,
-        len: reply.len(),
-    };
-    let fixed = reply.get(1..7).ok_or_else(short)?;
-    let groups = reply.get(7..7 + usize::from(fixed[5])).ok_or_else(short)?;
-    Ok(Some(Dio {
-        accepted: fixed[0] == DAP_OK,
-        outputs: fixed[1],
-        levels: fixed[2],
-        read: fixed[3],
-        pins: fixed[4],
-        groups: groups.to_vec(),
-    }))
+    crate::protocol::decode_dio(&reply[1..])
+        .map(Some)
+        .map_err(|_| DapError::Short {
+            command: VENDOR_DIO,
+            len: reply.len(),
+        })
 }
 
 /// Sets the directions (1 an output) and the levels of the DIO pins in `mask`, and returns the
@@ -370,7 +239,9 @@ pub fn dio(
     outputs: u8,
     levels: u8,
 ) -> Result<Option<Dio>, DapError> {
-    parse_dio(&link.exchange(&[VENDOR_DIO, mask, outputs & mask, levels & mask])?)
+    let mut request = vec![VENDOR_DIO];
+    request.extend_from_slice(&crate::protocol::encode_dio(mask, outputs, levels));
+    parse_dio(&link.exchange(&request)?)
 }
 
 pub fn identify(link: &mut dyn DapLink) -> Result<Option<Ours>, DapError> {
@@ -487,9 +358,9 @@ mod tests {
         reply.extend_from_slice(&[2, 61, 7]);
         reply.extend_from_slice(b"14d05d4");
         let ours = parse_identify(&reply).unwrap().unwrap();
-        assert_eq!(ours.format, 2);
-        assert_eq!(ours.flags, 61);
-        assert_eq!(ours.build, "14d05d4");
+        assert_eq!(ours.version, 2);
+        assert_eq!(ours.capabilities, 61);
+        assert_eq!(ours.firmware, "14d05d4");
         assert_eq!(
             ours.flag_names(),
             [
@@ -516,7 +387,7 @@ mod tests {
         let pro = parse_identify(&identify_reply(3, "v0.3.0", &[Ours::BOARD_MCU_LINK_PRO]))
             .unwrap()
             .unwrap();
-        assert_eq!(pro.board, Some(Ours::BOARD_MCU_LINK_PRO));
+        assert_eq!(pro.board, Some(crate::BoardKind::Pro));
         // A format 2 reply read over v1 HID carries padding after the build string.
         let padded = parse_identify(&identify_reply(2, "14d05d4", &[1, 0, 0, 0]))
             .unwrap()
@@ -533,7 +404,7 @@ mod tests {
         let ours = parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06, 0, 0]))
             .unwrap()
             .unwrap();
-        assert_eq!(ours.scan_formats, Some(0x600));
+        assert_eq!(ours.scan_formats, 0x600);
         assert_eq!(
             ours.scan_format_names(),
             Some(vec!["OScan1".to_owned(), "OScan2".to_owned()])
@@ -541,7 +412,7 @@ mod tests {
         let older = parse_identify(&identify_reply(3, "v0.3.0", &[0, 0, 0, 0, 0]))
             .unwrap()
             .unwrap();
-        assert_eq!(older.scan_formats, None);
+        assert_eq!(older.scan_formats, 0);
         assert!(matches!(
             parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06])),
             Err(DapError::Short { command: 0x82, .. })
@@ -556,7 +427,7 @@ mod tests {
         assert_eq!(
             dio,
             Dio {
-                accepted: true,
+                status: crate::VendorStatus::Ok,
                 pins: 0x0F,
                 outputs: 0x07,
                 levels: 0x05,
@@ -569,7 +440,7 @@ mod tests {
         assert_eq!(dio.split(0x07, 0x00), None);
         assert_eq!(dio.split(0x08, 0x08), None);
         let refused = parse_dio(&[0x8E, 0xFF, 0, 0, 0, 0, 0]).unwrap().unwrap();
-        assert!(!refused.accepted && refused.pins == 0 && refused.groups.is_empty());
+        assert!(!refused.accepted() && refused.pins == 0 && refused.groups.is_empty());
         assert_eq!(parse_dio(&[0xFF]).unwrap(), None);
         assert!(matches!(
             parse_dio(&[0x8E, 0x00, 0x07, 0x05, 0x0D, 0x0F, 2, 0x07]),
