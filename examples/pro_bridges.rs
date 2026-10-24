@@ -5,8 +5,10 @@ use verge_probe::probe_rs::probe::list::Lister;
 use verge_probe::{ProBusStatus, SpiMode, VendorStatus, VergeProbe, install_cjtag_support};
 
 fn dio_state(label: &str, state: &verge_probe::DioState) {
-    println!("DIO {label}: status={:?} outputs={:x} levels={:x} read={:x}",
-        state.status, state.outputs, state.levels, state.read);
+    println!(
+        "DIO {label}: status={:?} outputs={:x} levels={:x} read={:x}",
+        state.status, state.outputs, state.levels, state.read
+    );
 }
 
 fn run_dio_smoke(verge: &mut VergeProbe<'_>) -> Result<(), Box<dyn Error>> {
@@ -63,9 +65,9 @@ fn parse_i2c_address(value: &str) -> Result<u8, Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let serial = args.next().ok_or(
-        "usage: pro_bridges <serial> [--dio] [--spi] [--i2c <7-bit-address>] [--energy]",
-    )?;
+    let serial = args
+        .next()
+        .ok_or("usage: pro_bridges <serial> [--dio] [--spi] [--i2c <7-bit-address>] [--energy]")?;
     let mut run_dio = false;
     let mut run_spi = false;
     let mut i2c_address = None;
@@ -97,7 +99,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .cloned()
         .ok_or_else(|| std::io::Error::other("probe does not run Verge firmware"))?;
 
-    println!("{} on {:?}, firmware {}", serial, capabilities.board, capabilities.firmware);
+    println!(
+        "{} on {:?}, firmware {}",
+        serial, capabilities.board, capabilities.firmware
+    );
     if run_dio {
         if !capabilities.supports_dio() {
             return Err("probe does not support DIO".into());
@@ -108,10 +113,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !capabilities.supports_spi() {
             return Err("probe does not support SPI".into());
         }
-        let result = verge.spi_transfer(100_000, SpiMode::Mode0, false, &[0xA5])?;
-        println!("SPI mode 0 at 100 kHz: {:?}, RX {:02x?}", result.status, result.rx);
-        if result.status != ProBusStatus::Ok {
-            return Err(format!("SPI transfer returned {:?}", result.status).into());
+        let tx = [0xA5, 0x5A];
+        for (mode, name) in [
+            (SpiMode::Mode0, "0"),
+            (SpiMode::Mode1, "1"),
+            (SpiMode::Mode2, "2"),
+            (SpiMode::Mode3, "3"),
+        ] {
+            let result = verge.spi_transfer(100_000, mode, false, &tx)?;
+            println!(
+                "SPI mode {name} at 100 kHz: {:?}, RX {:02x?}",
+                result.status, result.rx
+            );
+            if result.status != ProBusStatus::Ok {
+                return Err(format!("SPI mode {name} returned {:?}", result.status).into());
+            }
+            if result.rx != tx {
+                return Err(
+                    format!("SPI mode {name} loopback mismatch: expected {tx:02x?}").into(),
+                );
+            }
         }
     }
 
@@ -120,7 +141,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("probe does not support I2C".into());
         }
         let result = verge.i2c_transfer(address, 100_000, &[], 1)?;
-        println!("I2C read at 0x{address:02x}, 100 kHz: {:?}, RX {:02x?}", result.status, result.rx);
+        println!(
+            "I2C read at 0x{address:02x}, 100 kHz: {:?}, RX {:02x?}",
+            result.status, result.rx
+        );
         if result.status != ProBusStatus::Ok {
             return Err(format!("I2C transfer returned {:?}", result.status).into());
         }
