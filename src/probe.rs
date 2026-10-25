@@ -9,7 +9,7 @@ use probe_rs::{
 };
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::protocol::{
@@ -779,16 +779,19 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Polls distinct energy samples until `should_stop` returns true, then stops capture.
+    /// Returns the capture's effective rate.
     ///
     /// Capture continues in probe firmware between polls. The poll interval controls host traffic;
-    /// samples between polls remain included in the probe's energy accumulator.
+    /// samples between polls remain included in the probe's energy accumulator. `should_stop` is
+    /// checked at least every 10 ms. Capture is stopped on every exit, including a panic in either
+    /// callback.
     pub fn monitor_energy<Stop, Sample>(
         &mut self,
         rate_pairs_per_second: u32,
         poll_interval: Duration,
         mut should_stop: Stop,
         mut on_sample: Sample,
-    ) -> Result<(), EnergyMonitorError>
+    ) -> Result<EnergyCaptureStart, EnergyMonitorError>
     where
         Stop: FnMut() -> bool,
         Sample: FnMut(EnergySample),
@@ -796,19 +799,27 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         if poll_interval.is_zero() {
             return Err(EnergyMonitorError::InvalidPollInterval);
         }
-        self.start_energy_capture(rate_pairs_per_second)
-            .map_err(EnergyMonitorError::Start)?;
+        let start = match self.start_energy_capture(rate_pairs_per_second) {
+            Ok(start) => start,
+            Err(error) => {
+                // A lost or garbled reply can follow a start the firmware carried out.
+                if matches!(error, CommandError::Probe(_) | CommandError::Malformed(_)) {
+                    let _ = self.stop_energy_capture();
+                }
+                return Err(EnergyMonitorError::Start(error));
+            }
+        };
 
+        let mut capture = StopOnDrop {
+            control: self,
+            armed: true,
+        };
         let mut last_sequence = None;
         let poll_result = loop {
-            if should_stop() {
+            if wait_or_stop(&mut should_stop, poll_interval) {
                 break Ok(());
             }
-            std::thread::sleep(poll_interval);
-            if should_stop() {
-                break Ok(());
-            }
-            match self.latest_energy_sample() {
+            match capture.control.latest_energy_sample() {
                 Ok(EnergyCaptureSample::Sample(sample)) => {
                     if last_sequence != Some(sample.raw.sequence) {
                         last_sequence = Some(sample.raw.sequence);
@@ -823,12 +834,13 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
             }
         };
 
-        let stop_result = self.stop_energy_capture();
+        capture.armed = false;
+        let stop_result = capture.control.stop_energy_capture();
         match (poll_result, stop_result) {
             (Err(poll), Ok(())) => Err(EnergyMonitorError::Poll(poll)),
             (Err(poll), Err(stop)) => Err(EnergyMonitorError::PollAndStop { poll, stop }),
             (Ok(()), Err(error)) => Err(EnergyMonitorError::Stop(error)),
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Ok(())) => Ok(start),
         }
     }
 
@@ -1106,6 +1118,36 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
 
     fn send(&mut self, command_id: u8, payload: &[u8]) -> Result<Vec<u8>, DebugProbeError> {
         self.transport.send_vendor_command(command_id, payload)
+    }
+}
+
+/// Stops energy capture if dropped while armed, so an unwinding callback does not leave it running.
+struct StopOnDrop<'c, 'a, T: VergeTransport> {
+    control: &'c mut VergeControl<'a, T>,
+    armed: bool,
+}
+
+impl<T: VergeTransport> Drop for StopOnDrop<'_, '_, T> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.control.stop_energy_capture();
+        }
+    }
+}
+
+/// Sleeps for `interval`, checking `should_stop` at least every 10 ms. Returns whether it asked to stop.
+fn wait_or_stop(should_stop: &mut impl FnMut() -> bool, interval: Duration) -> bool {
+    const CHECK: Duration = Duration::from_millis(10);
+    let deadline = Instant::now() + interval;
+    loop {
+        if should_stop() {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(CHECK));
     }
 }
 
@@ -1914,6 +1956,57 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, EnergyMonitorError::Poll(_)));
+        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+    }
+
+    #[test]
+    fn energy_monitor_stops_capture_when_a_callback_panics() {
+        let mut sample = vec![0, 0];
+        sample.extend_from_slice(&[0; 4]);
+        sample.extend_from_slice(&1u32.to_le_bytes());
+        let mut transport = FakeTransport {
+            replies: [
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
+                [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                sample,
+                vec![0, 0],
+            ]
+            .into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = verge.monitor_energy(
+                1_000,
+                Duration::from_millis(1),
+                || false,
+                |_| panic!("the caller's sample handler failed"),
+            );
+        }));
+
+        assert!(panicked.is_err());
+        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+    }
+
+    #[test]
+    fn energy_monitor_stops_capture_after_a_garbled_start_reply() {
+        let mut transport = FakeTransport {
+            replies: [
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
+                vec![0],
+                vec![0, 0],
+            ]
+            .into(),
+            commands: Vec::new(),
+        };
+        let error = VergeControl::new(&mut transport)
+            .monitor_energy(1_000, Duration::from_millis(1), || true, |_| {})
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            EnergyMonitorError::Start(CommandError::Malformed(_))
+        ));
         assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
     }
 
