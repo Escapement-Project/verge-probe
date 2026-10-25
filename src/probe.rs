@@ -52,8 +52,8 @@ pub enum EnergyError {
     /// ADC calibration failed.
     #[error("ADC calibration failed")]
     AdcError,
-    /// DMA failed.
-    #[error("DMA failed")]
+    /// Acquisition failed because of a DMA error or ADC FIFO overflow.
+    #[error("energy acquisition failed")]
     DmaError,
     /// An unrecognized result code.
     #[error("unknown firmware status {0:#04x}")]
