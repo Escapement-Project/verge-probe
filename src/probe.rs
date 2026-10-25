@@ -779,6 +779,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
 
     /// Reboots the probe into its firmware or ROM bootloader.
     pub fn reboot(&mut self, mode: RebootMode) -> Result<(), CommandError<Refused>> {
+        self.require_verge()?;
         let response = self.send(
             REBOOT_COMMAND,
             &[match mode {
@@ -897,34 +898,36 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     ///
     /// Set `mask` to zero to return all four pins to the marker.
     /// Returns the levels read from the four pins.
-    pub fn set_j8_pins(&mut self, mask: u8, levels: u8) -> Result<u8, CommandError<Refused<u8>>> {
+    pub fn set_j8_pins(&mut self, mask: u8, levels: u8) -> Result<u8, CommandError<Refused>> {
+        self.require_verge()?;
         let response = self.send(J8_COMMAND, &[mask & 0x0F, levels & mask & 0x0F])?;
-        let accepted = vendor_status(response_byte(&response, 0)?)?;
-        refused(accepted, response_byte(&response, 1)?)
+        expect_accepted(&response)?;
+        Ok(response_byte(&response, 1)?)
     }
 
     /// Runs the SWD sample-position instrument.
     pub fn sample_swd(
         &mut self,
         request: SampleRequest,
-    ) -> Result<SampleResult, CommandError<Refused<SampleResult>>> {
+    ) -> Result<SampleResult, CommandError<Refused>> {
         let payload = encode_sample_request(request).map_err(CommandError::InvalidRequest)?;
+        self.require_verge()?;
         let response = self.send(SAMPLE_COMMAND, &payload)?;
-        let mut reader = ResponseReader::new(&response);
-        let accepted = vendor_status(reader.u8()?)?;
-        let result = SampleResult {
+        expect_accepted(&response)?;
+        let mut reader = ResponseReader::new(&response[1..]);
+        Ok(SampleResult {
             good: reader.u16()?,
             bad_acknowledgements: reader.u16()?,
             bad_words: reader.u16()?,
             last_bad_acknowledgement: reader.u8()?,
             last_bad_dpidr: reader.u32()?,
             cycles: reader.u32()?,
-        };
-        refused(accepted, result)
+        })
     }
 
     /// Returns the executable arenas exposed by a code-lab firmware build.
     pub fn code_lab_arenas(&mut self) -> Result<Vec<CodeLabArena>, CommandError<Refused>> {
+        self.require_verge()?;
         let response = self.send(CODE_LAB_COMMAND, &[0])?;
         expect_accepted(&response)?;
         let mut reader = ResponseReader::new(&response[1..]);
@@ -948,6 +951,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     ) -> Result<(), CommandError<Refused>> {
         let length = u16::try_from(bytes.len())
             .map_err(|_| CommandError::InvalidRequest("a code-lab write is at most 65535 bytes"))?;
+        self.require_verge()?;
         let mut payload = Vec::with_capacity(6 + bytes.len());
         payload.extend_from_slice(&[1, arena]);
         payload.extend_from_slice(&offset.to_le_bytes());
@@ -963,6 +967,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         offset: u16,
         length: u16,
     ) -> Result<Vec<u8>, CommandError<Refused>> {
+        self.require_verge()?;
         let mut payload = vec![2, arena];
         payload.extend_from_slice(&offset.to_le_bytes());
         payload.extend_from_slice(&length.to_le_bytes());
@@ -984,6 +989,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         entry_offset: u16,
         arguments: [u32; 4],
     ) -> Result<[u32; 2], CommandError<Refused>> {
+        self.require_verge()?;
         let mut payload = vec![3, arena];
         payload.extend_from_slice(&entry_offset.to_le_bytes());
         for argument in arguments {
@@ -1046,6 +1052,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         &mut self,
         enabled: Option<bool>,
     ) -> Result<bool, CommandError<Refused<bool>>> {
+        self.require_verge()?;
         let mode = enabled.map_or(2, u8::from);
         let response = self.send(CPU_STAGING_COMMAND, &[mode])?;
         let accepted = vendor_status(response_byte(&response, 0)?)?;
@@ -1078,6 +1085,13 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
             at: reader.u32()?,
             cycles: reader.u32()?,
         }))
+    }
+
+    fn require_verge<E: std::error::Error + 'static>(&mut self) -> Result<(), CommandError<E>> {
+        self.info()
+            .map_err(CommandError::widen)?
+            .ok_or(CommandError::Unsupported("Verge commands"))?;
+        Ok(())
     }
 
     fn require_capability<E: std::error::Error + 'static>(
@@ -1140,8 +1154,16 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         )
     }
 
-    fn send(&mut self, command_id: u8, payload: &[u8]) -> Result<Vec<u8>, DebugProbeError> {
-        self.transport.send_vendor_command(command_id, payload)
+    fn send(&mut self, command_id: u8, payload: &[u8]) -> Result<Vec<u8>, SendError> {
+        self.transport
+            .send_vendor_command(command_id, payload)
+            .map_err(|error| match error {
+                // A build without the command answers it as unknown.
+                DebugProbeError::CommandNotSupportedByProbe { .. } => {
+                    SendError::Unsupported(command_name(command_id))
+                }
+                error => SendError::Probe(error),
+            })
     }
 }
 
@@ -1659,6 +1681,40 @@ fn response_array<const N: usize>(
         .ok_or_else(|| malformed("short vendor command response"))
 }
 
+/// Why a vendor command was not answered.
+enum SendError {
+    Probe(DebugProbeError),
+    Unsupported(&'static str),
+}
+
+impl<E: std::error::Error + 'static> From<SendError> for CommandError<E> {
+    fn from(error: SendError) -> Self {
+        match error {
+            SendError::Probe(error) => Self::Probe(error),
+            SendError::Unsupported(command) => Self::Unsupported(command),
+        }
+    }
+}
+
+fn command_name(command_id: u8) -> &'static str {
+    match command_id {
+        J8_COMMAND => "the J8 marker pins",
+        REBOOT_COMMAND => "reboot",
+        TARGET_SENSE_COMMAND => "target sensing",
+        SAMPLE_COMMAND => "the SWD sample instrument",
+        CODE_LAB_COMMAND => "the code lab",
+        SWD_CODEGEN_COMMAND => "SWD code generation",
+        JTAG_CODEGEN_COMMAND | JTAG_PACING_COMMAND | JTAG_LOG_COMMAND => "JTAG code generation",
+        CPU_STAGING_COMMAND => "command staging",
+        DIO_COMMAND => "the DIO pins",
+        TARGET_POWER_COMMAND => "target power control",
+        ENERGY_COMMAND => "energy capture",
+        SPI_COMMAND => "the SPI bridge",
+        I2C_COMMAND => "the I2C bridge",
+        _ => "this vendor command",
+    }
+}
+
 /// A reply that does not follow its command's protocol.
 #[derive(Debug)]
 struct MalformedReply(String);
@@ -1843,6 +1899,42 @@ mod tests {
                 detected: true,
             }
         );
+    }
+
+    #[test]
+    fn a_command_the_build_lacks_is_unsupported_and_verge_only_commands_ask_first() {
+        struct NoCodeLab(Vec<u8>);
+        impl VergeTransport for NoCodeLab {
+            fn send_vendor_command(
+                &mut self,
+                command_id: u8,
+                _: &[u8],
+            ) -> Result<Vec<u8>, DebugProbeError> {
+                self.0.push(command_id);
+                match command_id {
+                    INFO_COMMAND => Ok(info_reply(6, 0, 1, 0, 0)),
+                    _ => Err(DebugProbeError::CommandNotSupportedByProbe {
+                        command_name: "vendor command",
+                    }),
+                }
+            }
+        }
+        let mut transport = NoCodeLab(Vec::new());
+        assert!(matches!(
+            VergeControl::new(&mut transport).code_lab_arenas(),
+            Err(CommandError::Unsupported("the code lab"))
+        ));
+        assert_eq!(transport.0, [INFO_COMMAND, CODE_LAB_COMMAND]);
+
+        let mut transport = FakeTransport {
+            replies: [b"DAPLink".to_vec()].into(),
+            commands: Vec::new(),
+        };
+        assert!(matches!(
+            VergeControl::new(&mut transport).reboot(RebootMode::Bootloader),
+            Err(CommandError::Unsupported("Verge commands"))
+        ));
+        assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);
     }
 
     #[test]
