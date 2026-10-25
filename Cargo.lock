@@ -1222,7 +1222,7 @@ checksum = "9a65843dfefbafd3c879c683306959a6de478443ffe9c9adf02f5976432402d7"
 [[package]]
 name = "probe-rs"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=a0b3e56ab#a0b3e56ab3c7f1205d5971f8858aee754f2cdec4"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=59613f22a#59613f22abb780fba79846a9e051ca2ea20299bd"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1242,6 +1242,7 @@ dependencies = [
  "parking_lot",
  "probe-rs-target",
  "rmp-serde",
+ "rustc-hash",
  "scroll",
  "serde",
  "serialport",
@@ -1255,7 +1256,7 @@ dependencies = [
 [[package]]
 name = "probe-rs-target"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=a0b3e56ab#a0b3e56ab3c7f1205d5971f8858aee754f2cdec4"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=59613f22a#59613f22abb780fba79846a9e051ca2ea20299bd"
 dependencies = [
  "base64",
  "bincode",
@@ -1422,6 +1423,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"
