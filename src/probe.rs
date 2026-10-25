@@ -200,6 +200,7 @@ impl SpiMode {
 
 /// Why an energy monitor stopped.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EnergyMonitorError {
     #[error("energy monitor poll interval must be greater than zero")]
     InvalidPollInterval,
@@ -218,6 +219,7 @@ pub enum EnergyMonitorError {
 
 /// One raw voltage/current pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawEnergySample {
     /// Target-voltage ADC code.
     pub voltage_code: u16,
@@ -229,6 +231,7 @@ pub struct RawEnergySample {
 
 /// Calibrated values attached to a sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CalibratedEnergySample {
     /// Target voltage in millivolts.
     pub voltage_millivolts: u32,
@@ -240,6 +243,7 @@ pub struct CalibratedEnergySample {
 
 /// Result of starting an energy capture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnergyCaptureStart {
     /// Effective voltage/current pairs per second.
     pub actual_rate_pairs_per_second: u32,
@@ -247,6 +251,7 @@ pub struct EnergyCaptureStart {
 
 /// One complete voltage/current pair with optional calibration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnergySample {
     pub raw: RawEnergySample,
     pub calibrated: Option<CalibratedEnergySample>,
@@ -254,6 +259,7 @@ pub struct EnergySample {
 
 /// The latest energy reading, including normal states without a sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EnergyCaptureSample {
     Sample(EnergySample),
     NoSample,
@@ -262,6 +268,7 @@ pub enum EnergyCaptureSample {
 
 /// Accumulated energy since the last successful capture start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnergyAccumulator {
     /// Accumulated energy in nanojoules.
     pub energy_nanojoules: u64,
@@ -271,6 +278,7 @@ pub struct EnergyAccumulator {
 
 /// The energy accumulator's reading, including the states without a total.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EnergyTotal {
     /// The total since the last successful capture start.
     Total(EnergyAccumulator),
@@ -286,6 +294,7 @@ pub enum EnergyTotal {
 
 /// One target-sense conversion returned by vendor command `0x86`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TargetSenseReading {
     /// Raw ADC code.
     pub code: u16,
@@ -321,6 +330,7 @@ pub enum CodegenMode {
 
 /// Parsed state from the SWD code generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SwdCodegenState {
     /// Latency used by the generated paths.
     pub latency: u8,
@@ -346,6 +356,7 @@ pub struct SwdCodegenState {
 
 /// Parsed state from the JTAG code generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JtagCodegenState {
     /// Two-pin latency used by generated paths.
     pub two_pin_latency: u8,
@@ -457,6 +468,7 @@ impl LatencyOutcome {
 
 /// Result of the latest latency sweep reported by a code generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CodegenMeasurement {
     /// Whether future configurations trigger automatic measurements.
     pub automatic: bool,
@@ -510,6 +522,7 @@ pub struct SampleRequest {
 
 /// Results from the SWD sample-position instrument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SampleResult {
     /// Reads with a good acknowledgement, parity and DPIDR.
     pub good: u16,
@@ -527,6 +540,7 @@ pub struct SampleResult {
 
 /// One executable arena exposed by the optional code-lab firmware command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CodeLabArena {
     /// Arena base address in probe memory.
     pub base_address: u32,
@@ -536,6 +550,7 @@ pub struct CodeLabArena {
 
 /// State of JTAG pacing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JtagPacingState {
     /// Whether learned pacing is enabled.
     pub enabled: bool,
@@ -545,6 +560,7 @@ pub struct JtagPacingState {
 
 /// One JTAG code-generation log entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JtagGenerationLogEntry {
     /// Total generation count when the entry was read.
     pub count: u32,

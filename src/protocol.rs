@@ -45,6 +45,7 @@ pub(crate) const SAMPLE_FILL_MAX: u8 = 32;
 
 /// Firmware identity and capabilities returned by vendor command `0x82`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VergeInfo {
     /// Info format version.
     pub version: u8,
@@ -163,6 +164,7 @@ impl VergeInfo {
 
 /// State of the Verge Pro's DIO pins.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DioState {
     /// Whether the requested pin update was accepted.
     pub status: VendorStatus,
@@ -209,6 +211,7 @@ impl VergeInfo {
     pub const FLAG_JTAG_CODEGEN: u8 = CAP_JTAG_CODEGEN;
     /// [`crate::dap::VENDOR_DIO`] acts: a Pro whose USB-SIO jumper, J15, was not fitted when it started.
     pub const FLAG_DIO: u8 = CAP_DIO;
+    pub const FLAG_TARGET_POWER: u8 = CAP_TARGET_POWER;
 
     /// The board byte's values (`BOARD_KIND_*` in the firmware's `src/board_straps.h`).
     pub const BOARD_MCU_LINK: u8 = 0;
@@ -226,7 +229,7 @@ impl VergeInfo {
             (Self::FLAG_OSCAN1_ENTER, "host-driven OScan1 entry"),
             (Self::FLAG_JTAG_CODEGEN, "generated JTAG"),
             (Self::FLAG_DIO, "DIO pins"),
-            (CAP_TARGET_POWER, "target power"),
+            (Self::FLAG_TARGET_POWER, "target power"),
         ]
         .into_iter()
         .filter(|(bit, _)| self.capabilities & bit != 0)

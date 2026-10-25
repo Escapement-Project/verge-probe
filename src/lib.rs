@@ -37,5 +37,13 @@ pub use update::{Outcome, Timing, UpdateError};
 
 mod protocol;
 
-pub mod probe;
-pub use probe::*;
+mod probe;
+pub use probe::{
+    BoardKind, CalibratedEnergySample, CodeLabArena, CodegenMeasurement, CodegenMode, CommandError,
+    DioState, EnergyAccumulator, EnergyCaptureSample, EnergyCaptureStart, EnergyError,
+    EnergyMonitorError, EnergySample, EnergyTotal, JtagCodegenState, JtagGenerationLogEntry,
+    JtagPacingState, JtagWire, LatencyOutcome, ProBusError, RawEnergySample, RebootMode, Refused,
+    SamplePosition, SampleRequest, SampleResult, SpiMode, SwdCodegenState, TargetSenseError,
+    TargetSenseReading, VendorStatus, VergeControl, VergeInfo, VergeProbe, VergeSession,
+    VergeTransport, install_cjtag_support, set_cjtag_scan_formats,
+};
