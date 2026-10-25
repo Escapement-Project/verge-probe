@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use verge_probe::probe_rs::probe::list::Lister;
 use verge_probe::{CommandError, Refused, SpiMode, VergeProbe, install_cjtag_support};
 
@@ -55,40 +56,40 @@ fn run_dio_smoke(verge: &mut VergeProbe<'_>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_i2c_address(value: &str) -> Result<u8, Box<dyn Error>> {
-    let address = if let Some(hex) = value.strip_prefix("0x") {
-        u8::from_str_radix(hex, 16)?
-    } else {
-        value.parse()?
-    };
+fn parse_i2c_address(value: &str) -> Result<u8, String> {
+    let address = match value.strip_prefix("0x") {
+        Some(hex) => u8::from_str_radix(hex, 16),
+        None => value.parse(),
+    }
+    .map_err(|error| error.to_string())?;
     if address > 0x7f {
-        return Err("I2C address must be a 7-bit address".into());
+        return Err("an I2C address has 7 bits".into());
     }
     Ok(address)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = std::env::args().skip(1);
-    let serial = args
-        .next()
-        .ok_or("usage: pro_bridges <serial> [--dio] [--spi] [--i2c <7-bit-address>] [--energy]")?;
-    let mut run_dio = false;
-    let mut run_spi = false;
-    let mut i2c_address = None;
-    let mut run_energy = false;
+/// Checks the MCU-Link Pro's bridges through the Verge firmware. Runs only the checks named.
+#[derive(Parser)]
+struct Args {
+    /// The probe's serial number.
+    serial: String,
+    /// Check DIO direction and readback, then return the pins to inputs.
+    #[arg(long)]
+    dio: bool,
+    /// Loop two bytes through all four SPI modes. Needs J19 pin 3 (MOSI) wired to pin 5 (MISO).
+    #[arg(long)]
+    spi: bool,
+    /// Read one byte from this 7-bit I2C address, given as 0x50 or 80.
+    #[arg(long, value_name = "ADDRESS", value_parser = parse_i2c_address)]
+    i2c: Option<u8>,
+    /// Print energy samples for five seconds.
+    #[arg(long)]
+    energy: bool,
+}
 
-    while let Some(option) = args.next() {
-        match option.as_str() {
-            "--dio" => run_dio = true,
-            "--spi" => run_spi = true,
-            "--i2c" => {
-                let value = args.next().ok_or("--i2c requires a 7-bit address")?;
-                i2c_address = Some(parse_i2c_address(&value)?);
-            }
-            "--energy" => run_energy = true,
-            _ => return Err(format!("unknown option: {option}").into()),
-        }
-    }
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    let serial = args.serial;
 
     let info = Lister::new()
         .list_all()
@@ -107,13 +108,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "{} on {:?}, firmware {}",
         serial, capabilities.board, capabilities.firmware
     );
-    if run_dio {
+    if args.dio {
         if !capabilities.supports_dio() {
             return Err("probe does not support DIO".into());
         }
         run_dio_smoke(&mut verge)?;
     }
-    if run_spi {
+    if args.spi {
         if !capabilities.supports_spi() {
             return Err("probe does not support SPI".into());
         }
@@ -134,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if let Some(address) = i2c_address {
+    if let Some(address) = args.i2c {
         if !capabilities.supports_i2c() {
             return Err("probe does not support I2C".into());
         }
@@ -142,7 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("I2C read at 0x{address:02x}, 100 kHz: RX {:02x?}", result);
     }
 
-    if run_energy {
+    if args.energy {
         if !capabilities.supports_energy_capture() {
             return Err("probe does not support energy capture".into());
         }
