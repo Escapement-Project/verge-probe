@@ -7,6 +7,8 @@ use probe_rs::{
         cmsisdap::{CmsisDap, CmsisDapCjtagExtension},
     },
 };
+use std::convert::Infallible;
+use std::fmt::Debug;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -21,13 +23,71 @@ use crate::protocol::{
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
-/// A transport or firmware failure from a typed command.
+/// A failure from a typed Verge command.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CommandError<E: std::error::Error + 'static> {
+    /// The probe or its USB connection failed.
     #[error(transparent)]
     Probe(#[from] DebugProbeError),
+    /// The probe's firmware does not offer the command.
+    #[error("this probe's firmware does not support {0}")]
+    Unsupported(&'static str),
+    /// The request breaks a limit the firmware enforces. Nothing was sent.
+    #[error("invalid request: {0}")]
+    InvalidRequest(&'static str),
+    /// The reply does not follow the command's protocol.
+    #[error("malformed reply: {0}")]
+    Malformed(String),
+    /// The firmware refused or failed the command.
     #[error(transparent)]
     Firmware(E),
+}
+
+impl<E: std::error::Error + 'static> CommandError<E> {
+    fn widen(error: CommandError<Infallible>) -> Self {
+        match error {
+            CommandError::Probe(error) => Self::Probe(error),
+            CommandError::Unsupported(command) => Self::Unsupported(command),
+            CommandError::InvalidRequest(reason) => Self::InvalidRequest(reason),
+            CommandError::Malformed(reason) => Self::Malformed(reason),
+            CommandError::Firmware(never) => match never {},
+        }
+    }
+}
+
+/// The firmware refused a request. It carries the state the firmware reported with the refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("the firmware refused the request")]
+pub struct Refused<S: Debug = ()>(pub S);
+
+/// Why a target-sense conversion failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum TargetSenseError {
+    /// The ADC's offset calibration failed.
+    #[error("ADC offset calibration failed")]
+    OffsetCalibration,
+    /// The ADC's gain calibration failed.
+    #[error("ADC gain calibration failed")]
+    GainCalibration,
+    /// The conversion produced no result.
+    #[error("ADC conversion produced no result")]
+    NoResult,
+    /// A failure code added by newer firmware.
+    #[error("unknown target-sense failure {0}")]
+    Unknown(u16),
+}
+
+impl TargetSenseError {
+    fn from_code(code: u16) -> Self {
+        match code {
+            1 => Self::OffsetCalibration,
+            2 => Self::GainCalibration,
+            3 => Self::NoResult,
+            other => Self::Unknown(other),
+        }
+    }
 }
 
 /// A firmware failure from an energy-capture command.
@@ -212,8 +272,6 @@ pub struct EnergyAccumulator {
 /// One target-sense conversion returned by vendor command `0x86`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetSenseReading {
-    /// Whether the firmware accepted the conversion.
-    pub status: VendorStatus,
     /// Raw ADC code.
     pub code: u16,
     /// Millivolts at the selected pin.
@@ -249,8 +307,6 @@ pub enum CodegenMode {
 /// Parsed state from the SWD code generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SwdCodegenState {
-    /// Whether the request was accepted.
-    pub status: VendorStatus,
     /// Latency used by the generated paths.
     pub latency: u8,
     /// Whether the generated path uses masked timing.
@@ -276,8 +332,6 @@ pub struct SwdCodegenState {
 /// Parsed state from the JTAG code generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JtagCodegenState {
-    /// Whether the request was accepted.
-    pub status: VendorStatus,
     /// Two-pin latency used by generated paths.
     pub two_pin_latency: u8,
     /// Four-wire latency used by generated paths.
@@ -442,8 +496,6 @@ pub struct SampleRequest {
 /// Results from the SWD sample-position instrument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SampleResult {
-    /// Whether the firmware accepted the request.
-    pub status: VendorStatus,
     /// Reads with a good acknowledgement, parity and DPIDR.
     pub good: u16,
     /// Reads with a bad acknowledgement.
@@ -470,39 +522,10 @@ pub struct CodeLabArena {
 /// State of JTAG pacing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JtagPacingState {
-    /// Whether the request was accepted.
-    pub status: VendorStatus,
     /// Whether learned pacing is enabled.
     pub enabled: bool,
     /// Learned idle clocks currently added by the generator.
     pub paced_clocks: u8,
-}
-
-/// State of command staging between the firmware's USB and probe cores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CpuStagingState {
-    /// Whether the request was accepted.
-    pub status: VendorStatus,
-    /// Whether CPU 0 stages DAP commands for CPU 1.
-    pub enabled: bool,
-}
-
-/// State reported after a target-power request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TargetPowerState {
-    /// Whether the firmware accepted the request.
-    pub status: VendorStatus,
-    /// State last set since the probe booted.
-    pub enabled: bool,
-}
-
-/// State reported after a J8 pin ownership request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct J8State {
-    /// Whether the firmware accepted the request.
-    pub status: VendorStatus,
-    /// Current levels read from the J8 pins.
-    pub levels: u8,
 }
 
 /// One JTAG code-generation log entry.
@@ -602,8 +625,11 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         }
     }
 
-    /// Reads the firmware identity and capabilities.
-    pub fn info(&mut self) -> Result<Option<&VergeInfo>, DebugProbeError> {
+    /// Reads the firmware identity and capabilities, once.
+    ///
+    /// The result is cached. Its OScan1-active flag changes when a two-pin session starts or ends;
+    /// [`Self::refresh_info`] reads it again.
+    pub fn info(&mut self) -> Result<Option<&VergeInfo>, CommandError<Infallible>> {
         if matches!(self.info, InfoCache::Unread) {
             self.refresh_info()?;
         }
@@ -611,7 +637,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads firmware identity and capabilities again, replacing the cached values.
-    pub fn refresh_info(&mut self) -> Result<Option<&VergeInfo>, DebugProbeError> {
+    pub fn refresh_info(&mut self) -> Result<Option<&VergeInfo>, CommandError<Infallible>> {
         let info = read_info(&mut |command_id, payload| {
             self.transport.send_vendor_command(command_id, payload)
         })?;
@@ -632,7 +658,9 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads the target supply voltage and target-detect line.
-    pub fn read_target_sense(&mut self) -> Result<TargetSenseReading, DebugProbeError> {
+    pub fn read_target_sense(
+        &mut self,
+    ) -> Result<TargetSenseReading, CommandError<TargetSenseError>> {
         self.require_flag(CAP_TARGET_SENSE, "target sensing")?;
         self.read_target_sense_mode(0, 0)
     }
@@ -641,22 +669,24 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     pub fn convert_target_sense_channel(
         &mut self,
         channel: u8,
-    ) -> Result<TargetSenseReading, DebugProbeError> {
+    ) -> Result<TargetSenseReading, CommandError<TargetSenseError>> {
         self.require_flag(CAP_TARGET_SENSE, "target sensing")?;
         if channel & 0x60 != 0 {
-            return Err(protocol_error("invalid target-sense channel"));
+            return Err(CommandError::InvalidRequest(
+                "a target-sense channel uses bits 0 to 4 and 7",
+            ));
         }
         self.read_target_sense_mode(1, channel)
     }
 
-    /// Sets the target supply state and returns the state reported by the probe.
-    pub fn set_target_power(&mut self, enabled: bool) -> Result<TargetPowerState, DebugProbeError> {
+    /// Switches the target supply and returns whether it is on.
+    pub fn set_target_power(&mut self, enabled: bool) -> Result<bool, CommandError<Refused<bool>>> {
         self.require_flag(CAP_TARGET_POWER, "target power control")?;
-        self.target_power_command(if enabled { 1 } else { 0 })
+        self.target_power_command(u8::from(enabled))
     }
 
-    /// Reads the target supply state last set since the probe booted.
-    pub fn read_target_power(&mut self) -> Result<TargetPowerState, DebugProbeError> {
+    /// Reads whether the target supply is on, as last set since the probe booted.
+    pub fn read_target_power(&mut self) -> Result<bool, CommandError<Refused<bool>>> {
         self.require_flag(CAP_TARGET_POWER, "target power control")?;
         self.target_power_command(2)
     }
@@ -664,16 +694,23 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     /// Reads DIO state, or updates the direction and levels for the selected pins.
     ///
     /// A set bit in `mask` selects a pin. Matching bits in `outputs` set output direction,
-    /// and matching bits in `levels` set the output latch. A zero mask only reads state.
+    /// and matching bits in `levels` set the output latch. A zero mask only reads state. A
+    /// refused update, such as one that would split a direction group, leaves the pins as the
+    /// refusal's state reports them.
     pub fn access_dio(
         &mut self,
         mask: u8,
         outputs: u8,
         levels: u8,
-    ) -> Result<DioState, DebugProbeError> {
-        self.require_flag(CAP_DIO, "DIO pins")?;
+    ) -> Result<DioState, CommandError<Refused<DioState>>> {
+        self.require_flag(CAP_DIO, "the DIO pins")?;
         let response = self.send(DIO_COMMAND, &protocol::encode_dio(mask, outputs, levels))?;
-        protocol::decode_dio(&response).map_err(protocol_error)
+        let state = protocol::decode_dio(&response).map_err(malformed)?;
+        match state.status {
+            VendorStatus::Ok => Ok(state),
+            VendorStatus::Error => Err(CommandError::Firmware(Refused(state))),
+            VendorStatus::Unknown(_) => Err(malformed("invalid DIO status").into()),
+        }
     }
 
     /// Runs one full-duplex transaction on the Pro SPI bridge.
@@ -684,8 +721,9 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         lsb_first: bool,
         tx: &[u8],
     ) -> Result<Vec<u8>, CommandError<ProBusError>> {
-        self.require_capability(CAP_SPI, "SPI bridge")?;
-        let request = encode_spi_request(clock_hz, mode, lsb_first, tx)?;
+        self.require_capability(CAP_SPI, "the SPI bridge")?;
+        let request = encode_spi_request(clock_hz, mode, lsb_first, tx)
+            .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(SPI_COMMAND, &request)?, tx.len())
     }
 
@@ -697,13 +735,14 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         write: &[u8],
         read_len: usize,
     ) -> Result<Vec<u8>, CommandError<ProBusError>> {
-        self.require_capability(CAP_I2C, "I2C bridge")?;
-        let request = encode_i2c_request(address, clock_hz, write, read_len)?;
+        self.require_capability(CAP_I2C, "the I2C bridge")?;
+        let request = encode_i2c_request(address, clock_hz, write, read_len)
+            .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(I2C_COMMAND, &request)?, read_len)
     }
 
     /// Reboots the probe into its firmware or ROM bootloader.
-    pub fn reboot(&mut self, mode: RebootMode) -> Result<VendorStatus, DebugProbeError> {
+    pub fn reboot(&mut self, mode: RebootMode) -> Result<(), CommandError<Refused>> {
         let response = self.send(
             REBOOT_COMMAND,
             &[match mode {
@@ -711,7 +750,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
                 RebootMode::Bootloader => 1,
             }],
         )?;
-        Ok(VendorStatus::from_byte(response_byte(&response, 0)?))
+        expect_accepted(&response)
     }
 
     /// Starts voltage/current capture at the requested pair rate.
@@ -800,7 +839,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     pub fn read_energy_accumulator(
         &mut self,
     ) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
-        self.require_capability(CAP_ENERGY_ACCUMULATOR, "energy accumulator")?;
+        self.require_capability(CAP_ENERGY_ACCUMULATOR, "the energy accumulator")?;
         let response = self.send(ENERGY_COMMAND, &[3])?;
         parse_energy_accumulator(&response)
     }
@@ -808,35 +847,38 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     /// Hands selected J8 pins from the firmware marker to the host.
     ///
     /// Set `mask` to zero to return all four pins to the marker.
-    pub fn set_j8_pins(&mut self, mask: u8, levels: u8) -> Result<J8State, DebugProbeError> {
+    /// Returns the levels read from the four pins.
+    pub fn set_j8_pins(&mut self, mask: u8, levels: u8) -> Result<u8, CommandError<Refused<u8>>> {
         let response = self.send(J8_COMMAND, &[mask & 0x0F, levels & mask & 0x0F])?;
-        Ok(J8State {
-            status: VendorStatus::from_byte(response_byte(&response, 0)?),
-            levels: response_byte(&response, 1)?,
-        })
+        let accepted = vendor_status(response_byte(&response, 0)?)?;
+        refused(accepted, response_byte(&response, 1)?)
     }
 
     /// Runs the SWD sample-position instrument.
-    pub fn sample_swd(&mut self, request: SampleRequest) -> Result<SampleResult, DebugProbeError> {
-        let payload = encode_sample_request(request)?;
+    pub fn sample_swd(
+        &mut self,
+        request: SampleRequest,
+    ) -> Result<SampleResult, CommandError<Refused<SampleResult>>> {
+        let payload = encode_sample_request(request).map_err(CommandError::InvalidRequest)?;
         let response = self.send(SAMPLE_COMMAND, &payload)?;
         let mut reader = ResponseReader::new(&response);
-        Ok(SampleResult {
-            status: VendorStatus::from_byte(reader.u8()?),
+        let accepted = vendor_status(reader.u8()?)?;
+        let result = SampleResult {
             good: reader.u16()?,
             bad_acknowledgements: reader.u16()?,
             bad_words: reader.u16()?,
             last_bad_acknowledgement: reader.u8()?,
             last_bad_dpidr: reader.u32()?,
             cycles: reader.u32()?,
-        })
+        };
+        refused(accepted, result)
     }
 
     /// Returns the executable arenas exposed by a code-lab firmware build.
-    pub fn code_lab_arenas(&mut self) -> Result<Vec<CodeLabArena>, DebugProbeError> {
+    pub fn code_lab_arenas(&mut self) -> Result<Vec<CodeLabArena>, CommandError<Refused>> {
         let response = self.send(CODE_LAB_COMMAND, &[0])?;
-        let mut reader = ResponseReader::new(&response);
-        check_vendor_status(reader.u8()?)?;
+        expect_accepted(&response)?;
+        let mut reader = ResponseReader::new(&response[1..]);
         let count = usize::from(reader.u8()?);
         (0..count)
             .map(|_| {
@@ -854,15 +896,15 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         arena: u8,
         offset: u16,
         bytes: &[u8],
-    ) -> Result<(), DebugProbeError> {
+    ) -> Result<(), CommandError<Refused>> {
         let length = u16::try_from(bytes.len())
-            .map_err(|_| protocol_error("code-lab write is longer than u16::MAX"))?;
+            .map_err(|_| CommandError::InvalidRequest("a code-lab write is at most 65535 bytes"))?;
         let mut payload = Vec::with_capacity(6 + bytes.len());
         payload.extend_from_slice(&[1, arena]);
         payload.extend_from_slice(&offset.to_le_bytes());
         payload.extend_from_slice(&length.to_le_bytes());
         payload.extend_from_slice(bytes);
-        check_dap_status(&self.send(CODE_LAB_COMMAND, &payload)?)
+        expect_accepted(&self.send(CODE_LAB_COMMAND, &payload)?)
     }
 
     /// Reads bytes from a code-lab arena.
@@ -871,16 +913,16 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         arena: u8,
         offset: u16,
         length: u16,
-    ) -> Result<Vec<u8>, DebugProbeError> {
+    ) -> Result<Vec<u8>, CommandError<Refused>> {
         let mut payload = vec![2, arena];
         payload.extend_from_slice(&offset.to_le_bytes());
         payload.extend_from_slice(&length.to_le_bytes());
         let response = self.send(CODE_LAB_COMMAND, &payload)?;
-        check_dap_status(&response)?;
-        response
+        expect_accepted(&response)?;
+        Ok(response
             .get(1..1 + usize::from(length))
             .map(<[u8]>::to_vec)
-            .ok_or_else(|| protocol_error("short code-lab read response"))
+            .ok_or_else(|| malformed("short code-lab read response"))?)
     }
 
     /// Runs a Thumb entry point from a code-lab arena with four 32-bit arguments.
@@ -892,14 +934,14 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         arena: u8,
         entry_offset: u16,
         arguments: [u32; 4],
-    ) -> Result<[u32; 2], DebugProbeError> {
+    ) -> Result<[u32; 2], CommandError<Refused>> {
         let mut payload = vec![3, arena];
         payload.extend_from_slice(&entry_offset.to_le_bytes());
         for argument in arguments {
             payload.extend_from_slice(&argument.to_le_bytes());
         }
         let response = self.send(CODE_LAB_COMMAND, &payload)?;
-        check_dap_status(&response)?;
+        expect_accepted(&response)?;
         Ok([
             u32::from_le_bytes(response_array(&response, 1..5)?),
             u32::from_le_bytes(response_array(&response, 5..9)?),
@@ -911,10 +953,11 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         &mut self,
         latency: u8,
         mode: CodegenMode,
-    ) -> Result<SwdCodegenState, DebugProbeError> {
+    ) -> Result<SwdCodegenState, CommandError<Refused<SwdCodegenState>>> {
         self.require_flag(CAP_SWD_CODEGEN, "SWD code generation")?;
         let response = self.send(SWD_CODEGEN_COMMAND, &[latency, mode as u8])?;
-        parse_swd_codegen_state(&response)
+        let (accepted, state) = parse_swd_codegen_state(&response)?;
+        refused(accepted, state)
     }
 
     /// Reads or changes the JTAG code generator's latency policy.
@@ -923,55 +966,53 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         two_pin_latency: u8,
         four_wire_latency: u8,
         mode: CodegenMode,
-    ) -> Result<JtagCodegenState, DebugProbeError> {
+    ) -> Result<JtagCodegenState, CommandError<Refused<JtagCodegenState>>> {
         self.require_flag(CAP_JTAG_CODEGEN, "JTAG code generation")?;
         let response = self.send(
             JTAG_CODEGEN_COMMAND,
             &[two_pin_latency, four_wire_latency, mode as u8],
         )?;
-        parse_jtag_codegen_state(&response)
+        let (accepted, state) = parse_jtag_codegen_state(&response)?;
+        refused(accepted, state)
     }
 
     /// Reads the current JTAG pacing state or enables/disables learned idle clocks.
     pub fn set_jtag_pacing(
         &mut self,
         enabled: Option<bool>,
-    ) -> Result<JtagPacingState, DebugProbeError> {
+    ) -> Result<JtagPacingState, CommandError<Refused<JtagPacingState>>> {
         self.require_flag(CAP_JTAG_CODEGEN, "JTAG code generation")?;
         let mode = enabled.map_or(2, u8::from);
         let response = self.send(JTAG_PACING_COMMAND, &[mode])?;
-        Ok(JtagPacingState {
-            status: VendorStatus::from_byte(response_byte(&response, 0)?),
+        let accepted = vendor_status(response_byte(&response, 0)?)?;
+        let state = JtagPacingState {
             enabled: read_bool_at(&response, 1, "JTAG pacing state")?,
             paced_clocks: response_byte(&response, 2)?,
-        })
+        };
+        refused(accepted, state)
     }
 
-    /// Reads command staging state or selects which firmware core stages DAP requests.
+    /// Reads or sets whether CPU 0 stages DAP commands for CPU 1, and returns whether it does.
     pub fn set_cpu_staging(
         &mut self,
         enabled: Option<bool>,
-    ) -> Result<CpuStagingState, DebugProbeError> {
+    ) -> Result<bool, CommandError<Refused<bool>>> {
         let mode = enabled.map_or(2, u8::from);
         let response = self.send(CPU_STAGING_COMMAND, &[mode])?;
-        Ok(CpuStagingState {
-            status: VendorStatus::from_byte(response_byte(&response, 0)?),
-            enabled: read_bool_at(&response, 1, "CPU staging state")?,
-        })
+        let accepted = vendor_status(response_byte(&response, 0)?)?;
+        refused(accepted, read_bool_at(&response, 1, "CPU staging state")?)
     }
 
     /// Reads one JTAG code-generation log entry, with zero selecting the newest entry.
     pub fn read_jtag_generation_log(
         &mut self,
         generations_back: u8,
-    ) -> Result<Option<JtagGenerationLogEntry>, DebugProbeError> {
+    ) -> Result<Option<JtagGenerationLogEntry>, CommandError<Infallible>> {
         self.require_flag(CAP_JTAG_CODEGEN, "JTAG code generation")?;
         let response = self.send(JTAG_LOG_COMMAND, &[generations_back])?;
         let mut reader = ResponseReader::new(&response);
-        match VendorStatus::from_byte(reader.u8()?) {
-            VendorStatus::Ok => {}
-            VendorStatus::Error => return Ok(None),
-            VendorStatus::Unknown(_) => return Err(protocol_error("invalid JTAG log status")),
+        if !vendor_status(reader.u8()?)? {
+            return Ok(None);
         }
         Ok(Some(JtagGenerationLogEntry {
             count: reader.u32()?,
@@ -990,34 +1031,32 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         }))
     }
 
-    fn require_capability(
+    fn require_capability<E: std::error::Error + 'static>(
         &mut self,
         capability: u32,
         command_name: &'static str,
-    ) -> Result<&VergeInfo, DebugProbeError> {
+    ) -> Result<&VergeInfo, CommandError<E>> {
         let info = self
-            .info()?
-            .ok_or(DebugProbeError::CommandNotSupportedByProbe {
-                command_name: "Verge firmware",
-            })?;
+            .info()
+            .map_err(CommandError::widen)?
+            .ok_or(CommandError::Unsupported("Verge commands"))?;
         if info.extended_capabilities & capability == 0 {
-            return Err(DebugProbeError::CommandNotSupportedByProbe { command_name });
+            return Err(CommandError::Unsupported(command_name));
         }
         Ok(info)
     }
 
-    fn require_flag(
+    fn require_flag<E: std::error::Error + 'static>(
         &mut self,
         capability: u8,
         command_name: &'static str,
-    ) -> Result<(), DebugProbeError> {
+    ) -> Result<(), CommandError<E>> {
         let info = self
-            .info()?
-            .ok_or(DebugProbeError::CommandNotSupportedByProbe {
-                command_name: "Verge firmware",
-            })?;
+            .info()
+            .map_err(CommandError::widen)?
+            .ok_or(CommandError::Unsupported("Verge commands"))?;
         if info.capabilities & capability == 0 {
-            return Err(DebugProbeError::CommandNotSupportedByProbe { command_name });
+            return Err(CommandError::Unsupported(command_name));
         }
         Ok(())
     }
@@ -1026,31 +1065,30 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         &mut self,
         mode: u8,
         channel: u8,
-    ) -> Result<TargetSenseReading, DebugProbeError> {
+    ) -> Result<TargetSenseReading, CommandError<TargetSenseError>> {
         let response = self.send(TARGET_SENSE_COMMAND, &[mode, channel])?;
-        let detected = response_byte(&response, 5)?;
-        if detected > 1 {
-            return Err(protocol_error("invalid target-detect byte"));
+        let accepted = vendor_status(response_byte(&response, 0)?)?;
+        let code = u16::from_le_bytes(response_array(&response, 1..3)?);
+        let millivolts = u16::from_le_bytes(response_array(&response, 3..5)?);
+        let detected = read_bool_at(&response, 5, "target-detect byte")?;
+        if !accepted {
+            // The firmware reports the failing step in the code field.
+            return Err(CommandError::Firmware(TargetSenseError::from_code(code)));
         }
         Ok(TargetSenseReading {
-            status: VendorStatus::from_byte(response_byte(&response, 0)?),
-            code: u16::from_le_bytes(response_array(&response, 1..3)?),
-            millivolts: u16::from_le_bytes(response_array(&response, 3..5)?),
-            detected: detected == 1,
+            code,
+            millivolts,
+            detected,
         })
     }
 
-    fn target_power_command(&mut self, mode: u8) -> Result<TargetPowerState, DebugProbeError> {
+    fn target_power_command(&mut self, mode: u8) -> Result<bool, CommandError<Refused<bool>>> {
         let response = self.send(TARGET_POWER_COMMAND, &[mode])?;
-        let enabled = match response_byte(&response, 1)? {
-            0 => false,
-            1 => true,
-            _ => return Err(protocol_error("invalid target-power state byte")),
-        };
-        Ok(TargetPowerState {
-            status: VendorStatus::from_byte(response_byte(&response, 0)?),
-            enabled,
-        })
+        let accepted = vendor_status(response_byte(&response, 0)?)?;
+        refused(
+            accepted,
+            read_bool_at(&response, 1, "target-power state byte")?,
+        )
     }
 
     fn send(&mut self, command_id: u8, payload: &[u8]) -> Result<Vec<u8>, DebugProbeError> {
@@ -1084,10 +1122,9 @@ pub fn install_cjtag_support(probe: &mut Probe) -> Result<(), DebugProbeError> {
 pub fn set_cjtag_scan_formats(
     probe: &mut Probe,
     formats: u32,
-) -> Result<VendorStatus, DebugProbeError> {
+) -> Result<(), CommandError<Refused>> {
     let request = protocol::encode_scan_formats(formats);
-    let response = probe.send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?;
-    Ok(VendorStatus::from_byte(response_byte(&response, 0)?))
+    expect_accepted(&probe.send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?)
 }
 
 struct VergeCjtagExtension;
@@ -1097,7 +1134,7 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
         &mut self,
         send_vendor_command: &mut dyn FnMut(u8, &[u8]) -> Result<Vec<u8>, DebugProbeError>,
     ) -> Result<Vec<ScanFormat>, DebugProbeError> {
-        let Some(info) = read_info(send_vendor_command)? else {
+        let Some(info) = read_info(send_vendor_command).map_err(into_probe_error)? else {
             return Ok(Vec::new());
         };
         Ok([
@@ -1122,7 +1159,13 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
             Some(format) => vec![3, format.number(), TAP_RUN_TEST_IDLE],
         };
         let response = send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?;
-        check_dap_status(&response)
+        if vendor_status(response_byte(&response, 0)?)? {
+            Ok(())
+        } else {
+            Err(DebugProbeError::Other(
+                "the firmware refused the two-pin framing".to_owned(),
+            ))
+        }
     }
 }
 
@@ -1131,13 +1174,51 @@ type VendorCommandSender<'a> =
 
 fn read_info(
     send_vendor_command: &mut VendorCommandSender<'_>,
-) -> Result<Option<VergeInfo>, DebugProbeError> {
+) -> Result<Option<VergeInfo>, CommandError<Infallible>> {
     let reply = send_vendor_command(INFO_COMMAND, &[])?;
-    protocol::decode_info(&reply).map_err(protocol_error)
+    Ok(protocol::decode_info(&reply).map_err(malformed)?)
 }
 
-fn check_dap_status(response: &[u8]) -> Result<(), DebugProbeError> {
-    check_vendor_status(response_byte(response, 0)?)
+fn into_probe_error(error: CommandError<Infallible>) -> DebugProbeError {
+    match error {
+        CommandError::Probe(error) => error,
+        CommandError::Unsupported(command_name) => {
+            DebugProbeError::CommandNotSupportedByProbe { command_name }
+        }
+        CommandError::InvalidRequest(reason) => DebugProbeError::Other(reason.to_owned()),
+        CommandError::Malformed(reason) => DebugProbeError::Other(reason),
+        CommandError::Firmware(never) => match never {},
+    }
+}
+
+/// Whether a vendor reply's status byte accepts the request.
+fn vendor_status(status: u8) -> Result<bool, MalformedReply> {
+    match VendorStatus::from_byte(status) {
+        VendorStatus::Ok => Ok(true),
+        VendorStatus::Error => Ok(false),
+        VendorStatus::Unknown(_) => Err(malformed("invalid vendor command status")),
+    }
+}
+
+fn refused<S: Debug + 'static>(accepted: bool, state: S) -> Result<S, CommandError<Refused<S>>> {
+    if accepted {
+        Ok(state)
+    } else {
+        Err(CommandError::Firmware(Refused(state)))
+    }
+}
+
+fn expect_accepted(response: &[u8]) -> Result<(), CommandError<Refused>> {
+    refused(vendor_status(response_byte(response, 0)?)?, ())
+}
+
+/// The energy command answers DAP_ERROR only to a mode it does not know.
+fn energy_mode_known(status: u8) -> Result<(), MalformedReply> {
+    if vendor_status(status)? {
+        Ok(())
+    } else {
+        Err(malformed("the firmware did not recognise the energy mode"))
+    }
 }
 
 fn energy_capture_start_request(rate_pairs_per_second: u32) -> [u8; 5] {
@@ -1150,7 +1231,7 @@ fn parse_energy_capture_start(
     response: &[u8],
 ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
-    check_vendor_status(reader.u8()?)?;
+    energy_mode_known(reader.u8()?)?;
     let status = reader.u8()?;
     let actual_rate_pairs_per_second = reader.u32()?;
     EnergyError::check(status).map_err(CommandError::Firmware)?;
@@ -1161,7 +1242,7 @@ fn parse_energy_capture_start(
 
 fn parse_energy_status(response: &[u8]) -> Result<(), CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
-    check_vendor_status(reader.u8()?)?;
+    energy_mode_known(reader.u8()?)?;
     EnergyError::check(reader.u8()?).map_err(CommandError::Firmware)
 }
 
@@ -1170,7 +1251,7 @@ fn parse_energy_capture_sample(
     calibrated_supported: bool,
 ) -> Result<EnergyCaptureSample, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
-    check_vendor_status(reader.u8()?)?;
+    energy_mode_known(reader.u8()?)?;
     let status = reader.u8()?;
     let raw_sample = RawEnergySample {
         voltage_code: reader.u16()?,
@@ -1209,7 +1290,7 @@ fn parse_energy_accumulator(
     response: &[u8],
 ) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
-    check_vendor_status(reader.u8()?)?;
+    energy_mode_known(reader.u8()?)?;
     let status = reader.u8()?;
     let accumulator = EnergyAccumulator {
         energy_nanojoules: reader.u64()?,
@@ -1224,16 +1305,14 @@ fn encode_spi_request(
     mode: SpiMode,
     lsb_first: bool,
     tx: &[u8],
-) -> Result<Vec<u8>, DebugProbeError> {
+) -> Result<Vec<u8>, &'static str> {
     if !(SPI_MIN_CLOCK_HZ..=SPI_MAX_CLOCK_HZ).contains(&clock_hz) {
-        return Err(protocol_error("SPI clock is outside the supported range"));
+        return Err("SPI clock is outside the supported range");
     }
     if tx.is_empty() || tx.len() > SPI_MAX_TRANSFER {
-        return Err(protocol_error(
-            "SPI transfer length is outside the supported range",
-        ));
+        return Err("SPI transfer length is outside the supported range");
     }
-    let count = u16::try_from(tx.len()).map_err(|_| protocol_error("SPI transfer is too long"))?;
+    let count = u16::try_from(tx.len()).map_err(|_| "SPI transfer is too long")?;
     let mut request = Vec::with_capacity(7 + tx.len());
     request.push(mode.bits() | if lsb_first { 1 << 2 } else { 0 });
     request.extend_from_slice(&clock_hz.to_le_bytes());
@@ -1251,12 +1330,12 @@ fn parse_bus_response(
     let count = usize::from(reader.u16()?);
     let data = response
         .get(3..3 + count)
-        .ok_or_else(|| protocol_error("short bridge data response"))?;
+        .ok_or_else(|| malformed("short bridge data response"))?;
     if status == 0 && count != expected_count {
-        return Err(protocol_error("bridge response length does not match the request").into());
+        return Err(malformed("bridge response length does not match the request").into());
     }
     if status != 0 && count != 0 {
-        return Err(protocol_error("failed bridge response contains data").into());
+        return Err(malformed("failed bridge response contains data").into());
     }
     ProBusError::check(status).map_err(CommandError::Firmware)?;
     Ok(data.to_vec())
@@ -1267,24 +1346,21 @@ fn encode_i2c_request(
     clock_hz: u32,
     write: &[u8],
     read_len: usize,
-) -> Result<Vec<u8>, DebugProbeError> {
+) -> Result<Vec<u8>, &'static str> {
     if address > 0x7f {
-        return Err(protocol_error("I2C address is not 7-bit"));
+        return Err("I2C address is not 7-bit");
     }
     if !(I2C_MIN_CLOCK_HZ..=I2C_MAX_CLOCK_HZ).contains(&clock_hz) {
-        return Err(protocol_error("I2C clock is outside the supported range"));
+        return Err("I2C clock is outside the supported range");
     }
     if write.is_empty() && read_len == 0 {
-        return Err(protocol_error("I2C transfer is empty"));
+        return Err("I2C transfer is empty");
     }
     if write.len() > I2C_MAX_WRITE || read_len > I2C_MAX_READ {
-        return Err(protocol_error(
-            "I2C transfer is longer than the supported packet size",
-        ));
+        return Err("I2C transfer is longer than the supported packet size");
     }
-    let write_count =
-        u16::try_from(write.len()).map_err(|_| protocol_error("I2C write is too long"))?;
-    let read_count = u16::try_from(read_len).map_err(|_| protocol_error("I2C read is too long"))?;
+    let write_count = u16::try_from(write.len()).map_err(|_| "I2C write is too long")?;
+    let read_count = u16::try_from(read_len).map_err(|_| "I2C read is too long")?;
     let mut request = Vec::with_capacity(9 + write.len());
     request.push(address);
     request.extend_from_slice(&clock_hz.to_le_bytes());
@@ -1294,9 +1370,9 @@ fn encode_i2c_request(
     Ok(request)
 }
 
-fn parse_swd_codegen_state(response: &[u8]) -> Result<SwdCodegenState, DebugProbeError> {
+fn parse_swd_codegen_state(response: &[u8]) -> Result<(bool, SwdCodegenState), MalformedReply> {
     let mut reader = ResponseReader::new(response);
-    let status = VendorStatus::from_byte(reader.u8()?);
+    let accepted = vendor_status(reader.u8()?)?;
     let latency = reader.u8()?;
     let masked = read_bool(&mut reader, "SWD masked flag")?;
     let generated = read_bool(&mut reader, "SWD generated flag")?;
@@ -1311,8 +1387,7 @@ fn parse_swd_codegen_state(response: &[u8]) -> Result<SwdCodegenState, DebugProb
     } else {
         None
     };
-    Ok(SwdCodegenState {
-        status,
+    let state = SwdCodegenState {
         latency,
         masked,
         generated,
@@ -1323,12 +1398,13 @@ fn parse_swd_codegen_state(response: &[u8]) -> Result<SwdCodegenState, DebugProb
         builds,
         failures,
         measurement,
-    })
+    };
+    Ok((accepted, state))
 }
 
-fn parse_jtag_codegen_state(response: &[u8]) -> Result<JtagCodegenState, DebugProbeError> {
+fn parse_jtag_codegen_state(response: &[u8]) -> Result<(bool, JtagCodegenState), MalformedReply> {
     let mut reader = ResponseReader::new(response);
-    let status = VendorStatus::from_byte(reader.u8()?);
+    let accepted = vendor_status(reader.u8()?)?;
     let two_pin_latency = reader.u8()?;
     let four_wire_latency = reader.u8()?;
     let masked = read_bool(&mut reader, "JTAG masked flag")?;
@@ -1349,8 +1425,7 @@ fn parse_jtag_codegen_state(response: &[u8]) -> Result<JtagCodegenState, DebugPr
     } else {
         None
     };
-    Ok(JtagCodegenState {
-        status,
+    let state = JtagCodegenState {
         two_pin_latency,
         four_wire_latency,
         masked,
@@ -1363,18 +1438,19 @@ fn parse_jtag_codegen_state(response: &[u8]) -> Result<JtagCodegenState, DebugPr
         failures,
         measurement,
         restores,
-    })
+    };
+    Ok((accepted, state))
 }
 
-fn encode_sample_request(request: SampleRequest) -> Result<Vec<u8>, DebugProbeError> {
+fn encode_sample_request(request: SampleRequest) -> Result<Vec<u8>, &'static str> {
     if request.fill > SAMPLE_FILL_MAX {
-        return Err(protocol_error("sample fill exceeds firmware limit"));
+        return Err("sample fill exceeds the firmware limit");
     }
     let at = match request.position {
         SamplePosition::AfterEdge(cycles) if cycles <= request.fill => cycles,
         SamplePosition::Lead(cycles) if cycles <= request.fill => 0x80 | cycles,
         SamplePosition::BeforeEdge => 0xFF,
-        _ => return Err(protocol_error("sample position exceeds filler phase")),
+        _ => return Err("sample position exceeds the filler phase"),
     };
     let mut payload = vec![request.low, request.fill, at];
     payload.extend_from_slice(&request.count.to_le_bytes());
@@ -1396,53 +1472,53 @@ impl<'a> ResponseReader<'a> {
         self.bytes.len().saturating_sub(self.offset)
     }
 
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], DebugProbeError> {
+    fn take<const N: usize>(&mut self) -> Result<[u8; N], MalformedReply> {
         let value = response_array(self.bytes, self.offset..self.offset + N)?;
         self.offset += N;
         Ok(value)
     }
 
-    fn u8(&mut self) -> Result<u8, DebugProbeError> {
+    fn u8(&mut self) -> Result<u8, MalformedReply> {
         Ok(self.take::<1>()?[0])
     }
 
-    fn u16(&mut self) -> Result<u16, DebugProbeError> {
+    fn u16(&mut self) -> Result<u16, MalformedReply> {
         Ok(u16::from_le_bytes(self.take()?))
     }
 
-    fn u32(&mut self) -> Result<u32, DebugProbeError> {
+    fn u32(&mut self) -> Result<u32, MalformedReply> {
         Ok(u32::from_le_bytes(self.take()?))
     }
 
-    fn i32(&mut self) -> Result<i32, DebugProbeError> {
+    fn i32(&mut self) -> Result<i32, MalformedReply> {
         Ok(i32::from_le_bytes(self.take()?))
     }
 
-    fn u64(&mut self) -> Result<u64, DebugProbeError> {
+    fn u64(&mut self) -> Result<u64, MalformedReply> {
         Ok(u64::from_le_bytes(self.take()?))
     }
 }
 
-fn read_bool(reader: &mut ResponseReader<'_>, field: &str) -> Result<bool, DebugProbeError> {
+fn read_bool(reader: &mut ResponseReader<'_>, field: &str) -> Result<bool, MalformedReply> {
     match reader.u8()? {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(protocol_error(&format!("invalid {field}"))),
+        _ => Err(malformed(format!("invalid {field}"))),
     }
 }
 
-fn read_bool_at(response: &[u8], index: usize, field: &str) -> Result<bool, DebugProbeError> {
+fn read_bool_at(response: &[u8], index: usize, field: &str) -> Result<bool, MalformedReply> {
     match response_byte(response, index)? {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(protocol_error(&format!("invalid {field}"))),
+        _ => Err(malformed(format!("invalid {field}"))),
     }
 }
 
 fn read_codegen_measurement(
     reader: &mut ResponseReader<'_>,
     has_wire: bool,
-) -> Result<CodegenMeasurement, DebugProbeError> {
+) -> Result<CodegenMeasurement, MalformedReply> {
     let automatic = read_bool(reader, "automatic codegen flag")?;
     let outcome = LatencyOutcome::from_byte(reader.u8()?);
     let wire = if has_wire { Some(reader.u8()?) } else { None };
@@ -1469,33 +1545,41 @@ fn read_codegen_measurement(
     })
 }
 
-fn check_vendor_status(status: u8) -> Result<(), DebugProbeError> {
-    match VendorStatus::from_byte(status) {
-        VendorStatus::Ok => Ok(()),
-        VendorStatus::Error => Err(protocol_error("vendor command refused the request")),
-        VendorStatus::Unknown(_) => Err(protocol_error("invalid vendor command status")),
-    }
-}
-
-fn response_byte(response: &[u8], index: usize) -> Result<u8, DebugProbeError> {
+fn response_byte(response: &[u8], index: usize) -> Result<u8, MalformedReply> {
     response
         .get(index)
         .copied()
-        .ok_or_else(|| protocol_error("short vendor command response"))
+        .ok_or_else(|| malformed("short vendor command response"))
 }
 
 fn response_array<const N: usize>(
     response: &[u8],
     range: std::ops::Range<usize>,
-) -> Result<[u8; N], DebugProbeError> {
+) -> Result<[u8; N], MalformedReply> {
     response
         .get(range)
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| protocol_error("short vendor command response"))
+        .ok_or_else(|| malformed("short vendor command response"))
 }
 
-fn protocol_error(message: &str) -> DebugProbeError {
-    DebugProbeError::Other(message.to_owned())
+/// A reply that does not follow its command's protocol.
+#[derive(Debug)]
+struct MalformedReply(String);
+
+fn malformed(reason: impl Into<String>) -> MalformedReply {
+    MalformedReply(reason.into())
+}
+
+impl<E: std::error::Error + 'static> From<MalformedReply> for CommandError<E> {
+    fn from(reply: MalformedReply) -> Self {
+        Self::Malformed(reply.0)
+    }
+}
+
+impl From<MalformedReply> for DebugProbeError {
+    fn from(reply: MalformedReply) -> Self {
+        Self::Other(reply.0)
+    }
 }
 
 #[cfg(test)]
@@ -1551,9 +1635,7 @@ mod tests {
         };
         let mut verge = VergeControl::new(&mut transport);
 
-        let result = verge.set_target_power(true).unwrap();
-
-        assert!(result.enabled);
+        assert!(verge.set_target_power(true).unwrap());
         assert_eq!(
             transport.commands,
             [(INFO_COMMAND, vec![]), (TARGET_POWER_COMMAND, vec![1])]
@@ -1581,7 +1663,7 @@ mod tests {
             fn send_vendor_command(&mut self, _: u8, _: &[u8]) -> Result<Vec<u8>, DebugProbeError> {
                 self.0 += 1;
                 if self.0 == 1 {
-                    Err(protocol_error("read failed"))
+                    Err(DebugProbeError::Other("read failed".to_owned()))
                 } else {
                     Ok(info_reply(6, CAP_DIO, 1, 0, 0))
                 }
@@ -1593,6 +1675,84 @@ mod tests {
         assert!(verge.info().unwrap().unwrap().supports_dio());
         assert!(verge.info().unwrap().unwrap().supports_dio());
         assert_eq!(transport.0, 2);
+    }
+
+    #[test]
+    fn a_refusal_is_an_error_that_carries_the_reported_state() {
+        let mut transport = FakeTransport {
+            replies: [
+                info_reply(6, CAP_TARGET_POWER | CAP_DIO, 1, 0, 0),
+                vec![0xFF, 0],
+                vec![0xFF, 0, 0, 0, 15, 2, 7, 8],
+            ]
+            .into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+
+        assert!(matches!(
+            verge.set_target_power(true),
+            Err(CommandError::Firmware(Refused(false)))
+        ));
+        let Err(CommandError::Firmware(Refused(state))) = verge.access_dio(0x07, 0x01, 0x01) else {
+            panic!("a refused DIO update must be an error");
+        };
+        assert_eq!((state.outputs, state.groups), (0, vec![7, 8]));
+    }
+
+    #[test]
+    fn a_failed_target_sense_names_the_failed_step() {
+        let mut transport = FakeTransport {
+            replies: [
+                info_reply(6, CAP_TARGET_SENSE, 1, 0, 0),
+                vec![0xFF, 2, 0, 0, 0, 1],
+                vec![0, 0x34, 0x12, 0xE4, 0x0C, 1],
+            ]
+            .into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+
+        assert!(matches!(
+            verge.read_target_sense(),
+            Err(CommandError::Firmware(TargetSenseError::GainCalibration))
+        ));
+        assert_eq!(
+            verge.read_target_sense().unwrap(),
+            TargetSenseReading {
+                code: 0x1234,
+                millivolts: 3300,
+                detected: true,
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_and_invalid_requests_send_nothing() {
+        let mut transport = FakeTransport {
+            replies: [info_reply(6, 0, 1, 0, CAP_SPI)].into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+
+        assert!(matches!(
+            verge.i2c_transfer(0x50, 100_000, &[], 1),
+            Err(CommandError::Unsupported("the I2C bridge"))
+        ));
+        assert!(matches!(
+            verge.spi_transfer(1, SpiMode::Mode0, false, &[0]),
+            Err(CommandError::InvalidRequest(_))
+        ));
+        assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);
+
+        let mut transport = FakeTransport {
+            replies: [Vec::new()].into(),
+            commands: Vec::new(),
+        };
+        assert!(matches!(
+            VergeControl::new(&mut transport).read_target_power(),
+            Err(CommandError::Unsupported("Verge commands"))
+        ));
     }
 
     #[test]
@@ -1780,7 +1940,7 @@ mod tests {
                             CommandError::Firmware(EnergyError::DmaError) => {
                                 assert_eq!(stop_reply, [0, 7])
                             }
-                            CommandError::Probe(_) => assert_eq!(stop_reply, [0]),
+                            CommandError::Malformed(_) => assert_eq!(stop_reply, [0]),
                             error => panic!("unexpected cleanup error: {error}"),
                         }
                     }
@@ -1799,11 +1959,11 @@ mod tests {
         ));
         assert!(matches!(
             parse_bus_response(&[5, 1, 0, 42], 1),
-            Err(CommandError::Probe(_))
+            Err(CommandError::Malformed(_))
         ));
         assert!(matches!(
             parse_bus_response(&[0, 2, 0, 42], 2),
-            Err(CommandError::Probe(_))
+            Err(CommandError::Malformed(_))
         ));
     }
 
@@ -1865,7 +2025,11 @@ mod tests {
             let probe = VergeControl::new(&mut transport).access_dio(0, 0, 0);
             match (crate::dap::parse_dio(&packet), probe) {
                 (Ok(Some(a)), Ok(b)) => assert_eq!(a, b),
-                (Err(_), Err(_)) => {}
+                // A status that is neither accepted nor refused is the protocol's to reject here.
+                (Ok(Some(a)), Err(CommandError::Malformed(_))) => {
+                    assert!(matches!(a.status, VendorStatus::Unknown(_)))
+                }
+                (Err(_), Err(CommandError::Malformed(_))) => {}
                 replies => panic!("decoders disagree: {replies:?}"),
             }
         }
@@ -2020,7 +2184,7 @@ mod tests {
         let mut swd_legacy = vec![0, 3, 1, 1];
         swd_legacy.extend_from_slice(&[0; 24]);
         assert_eq!(
-            parse_swd_codegen_state(&swd_legacy).unwrap().measurement,
+            parse_swd_codegen_state(&swd_legacy).unwrap().1.measurement,
             None
         );
 
@@ -2029,20 +2193,21 @@ mod tests {
         assert!(
             parse_swd_codegen_state(&swd_extended)
                 .unwrap()
+                .1
                 .measurement
                 .is_some()
         );
 
         let mut jtag_legacy = vec![0, 3, 4, 1, 1];
         jtag_legacy.extend_from_slice(&[0; 24]);
-        let legacy = parse_jtag_codegen_state(&jtag_legacy).unwrap();
+        let (_, legacy) = parse_jtag_codegen_state(&jtag_legacy).unwrap();
         assert_eq!(legacy.measurement, None);
         assert_eq!(legacy.restores, None);
 
         let mut jtag_extended = jtag_legacy;
         jtag_extended.extend_from_slice(&[0; 30]);
         jtag_extended.extend_from_slice(&7u32.to_le_bytes());
-        let extended = parse_jtag_codegen_state(&jtag_extended).unwrap();
+        let (_, extended) = parse_jtag_codegen_state(&jtag_extended).unwrap();
         assert!(extended.measurement.is_some());
         assert_eq!(extended.restores, Some(7));
     }

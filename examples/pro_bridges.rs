@@ -2,7 +2,7 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use verge_probe::probe_rs::probe::list::Lister;
-use verge_probe::{SpiMode, VendorStatus, VergeProbe, install_cjtag_support};
+use verge_probe::{CommandError, Refused, SpiMode, VergeProbe, install_cjtag_support};
 
 fn dio_state(label: &str, state: &verge_probe::DioState) {
     println!(
@@ -15,22 +15,26 @@ fn run_dio_smoke(verge: &mut VergeProbe<'_>) -> Result<(), Box<dyn Error>> {
     let checks: Result<(), Box<dyn Error>> = (|| {
         let initial = verge.access_dio(0, 0, 0)?;
         dio_state("initial", &initial);
-        if initial.status != VendorStatus::Ok || initial.outputs != 0 {
+        if initial.outputs != 0 {
             return Err("DIO pins were not inputs before the smoke check".into());
         }
 
-        let split = verge.access_dio(0x07, 0x01, 0x01)?;
-        dio_state("split-group request", &split);
-        if split.status != VendorStatus::Error || split.outputs != 0 {
-            return Err("DIO accepted a split direction group or changed its state".into());
+        match verge.access_dio(0x07, 0x01, 0x01) {
+            Err(CommandError::Firmware(Refused(split))) => {
+                dio_state("split-group request", &split);
+                if split.outputs != 0 {
+                    return Err("DIO changed its state on a refused split request".into());
+                }
+            }
+            Ok(_) => return Err("DIO accepted a split direction group".into()),
+            Err(error) => return Err(error.into()),
         }
 
         for (label, mask) in [("DIO0-DIO2", 0x07), ("DIO3", 0x08)] {
             for level in [mask, 0] {
                 let state = verge.access_dio(mask, mask, level)?;
                 dio_state(label, &state);
-                if state.status != VendorStatus::Ok
-                    || state.outputs & mask != mask
+                if state.outputs & mask != mask
                     || state.levels & mask != level
                     || state.read & mask != level
                 {
@@ -45,7 +49,7 @@ fn run_dio_smoke(verge: &mut VergeProbe<'_>) -> Result<(), Box<dyn Error>> {
     checks?;
     let restored = restored?;
     dio_state("restored inputs", &restored);
-    if restored.status != VendorStatus::Ok || restored.outputs != 0 {
+    if restored.outputs != 0 {
         return Err("DIO pins were not restored to inputs".into());
     }
     Ok(())
