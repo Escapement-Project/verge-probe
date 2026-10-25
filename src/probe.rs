@@ -1,10 +1,11 @@
 //! Host operations for MCU-Link probes running the Verge firmware.
 
 use probe_rs::{
-    Session,
+    Permissions, Session,
     probe::{
-        DebugProbeError, Probe, ScanFormat,
+        DebugProbeError, Probe, ScanFormat, WireProtocol,
         cmsisdap::{CmsisDap, CmsisDapCjtagExtension},
+        list::Lister,
     },
 };
 use std::convert::Infallible;
@@ -1227,6 +1228,69 @@ pub fn install_cjtag_support(probe: &mut Probe) -> Result<(), DebugProbeError> {
             })?;
     cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension));
     Ok(())
+}
+
+/// Why [`attach`] could not open a session.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum AttachError {
+    #[error("no probe with serial number {0} is attached")]
+    NotFound(String),
+    #[error("no probe is attached")]
+    NoneAttached,
+    #[error("{0} probes are attached; name one by its serial number")]
+    Several(usize),
+    #[error("opening the probe failed")]
+    Open(#[source] DebugProbeError),
+    #[error("setting up the probe failed")]
+    Configure(#[source] DebugProbeError),
+    #[error("attaching to {chip} failed")]
+    Target {
+        chip: String,
+        #[source]
+        source: probe_rs::Error,
+    },
+}
+
+/// Opens the probe with `serial`, or the only one attached, and attaches to `chip` over
+/// `protocol`.
+///
+/// Verge's two-pin support is installed before cJTAG is selected. Without `speed_khz` the probe
+/// keeps its default clock.
+pub fn attach(
+    serial: Option<&str>,
+    chip: &str,
+    protocol: WireProtocol,
+    speed_khz: Option<u32>,
+) -> Result<Session, AttachError> {
+    let mut probes = Lister::new().list_all();
+    let info = match serial {
+        Some(serial) => probes
+            .into_iter()
+            .find(|probe| probe.serial_number.as_deref() == Some(serial))
+            .ok_or_else(|| AttachError::NotFound(serial.to_owned()))?,
+        None => match probes.len() {
+            0 => return Err(AttachError::NoneAttached),
+            1 => probes.remove(0),
+            several => return Err(AttachError::Several(several)),
+        },
+    };
+    let mut probe = info.open().map_err(AttachError::Open)?;
+    if protocol == WireProtocol::CJtag {
+        install_cjtag_support(&mut probe).map_err(AttachError::Configure)?;
+    }
+    probe
+        .select_protocol(protocol)
+        .map_err(AttachError::Configure)?;
+    if let Some(speed_khz) = speed_khz {
+        probe.set_speed(speed_khz).map_err(AttachError::Configure)?;
+    }
+    probe
+        .attach(chip, Permissions::default())
+        .map_err(|source| AttachError::Target {
+            chip: chip.to_owned(),
+            source,
+        })
 }
 
 /// Sets the scan formats the Verge firmware offers during future cJTAG discovery.
