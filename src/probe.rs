@@ -33,7 +33,7 @@ pub enum CommandError<E: std::error::Error + 'static> {
     /// The probe's firmware does not offer the command.
     #[error("this probe's firmware does not support {0}")]
     Unsupported(&'static str),
-    /// The request breaks a limit the firmware enforces. Nothing was sent.
+    /// The request is outside what the command supports. The command itself was not sent.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
     /// The reply does not follow the command's protocol.
@@ -287,9 +287,10 @@ pub struct EnergyAccumulator {
 pub enum EnergyTotal {
     /// The total since the last successful capture start.
     Total(EnergyAccumulator),
-    /// Acquisition failed with a DMA error or an ADC FIFO overflow. The total stops where the
-    /// firmware noticed the fault and does not account for samples lost before it. A successful
-    /// start clears the fault and the total.
+    /// The firmware's acquisition fault is set: a DMA error or ADC FIFO overflow during a
+    /// capture, or a start that could not take over the ADC. The total is what was integrated
+    /// before the fault, which after a fault mid-capture leaves out the samples lost to it, and is
+    /// zero when no capture ever started. A successful start clears the fault and the total.
     Failed(EnergyAccumulator),
     /// Capture has started but has not integrated a calibrated pair yet.
     NoSample,
@@ -1004,6 +1005,9 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads or changes the SWD code generator's latency policy.
+    ///
+    /// A refusal can follow a change the firmware applied, such as a latency it set and pinned
+    /// before refusing the measurement. The refusal's state is the generator after the request.
     pub fn configure_swd_codegen(
         &mut self,
         latency: u8,
@@ -1016,6 +1020,8 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads or changes the JTAG code generator's latency policy.
+    ///
+    /// As with [`Self::configure_swd_codegen`], a refusal can follow a change the firmware applied.
     pub fn configure_jtag_codegen(
         &mut self,
         two_pin_latency: u8,
