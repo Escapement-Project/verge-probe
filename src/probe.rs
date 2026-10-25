@@ -269,6 +269,21 @@ pub struct EnergyAccumulator {
     pub integrated_pairs: u64,
 }
 
+/// The energy accumulator's reading, including the states without a total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnergyTotal {
+    /// The total since the last successful capture start.
+    Total(EnergyAccumulator),
+    /// Acquisition failed with a DMA error or an ADC FIFO overflow. The total stops where the
+    /// firmware noticed the fault and does not account for samples lost before it. A successful
+    /// start clears the fault and the total.
+    Failed(EnergyAccumulator),
+    /// Capture has started but has not integrated a calibrated pair yet.
+    NoSample,
+    /// No capture has started since the probe booted.
+    Stopped,
+}
+
 /// One target-sense conversion returned by vendor command `0x86`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetSenseReading {
@@ -836,9 +851,7 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
     }
 
     /// Reads the energy total without resetting it.
-    pub fn read_energy_accumulator(
-        &mut self,
-    ) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
+    pub fn read_energy_accumulator(&mut self) -> Result<EnergyTotal, CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_ACCUMULATOR, "the energy accumulator")?;
         let response = self.send(ENERGY_COMMAND, &[3])?;
         parse_energy_accumulator(&response)
@@ -1286,9 +1299,7 @@ fn parse_energy_capture_sample(
     }
 }
 
-fn parse_energy_accumulator(
-    response: &[u8],
-) -> Result<EnergyAccumulator, CommandError<EnergyError>> {
+fn parse_energy_accumulator(response: &[u8]) -> Result<EnergyTotal, CommandError<EnergyError>> {
     let mut reader = ResponseReader::new(response);
     energy_mode_known(reader.u8()?)?;
     let status = reader.u8()?;
@@ -1296,8 +1307,13 @@ fn parse_energy_accumulator(
         energy_nanojoules: reader.u64()?,
         integrated_pairs: reader.u64()?,
     };
-    EnergyError::check(status).map_err(CommandError::Firmware)?;
-    Ok(accumulator)
+    match EnergyError::check(status) {
+        Ok(()) => Ok(EnergyTotal::Total(accumulator)),
+        Err(EnergyError::DmaError) => Ok(EnergyTotal::Failed(accumulator)),
+        Err(EnergyError::NoSample) => Ok(EnergyTotal::NoSample),
+        Err(EnergyError::Stopped) => Ok(EnergyTotal::Stopped),
+        Err(error) => Err(CommandError::Firmware(error)),
+    }
 }
 
 fn encode_spi_request(
@@ -2057,9 +2073,44 @@ mod tests {
         let mut accumulator_reply = vec![0, 0];
         accumulator_reply.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
         accumulator_reply.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
-        let accumulator = parse_energy_accumulator(&accumulator_reply).unwrap();
-        assert_eq!(accumulator.energy_nanojoules, 0x0102_0304_0506_0708);
-        assert_eq!(accumulator.integrated_pairs, 0x1112_1314_1516_1718);
+        let total = EnergyAccumulator {
+            energy_nanojoules: 0x0102_0304_0506_0708,
+            integrated_pairs: 0x1112_1314_1516_1718,
+        };
+        assert_eq!(
+            parse_energy_accumulator(&accumulator_reply).unwrap(),
+            EnergyTotal::Total(total)
+        );
+    }
+
+    #[test]
+    fn an_acquisition_failure_keeps_the_retained_total() {
+        let reply = |status: u8, energy: u64, pairs: u64| {
+            let mut reply = vec![0, status];
+            reply.extend_from_slice(&energy.to_le_bytes());
+            reply.extend_from_slice(&pairs.to_le_bytes());
+            reply
+        };
+        let total = EnergyAccumulator {
+            energy_nanojoules: 77_189_068,
+            integrated_pairs: 50_046,
+        };
+        assert_eq!(
+            parse_energy_accumulator(&reply(7, 77_189_068, 50_046)).unwrap(),
+            EnergyTotal::Failed(total)
+        );
+        assert_eq!(
+            parse_energy_accumulator(&reply(1, 0, 0)).unwrap(),
+            EnergyTotal::Stopped
+        );
+        assert_eq!(
+            parse_energy_accumulator(&reply(2, 0, 0)).unwrap(),
+            EnergyTotal::NoSample
+        );
+        assert!(matches!(
+            parse_energy_accumulator(&reply(6, 0, 0)),
+            Err(CommandError::Firmware(EnergyError::AdcError))
+        ));
     }
 
     #[test]
