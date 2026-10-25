@@ -2,8 +2,7 @@
 
 `verge-probe` is the shared library for the Verge CLI and GUI. It provides probe discovery,
 firmware identification, debug commands, GPIO and bus bridges, energy monitoring, reset and
-bootloader entry, firmware image and release handling, updates and batch operations. It contains
-no user interface.
+bootloader entry, firmware image and release handling, updates and batch operations.
 
 The library keeps update and ROM-bootloader operations behind its `Bus` API. For target debugging,
 it uses probe-rs. `VergeSession` adds typed commands for Verge firmware while keeping the attached
@@ -34,11 +33,13 @@ let _target_core = verge.session().core(0)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-SPI and I2C calls return received bytes on success. `CommandError` distinguishes transport errors
-from firmware failures. Energy readings are `Sample`, `NoSample` or `Stopped`; a sample contains
-the raw pair and any calibrated values.
+Typed commands fail with `CommandError`, which says whether the connection failed, the firmware
+lacks the command, the request was out of range, the reply broke the protocol, or the firmware
+refused or failed it. A refusal carries the state the firmware reported with it. SPI and I2C calls
+return the received bytes. The latest energy reading is a sample, no sample yet, or stopped. The
+accumulator also keeps its total after an acquisition fault.
 
-The same library exposes the workflows used by both frontends:
+Both frontends use the library for discovery, image loading and updates:
 
 ```rust,no_run
 use std::path::{Path, PathBuf};
@@ -53,11 +54,11 @@ let _ = (units, source);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`examples/pro_bridges.rs` requires a probe serial and runs only the operations named on its command
-line. It can check GPIO direction and readback, test all four SPI modes with a two-byte MOSI-to-MISO
-loopback, read one byte from a selected 7-bit I2C address, or run a cancellable energy monitor for
-five seconds. For the SPI check, connect J19 pin 3 (MOSI) to pin 5 (MISO). The example does not
-change target power. The monitor runs in the calling thread; UI code should run it in a worker.
+`examples/pro_bridges.rs` requires a probe serial number and runs the operations selected on its
+command line. It can check GPIO direction and readback, test all four SPI modes with a two-byte
+MOSI-to-MISO loopback, read one byte from a selected 7-bit I2C address, or run a cancellable energy
+monitor for five seconds. For the SPI check, connect J19 pin 3 (MOSI) to pin 5 (MISO). The example
+does not change target power. The monitor runs in the calling thread; UI code should run it in a worker.
 Firmware acquisition stays active between host polls, and the probe's accumulator covers pairs the
 host did not poll individually.
 
@@ -71,7 +72,15 @@ cargo run --example pro_bridges -- CJ8C2F60A3 --energy
 Use `--i2c` only with a known device on the bridge pins. The example performs a read-only
 transaction.
 
-Run the library tests with `cargo test --features simulate`. The simulation backend is available
-only with that feature; release builds leave it disabled.
+The simulation backend sits behind the `simulate` feature, which release builds leave off. The
+tests turn it on themselves.
+
+Before submitting a change, run:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+```
 
 `Cargo.toml` pins the probe-rs Git revision that provides CMSIS-DAP vendor commands and cJTAG.
