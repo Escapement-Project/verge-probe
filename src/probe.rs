@@ -1246,7 +1246,15 @@ type VendorCommandSender<'a> =
 fn read_info(
     send_vendor_command: &mut VendorCommandSender<'_>,
 ) -> Result<Option<VergeInfo>, CommandError<Infallible>> {
-    let reply = send_vendor_command(INFO_COMMAND, &[])?;
+    let reply = match send_vendor_command(INFO_COMMAND, &[]) {
+        Ok(reply) => reply,
+        // A probe without vendor commands, or firmware that answers 0x82 as unknown, is not Verge.
+        Err(
+            DebugProbeError::NotImplemented { .. }
+            | DebugProbeError::CommandNotSupportedByProbe { .. },
+        ) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     Ok(protocol::decode_info(&reply).map_err(malformed)?)
 }
 
@@ -1728,6 +1736,27 @@ mod tests {
         assert!(verge.refresh_info().unwrap().unwrap().supports_dio());
         assert!(verge.info().unwrap().unwrap().supports_dio());
         assert_eq!(transport.commands.len(), 2);
+    }
+
+    #[test]
+    fn a_probe_that_cannot_answer_the_identity_command_is_not_verge() {
+        let unsupported: [fn() -> DebugProbeError; 2] = [
+            || DebugProbeError::CommandNotSupportedByProbe {
+                command_name: "vendor command",
+            },
+            || DebugProbeError::NotImplemented {
+                function_name: "vendor commands",
+            },
+        ];
+        for error in unsupported {
+            let mut send = |_, _: &[u8]| Err(error());
+            assert_eq!(read_info(&mut send).unwrap(), None);
+        }
+        let mut send = |_, _: &[u8]| Err(DebugProbeError::Timeout);
+        assert!(matches!(
+            read_info(&mut send),
+            Err(CommandError::Probe(DebugProbeError::Timeout))
+        ));
     }
 
     #[test]
