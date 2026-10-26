@@ -1222,7 +1222,7 @@ checksum = "9a65843dfefbafd3c879c683306959a6de478443ffe9c9adf02f5976432402d7"
 [[package]]
 name = "probe-rs"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=59613f22a#59613f22abb780fba79846a9e051ca2ea20299bd"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=2fec767a5#2fec767a52a6bfbb0737ceb26ed497e8b6a6878a"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1256,7 +1256,7 @@ dependencies = [
 [[package]]
 name = "probe-rs-target"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=59613f22a#59613f22abb780fba79846a9e051ca2ea20299bd"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=2fec767a5#2fec767a52a6bfbb0737ceb26ed497e8b6a6878a"
 dependencies = [
  "base64",
  "bincode",
