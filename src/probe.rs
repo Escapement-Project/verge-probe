@@ -483,17 +483,19 @@ pub struct CodegenMeasurement {
     pub outcome: LatencyOutcome,
     /// Wire measured by JTAG codegen. SWD measurements do not set this field.
     pub wire: Option<JtagWire>,
-    /// Latency selected by the measurement.
+    /// Latency the measurement found, or 0 when it kept the one in use. Two-pin builds sample
+    /// one cycle later than this.
     pub latency: u8,
-    /// Number of generations attempted.
+    /// Generations that ran reads, over every search: the firmware searches again, up to three
+    /// times, while no latency agrees with every read.
     pub attempts: u8,
-    /// Number of periods measured.
+    /// Read periods measured at, over every search.
     pub periods: u8,
     /// DPIDR or IDCODE value that read correctly.
     pub id_code: u32,
     /// Core cycles spent in the sweep.
     pub cycles: u32,
-    /// Number of reads performed.
+    /// Measurements since the probe started.
     pub runs: u32,
     /// Bit mask of latencies every read agreed with.
     pub consistent_latencies: u64,
