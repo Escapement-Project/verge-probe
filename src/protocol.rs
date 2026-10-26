@@ -28,7 +28,9 @@ pub(crate) const CAP_JTAG_CODEGEN: u8 = 1 << 5;
 pub(crate) const CAP_DIO: u8 = 1 << 6;
 pub(crate) const CAP_TARGET_POWER: u8 = 1 << 7;
 pub(crate) const CAP_ENERGY_CAPTURE: u32 = 1 << 0;
-pub(crate) const CAP_CALIBRATED_ENERGY: u32 = 1 << 1;
+// Bit 1 advertised the same fields with the current in microamps. Reading it would show older
+// firmware's current a thousand times too small, so those probes give raw samples only.
+pub(crate) const CAP_CALIBRATED_ENERGY: u32 = 1 << 5;
 pub(crate) const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;

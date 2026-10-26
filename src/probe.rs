@@ -241,8 +241,8 @@ pub struct RawEnergySample {
 pub struct CalibratedEnergySample {
     /// Target voltage in millivolts.
     pub voltage_millivolts: u32,
-    /// Target current in microamps, positive into the target.
-    pub current_microamps: i32,
+    /// Target current in nanoamps, positive into the target.
+    pub current_nanoamps: i32,
     /// Per-sample current-sense path, 0 through 4.
     pub range_id: u8,
 }
@@ -1448,13 +1448,13 @@ fn parse_energy_capture_sample(
     };
     let calibrated = if calibrated_supported {
         let voltage_millivolts = reader.u32()?;
-        let current_microamps = reader.i32()?;
+        let current_nanoamps = reader.i32()?;
         let range_id = reader.u8()?;
         let valid = read_bool(&mut reader, "calibrated-valid flag")?;
         if valid {
             Some(CalibratedEnergySample {
                 voltage_millivolts,
-                current_microamps,
+                current_nanoamps,
                 range_id,
             })
         } else {
@@ -2526,7 +2526,7 @@ mod tests {
         reply.extend_from_slice(&0x5678u16.to_le_bytes());
         reply.extend_from_slice(&0x1122_3344u32.to_le_bytes());
         reply.extend_from_slice(&3300u32.to_le_bytes());
-        reply.extend_from_slice(&(-1250i32).to_le_bytes());
+        reply.extend_from_slice(&(-1_250_250i32).to_le_bytes());
         reply.extend_from_slice(&[3, 1]);
 
         let EnergyCaptureSample::Sample(sample) =
@@ -2546,7 +2546,7 @@ mod tests {
             sample.calibrated,
             Some(CalibratedEnergySample {
                 voltage_millivolts: 3300,
-                current_microamps: -1250,
+                current_nanoamps: -1_250_250,
                 range_id: 3,
             })
         );
