@@ -751,6 +751,11 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         }
     }
 
+    /// The transport the commands go through: an [`crate::aux::Aux`] for its stream messages.
+    pub fn transport(&mut self) -> &mut T {
+        self.transport
+    }
+
     /// Reads the firmware identity and capabilities, once.
     ///
     /// The result is cached. Its OScan1-active flag changes when a two-pin session starts or ends;
@@ -957,6 +962,33 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
             (Ok(()), Err(error)) => Err(EnergyMonitorError::Stop(error)),
             (Ok(()), Ok(())) => Ok(start),
         }
+    }
+
+    /// Starts a capture as [`Self::start_energy_capture`] does, and streams it from its first pair:
+    /// `0x90` mode 5, which only Verge Aux carries. The reply comes before the stream's header.
+    pub fn start_energy_stream(
+        &mut self,
+        rate_pairs_per_second: u32,
+    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
+        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
+        let mut request = vec![5];
+        request.extend_from_slice(&rate_pairs_per_second.to_le_bytes());
+        request.push(0);
+        parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
+    }
+
+    /// Streams the running capture from its next pair: mode 6, on Verge Aux only.
+    /// [`EnergyError::Stopped`] when nothing runs, and [`EnergyError::DmaError`] when the capture
+    /// failed or the probe had no room for the header.
+    pub fn stream_energy_capture(&mut self) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[6, 0])?)
+    }
+
+    /// Ends the stream, leaving the capture running: mode 7, on Verge Aux only.
+    pub fn end_energy_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[7])?)
     }
 
     /// Stops voltage/current capture.

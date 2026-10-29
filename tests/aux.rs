@@ -186,3 +186,43 @@ fn opening_drops_what_the_last_program_left() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     assert_eq!(aux.exchange(&[0x8F, 2]).unwrap()[0], 0x8F);
 }
+
+/// The typed stream calls: modes 5 to 7 through `VergeControl`, and the messages through its
+/// transport between them. CMSIS-DAP refuses them.
+#[test]
+fn the_typed_stream_calls_drive_the_stream() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut verge = VergeControl::new(&mut aux);
+    assert!(matches!(
+        verge.stream_energy_capture(),
+        Err(verge_probe::CommandError::Firmware(
+            verge_probe::EnergyError::Stopped
+        ))
+    ));
+    assert_eq!(
+        verge
+            .start_energy_stream(2000)
+            .unwrap()
+            .actual_rate_pairs_per_second,
+        2000
+    );
+    assert!(matches!(
+        verge.transport().message(Duration::from_secs(1)).unwrap(),
+        Some(Message::Header(header)) if header.rate == 2000
+    ));
+    verge.end_energy_stream().unwrap();
+    let ended = until(verge.transport(), |m| matches!(m, Message::End(_)));
+    assert!(matches!(ended.last(), Some(Message::End(end)) if end.reason == EndReason::Asked));
+    drop(verge);
+
+    let mut link = bus.open_dap(&device).unwrap();
+    let mut transport = DapTransport(&mut link);
+    assert!(
+        VergeControl::new(&mut transport)
+            .start_energy_stream(1000)
+            .is_err(),
+        "mode 5 is Verge Aux's alone"
+    );
+}
