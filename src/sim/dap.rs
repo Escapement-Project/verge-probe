@@ -253,12 +253,27 @@ pub struct SimAux {
     world: Arc<Mutex<World>>,
     unit: usize,
     generation: u64,
-    /// Replies and stream messages on the IN endpoint, oldest first.
-    pending: VecDeque<Vec<u8>>,
 }
 
 /// While the host waits on IN, simulated time passes in steps of this, and the stream with it.
 const WAIT_STEP: Duration = Duration::from_millis(10);
+
+/// The pairs messages the probe keeps for a host that has not read them: 16 places, two kept for
+/// a header and an end. It drops new pairs messages while they are full (HOST-INTERFACE.md, "When
+/// the host falls behind").
+const KEPT_PAIRS_MESSAGES: usize = 14;
+
+/// Puts replies and stream messages on a unit's IN endpoint, dropping pairs messages the probe
+/// would have no room for.
+fn queue(aux_in: &mut VecDeque<Vec<u8>>, messages: Vec<Vec<u8>>) {
+    for message in messages {
+        let pairs = |m: &Vec<u8>| m.first() == Some(&crate::stream::PAIRS);
+        if pairs(&message) && aux_in.iter().filter(|m| pairs(m)).count() >= KEPT_PAIRS_MESSAGES {
+            continue;
+        }
+        aux_in.push_back(message);
+    }
+}
 
 impl SimAux {
     pub(super) fn new(world: Arc<Mutex<World>>, unit: usize, generation: u64) -> SimAux {
@@ -266,7 +281,6 @@ impl SimAux {
             world,
             unit,
             generation,
-            pending: VecDeque::new(),
         }
     }
 
@@ -306,24 +320,22 @@ impl crate::aux::AuxLink for SimAux {
             }
             _ => vec![vec![dap::ID_DAP_INVALID]],
         };
-        self.pending.extend(messages);
+        queue(&mut world.units[self.unit].aux_in, messages);
         Ok(())
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
         let mut waited = Duration::ZERO;
         loop {
-            if let Some(message) = self.pending.pop_front() {
-                return Ok(message);
-            }
             let real = {
                 let mut world = self.world.lock().expect("the bench lock is not poisoned");
                 self.live(&mut world)?;
                 let now = world.now;
-                self.pending
-                    .extend(world.units[self.unit].energy.stream_messages(now));
-                if !self.pending.is_empty() {
-                    continue;
+                let unit = &mut world.units[self.unit];
+                let due = unit.energy.stream_messages(now);
+                queue(&mut unit.aux_in, due);
+                if let Some(message) = unit.aux_in.pop_front() {
+                    return Ok(message);
                 }
                 // Without a stream nothing will come, and waiting for it would move every
                 // scenario's capture on.

@@ -20,7 +20,7 @@ mod energy;
 pub mod http;
 mod rom;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -164,6 +164,9 @@ pub struct SimUnit {
     pub mini: bool,
     /// Replies an earlier host left unread on the bulk IN endpoint.
     pub stale_replies: Vec<Vec<u8>>,
+    /// Verge Aux's IN endpoint: replies and stream messages no host has read yet, oldest first.
+    /// They outlast the program that asked, as the probe's do.
+    pub aux_in: VecDeque<Vec<u8>>,
     /// In a USB port. An unplugged unit stays off the bus whatever is scheduled for it.
     pub plugged: bool,
     /// Its bootloader refuses every write, as a failing flash would.
@@ -309,6 +312,7 @@ impl World {
         let u = &mut self.units[unit];
         u.instance = Some(instance);
         u.generation = generation;
+        u.aux_in.clear();
         self.log
             .push(format!("{}: enumerates as {:?}", u.location, u.mode));
         let bootloaders = self
@@ -729,6 +733,7 @@ impl SimBus {
             aux_busy: false,
             mini: false,
             stale_replies: Vec::new(),
+            aux_in: VecDeque::new(),
             plugged: true,
             fail_writes: false,
             ignores_reset: false,

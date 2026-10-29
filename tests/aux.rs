@@ -249,3 +249,77 @@ fn opening_ends_a_stream_the_last_program_left_running() {
         "the capture runs on"
     );
 }
+
+/// The probe keeps 14 pairs messages for a host that does not read: the rest are lost, which the
+/// sequence shows, and the end still says which pair was the last.
+#[test]
+fn pairs_the_host_did_not_read_in_time_are_lost() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    aux.exchange(&[0x8F, 1]).unwrap();
+    aux.exchange(&rate(100_000)).unwrap();
+    bus.sleep(Duration::from_millis(500));
+    aux.exchange(&[0x90, 2]).unwrap();
+    let mut streamed = 0u32;
+    let mut last = 0;
+    let ended = until(&mut aux, |m| matches!(m, Message::End(_)));
+    for message in &ended {
+        if let Message::Pairs(pairs) = message {
+            streamed += pairs.pairs.len() as u32;
+            last = pairs.first_sequence + pairs.pairs.len() as u32 - 1;
+        }
+    }
+    let Some(Message::End(end)) = ended.last() else {
+        panic!("no end");
+    };
+    assert!(streamed <= 14 * 99, "{streamed} pairs kept");
+    assert!(
+        end.last_sequence > last && end.last_sequence >= 49_000,
+        "{end:?} after {last}"
+    );
+}
+
+/// A start on CMSIS-DAP ends the stream after the old capture's last pairs, with the last of them
+/// in the end.
+#[test]
+fn a_restart_streams_the_old_captures_last_pairs_first() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    aux.exchange(&rate(1000)).unwrap();
+    let _ = aux.message(Duration::from_secs(1)).unwrap();
+    bus.sleep(Duration::from_millis(300));
+    let mut link = bus.open_dap(&device).unwrap();
+    link.exchange(&[0x90, 0, 0xE8, 3, 0, 0]).unwrap();
+    let ended = until(&mut aux, |m| matches!(m, Message::End(_)));
+    let mut next = 1;
+    for message in &ended {
+        if let Message::Pairs(pairs) = message {
+            assert_eq!(pairs.first_sequence, next, "a gap");
+            next += pairs.pairs.len() as u32;
+        }
+    }
+    let Some(Message::End(end)) = ended.last() else {
+        panic!("no end");
+    };
+    assert_eq!(end.reason, EndReason::Restarted);
+    assert_eq!(end.last_sequence, next - 1);
+    assert!(end.last_sequence >= 300, "{end:?}");
+}
+
+/// A reply the last program never read waits on the interface for the next one, which drops it.
+#[test]
+fn a_reply_left_unread_outlasts_its_program() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut first = bus.open_aux(&device).unwrap();
+    verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
+    drop(first);
+    let mut raw = bus.open_aux(&device).unwrap();
+    assert_eq!(
+        verge_probe::aux::AuxLink::read(&mut raw, Duration::from_millis(50)).unwrap()[0],
+        0x82,
+        "the probe keeps it"
+    );
+}

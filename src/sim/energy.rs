@@ -43,6 +43,9 @@ pub struct SimEnergy {
     pub fault: bool,
     /// Verge Aux's stream of the capture.
     pub stream: Option<Stream>,
+    /// Stream messages an event produced ahead of the next read: the last pairs of a capture a
+    /// start replaced.
+    outbox: Vec<Vec<u8>>,
 }
 
 /// A stream of the capture that started at `since`, its next pair counted from 0.
@@ -103,6 +106,7 @@ impl SimEnergy {
             capture: Some(Capture::new(now, rate)),
             fault: false,
             stream: None,
+            outbox: Vec::new(),
         }
     }
 
@@ -176,6 +180,10 @@ impl SimEnergy {
                 } else if rate == 0 || rate > MAX_RATE {
                     BAD_RATE
                 } else {
+                    // The probe streams the replaced capture's last pairs before the end that
+                    // says it restarted.
+                    let tail = self.stream_messages(now);
+                    self.outbox.extend(tail);
                     self.capture = Some(Capture::new(now, rate));
                     self.fault = false;
                     OK
@@ -315,14 +323,15 @@ impl SimEnergy {
     /// The stream's messages due by `now`: pairs up to it, and the end once its capture has
     /// stopped, failed or been restarted.
     pub fn stream_messages(&mut self, now: Duration) -> Vec<Vec<u8>> {
+        let mut messages = std::mem::take(&mut self.outbox);
         let Some(mut stream) = self.stream else {
-            return Vec::new();
+            return messages;
         };
         let Some(capture) = self.capture.filter(|capture| capture.since == stream.since) else {
             self.stream = None;
-            return vec![Self::end(RESTARTED, stream.next)];
+            messages.push(Self::end(RESTARTED, stream.next));
+            return messages;
         };
-        let mut messages = Vec::new();
         let available = capture.pairs(now);
         while stream.next < available {
             let count = (available - stream.next).min(PAIRS_A_MESSAGE);
