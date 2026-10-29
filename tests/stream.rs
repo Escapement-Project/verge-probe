@@ -229,6 +229,38 @@ fn messages_parse_as_the_probe_lays_them_out() {
     header[1] = 2;
     assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(2)));
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
+
+    let mut edges = vec![stream::EDGES, 1];
+    edges.extend_from_slice(&(u64::from(u32::MAX) + 9).to_le_bytes());
+    edges.extend_from_slice(&2u16.to_le_bytes());
+    edges.extend_from_slice(&[0, 0, 0, 0, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x04]);
+    let Message::Edges(message) = stream::parse(&edges).unwrap() else {
+        panic!("not edges");
+    };
+    assert!(message.lost());
+    let first = u64::from(u32::MAX) + 9;
+    assert_eq!(
+        message.edges,
+        [
+            stream::Edge {
+                time_ns: first,
+                levels: 5
+            },
+            stream::Edge {
+                time_ns: first + u64::from(u32::MAX),
+                levels: 4
+            },
+        ]
+    );
+    assert_eq!(message.to_bytes(), edges);
+    assert_eq!(
+        stream::parse(&edges[..21]),
+        Err(stream::StreamError::Short(21))
+    );
+    assert_eq!(
+        stream::parse(&edges[..11]),
+        Err(stream::StreamError::Short(11))
+    );
 }
 
 /// Step 5 in the samples: a pair at a range switch keeps its time and voltage, takes the next

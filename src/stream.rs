@@ -18,6 +18,8 @@ const HEADER_BYTES: usize = 68;
 const PAIRS_FIXED: usize = 16;
 const PAIR_BYTES: usize = 5;
 const END_BYTES: usize = 6;
+const EDGES_FIXED: usize = 12;
+const EDGE_BYTES: usize = 5;
 
 /// Whether a message from the auxiliary interface is a stream message rather than a reply: its first
 /// byte is outside the vendor command range.
@@ -134,13 +136,65 @@ pub struct End {
     pub last_sequence: u32,
 }
 
+/// One DIO edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edge {
+    /// In ns since the capture started.
+    pub time_ns: u64,
+    /// Every reporting pin's level after the edge, bit `k` for DIO`k`; other pins read 0.
+    pub levels: u8,
+}
+
+/// Up to 99 DIO edges, in time order. Every edge up to a pairs message's last pair arrives before
+/// the next pairs message or the end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Edges {
+    pub flags: u8,
+    pub edges: Vec<Edge>,
+}
+
+impl Edges {
+    pub const LOST: u8 = 1;
+
+    /// A message as the probe would send it, for a simulator or a test.
+    #[must_use]
+    pub fn new(flags: u8, edges: Vec<Edge>) -> Edges {
+        Edges { flags, edges }
+    }
+
+    /// The probe lost edges before the first one, so the levels before it are not known.
+    #[must_use]
+    pub fn lost(&self) -> bool {
+        self.flags & Self::LOST != 0
+    }
+
+    /// The message's bytes, as the probe sends them. Empty without edges, which the probe never
+    /// sends.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let Some(first) = self.edges.first() else {
+            return Vec::new();
+        };
+        let mut bytes = vec![EDGES, self.flags];
+        bytes.extend_from_slice(&first.time_ns.to_le_bytes());
+        bytes.extend_from_slice(&(self.edges.len() as u16).to_le_bytes());
+        for edge in &self.edges {
+            let offset =
+                u32::try_from(edge.time_ns - first.time_ns).expect("a message spans under 4 s");
+            bytes.extend_from_slice(&offset.to_le_bytes());
+            bytes.push(edge.levels);
+        }
+        bytes
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Header(Header),
     Pairs(Pairs),
     End(End),
-    /// DIO edges, which this firmware does not send yet.
-    Edges(Vec<u8>),
+    Edges(Edges),
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -228,7 +282,28 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                 last_sequence: u32_at(bytes, 2),
             }))
         }
-        Some(&EDGES) => Ok(Message::Edges(bytes.to_vec())),
+        Some(&EDGES) => {
+            if bytes.len() < EDGES_FIXED {
+                return Err(short());
+            }
+            let count = usize::from(u16_at(bytes, 10));
+            if bytes.len() < EDGES_FIXED + count * EDGE_BYTES {
+                return Err(short());
+            }
+            let first = u64::from_le_bytes(bytes[2..10].try_into().expect("eight bytes"));
+            Ok(Message::Edges(Edges {
+                flags: bytes[1],
+                edges: bytes[EDGES_FIXED..EDGES_FIXED + count * EDGE_BYTES]
+                    .as_chunks::<EDGE_BYTES>()
+                    .0
+                    .iter()
+                    .map(|edge| Edge {
+                        time_ns: first + u64::from(u32_at(edge, 0)),
+                        levels: edge[4],
+                    })
+                    .collect(),
+            }))
+        }
         Some(&other) => Err(StreamError::Unknown(other)),
         None => Err(short()),
     }

@@ -92,7 +92,7 @@ impl<L: AuxLink> Aux<L> {
         for _ in 0..WAITING {
             match self.link.read(DRAIN_TIMEOUT) {
                 Ok(data) => match data.first() {
-                    Some(&stream::PAIRS | &stream::HEADER) => streaming = true,
+                    Some(&stream::PAIRS | &stream::HEADER | &stream::EDGES) => streaming = true,
                     Some(&stream::END) => streaming = false,
                     _ => {}
                 },

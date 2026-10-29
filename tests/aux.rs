@@ -196,14 +196,14 @@ fn the_typed_stream_calls_drive_the_stream() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     let mut verge = VergeControl::new(&mut aux);
     assert!(matches!(
-        verge.stream_energy_capture(),
+        verge.stream_energy_capture(0),
         Err(verge_probe::CommandError::Firmware(
             verge_probe::EnergyError::Stopped
         ))
     ));
     assert_eq!(
         verge
-            .start_energy_stream(2000)
+            .start_energy_stream(2000, 0)
             .unwrap()
             .actual_rate_pairs_per_second,
         2000
@@ -221,7 +221,7 @@ fn the_typed_stream_calls_drive_the_stream() {
     let mut transport = DapTransport(&mut link);
     assert!(
         VergeControl::new(&mut transport)
-            .start_energy_stream(1000)
+            .start_energy_stream(1000, 0)
             .is_err(),
         "mode 5 is Verge Aux's alone"
     );
