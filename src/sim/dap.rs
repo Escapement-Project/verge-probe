@@ -325,7 +325,9 @@ impl crate::aux::AuxLink for SimAux {
                 if !self.pending.is_empty() {
                     continue;
                 }
-                if waited >= timeout {
+                // Without a stream nothing will come, and waiting for it would move every
+                // scenario's capture on.
+                if waited >= timeout || world.units[self.unit].energy.stream.is_none() {
                     return Err(LinkError::Timeout);
                 }
                 let step = WAIT_STEP.min(timeout - waited);
