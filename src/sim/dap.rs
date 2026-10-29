@@ -307,11 +307,11 @@ impl crate::aux::AuxLink for SimAux {
         let unit = &mut world.units[self.unit];
         let pro = unit.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
         let messages = match request {
-            [ENERGY_COMMAND, 5, rate @ .., _pins] if rate.len() == 4 => {
+            [ENERGY_COMMAND, 5, rate @ .., pins] if rate.len() == 4 => {
                 unit.energy
-                    .start_stream(pro, now, rate.try_into().expect("four bytes"))
+                    .start_stream(pro, now, rate.try_into().expect("four bytes"), *pins)
             }
-            [ENERGY_COMMAND, 6, _pins] => unit.energy.stream_running(pro, now),
+            [ENERGY_COMMAND, 6, pins] => unit.energy.stream_running(pro, now, *pins),
             [ENERGY_COMMAND, 7] => unit.energy.stop_stream(pro, now),
             [dap::VENDOR_IDENTIFY, ..] | [TARGET_POWER_COMMAND, ..] | [ENERGY_COMMAND, ..] => {
                 let mut messages = unit.energy.stream_messages(now);

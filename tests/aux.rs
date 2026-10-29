@@ -227,6 +227,105 @@ fn the_typed_stream_calls_drive_the_stream() {
     );
 }
 
+/// The simulated target marks its 10 ms awake every 100 ms on DIO3. A stream that asks for it
+/// gets those edges, each after the pairs message whose last pair it does not come after, and
+/// before the next.
+#[test]
+fn a_stream_reports_the_edges_it_asked_for_after_their_pairs() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut verge = VergeControl::new(&mut aux);
+    verge.set_target_power(true).unwrap();
+    verge.start_energy_stream(1000, 0x0A).unwrap();
+    let header = match verge.transport().message(Duration::from_secs(1)).unwrap() {
+        Some(Message::Header(header)) => header,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        (
+            header.dio_mask,
+            header.dio_levels,
+            header.edge_resolution_ns
+        ),
+        (0x0A, 0x08, 11)
+    );
+    bus.sleep(Duration::from_millis(350));
+    verge.end_energy_stream().unwrap();
+    let messages = until(verge.transport(), |m| matches!(m, Message::End(_)));
+    let edges: Vec<verge_probe::stream::Edge> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Edges(edges) => {
+                assert!(!edges.lost());
+                Some(edges.edges.clone())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // When each pairs message arrives, every edge up to the last pair before it has arrived.
+    let (mut received, mut through) = (0, None);
+    for message in &messages {
+        match message {
+            Message::Pairs(pairs) => {
+                if let Some(through) = through {
+                    let due = edges.iter().filter(|edge| edge.time_ns <= through).count();
+                    assert!(
+                        received >= due,
+                        "{received} edges before pairs needing {due}"
+                    );
+                }
+                through = Some(pairs.time_of(pairs.pairs.len() - 1, header.rate));
+            }
+            Message::Edges(message) => received += message.edges.len(),
+            _ => {}
+        }
+    }
+    let times: Vec<(u64, u8)> = edges
+        .iter()
+        .map(|edge| (edge.time_ns / 1_000_000, edge.levels))
+        .collect();
+    assert_eq!(
+        times,
+        [
+            (10, 0),
+            (100, 8),
+            (110, 0),
+            (200, 8),
+            (210, 0),
+            (300, 8),
+            (310, 0)
+        ][..times.len()],
+        "falls at 10 ms past each 100 and rises on each 100, DIO1 never moving"
+    );
+    assert!(times.len() >= 5, "{times:?}");
+}
+
+/// At a slow rate a pairs message spans seconds, and the edges after it more than an edges
+/// message's offsets reach: they come in more messages, none spanning more than 2^32 ns.
+#[test]
+fn edges_of_a_slow_stream_split_by_span() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut verge = VergeControl::new(&mut aux);
+    verge.set_target_power(true).unwrap();
+    verge.start_energy_stream(10, 0x08).unwrap();
+    bus.sleep(Duration::from_secs(12));
+    verge.end_energy_stream().unwrap();
+    let messages = until(verge.transport(), |m| matches!(m, Message::End(_)));
+    let mut edges = 0;
+    for message in &messages {
+        if let Message::Edges(message) = message {
+            let span = message.edges.last().unwrap().time_ns - message.edges[0].time_ns;
+            assert!(span <= u64::from(u32::MAX), "{span} ns in one message");
+            edges += message.edges.len();
+        }
+    }
+    assert!(edges >= 200, "{edges} edges");
+}
+
 /// A stream the last program left running, as one killed mid-recording leaves it, is ended as
 /// the interface is opened: nothing else can hold the interface, so nothing else reads it.
 #[test]

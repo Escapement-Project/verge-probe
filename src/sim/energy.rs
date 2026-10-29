@@ -2,12 +2,14 @@
 //! describes them.
 //!
 //! The target is a sleeping microcontroller that wakes for 10 ms every 100 ms: 20 µA asleep and
-//! 5 mA awake, at 3.3 V while the Pro's supply is on and nothing while it is off. Its values are
-//! made up; only their shape matters to a host.
+//! 5 mA awake, at 3.3 V while the Pro's supply is on and nothing while it is off. It holds DIO3 high
+//! while awake, a marker a stream can report. Its values are made up; only their shape matters to a
+//! host.
 
 use std::time::Duration;
 
 use crate::protocol::{ENERGY_COMMAND, TARGET_POWER_COMMAND};
+use crate::stream::{Edge, Edges};
 
 const DAP_OK: u8 = 0x00;
 const DAP_ERROR: u8 = 0xFF;
@@ -48,12 +50,20 @@ pub struct SimEnergy {
     outbox: Vec<Vec<u8>>,
 }
 
-/// A stream of the capture that started at `since`, its next pair counted from 0.
+/// A stream of the capture that started at `since`, its next pair counted from 0, reporting the
+/// edges of `pins` after `edges_after` µs into the capture.
 #[derive(Clone, Copy, Debug)]
 pub struct Stream {
     pub since: Duration,
     pub next: u64,
+    pub pins: u8,
+    pub edges_after: u64,
 }
+
+/// The pin the target marks its waking time on.
+const MARKER: u8 = 1 << 3;
+/// The resolution a stream header gives for edges, as the Pro's 96 MHz stamping clock's.
+const EDGE_RESOLUTION_NS: u16 = 11;
 
 const FULL_SCALE_MV: u32 = 3_000;
 const PAIRS_A_MESSAGE: u64 = 99;
@@ -295,7 +305,60 @@ impl SimEnergy {
         ([v0, v1, c0, c1, u8::from(low)], low)
     }
 
-    fn header(capture: &Capture, first_sequence: u32, previous_low: bool) -> Vec<u8> {
+    /// The marker's level `micros` into the capture.
+    fn marker(&self, micros: u64) -> u8 {
+        if self.supply_on && micros % PERIOD_MICROS < AWAKE_MICROS {
+            MARKER
+        } else {
+            0
+        }
+    }
+
+    /// The edges of `pins` after `after` µs into the capture and up to `until`, as one message
+    /// each 99, flagged as the probe flags them.
+    fn edges(&self, pins: u8, after: u64, until: u64) -> Vec<Vec<u8>> {
+        if pins & MARKER == 0 || !self.supply_on || until <= after {
+            return Vec::new();
+        }
+        let mut edges = Vec::new();
+        let mut period = after / PERIOD_MICROS * PERIOD_MICROS;
+        while period <= until {
+            for at in [period, period + AWAKE_MICROS] {
+                if at > after && at <= until {
+                    edges.push(Edge {
+                        time_ns: at * 1_000,
+                        levels: self.marker(at),
+                    });
+                }
+            }
+            period += PERIOD_MICROS;
+        }
+        // 99 to a message, and none past what its offsets can hold, as the probe sends them.
+        let mut messages: Vec<Vec<Edge>> = Vec::new();
+        for edge in edges {
+            match messages.last_mut() {
+                Some(message)
+                    if message.len() < 99
+                        && edge.time_ns - message[0].time_ns <= u64::from(u32::MAX) =>
+                {
+                    message.push(edge);
+                }
+                _ => messages.push(vec![edge]),
+            }
+        }
+        messages
+            .into_iter()
+            .map(|edges| Edges::new(0, edges).to_bytes())
+            .collect()
+    }
+
+    fn header(
+        capture: &Capture,
+        first_sequence: u32,
+        previous_low: bool,
+        pins: u8,
+        levels: u8,
+    ) -> Vec<u8> {
         let mut header = vec![0xA1, 1];
         header.extend_from_slice(&capture.rate.to_le_bytes());
         header.push(1);
@@ -310,7 +373,9 @@ impl SimEnergy {
                 header.extend_from_slice(&nanoamps.to_le_bytes());
             }
         }
-        header.extend_from_slice(&[0, 0, 0, 0]);
+        header.extend_from_slice(&[pins, levels & pins]);
+        let resolution = if pins == 0 { 0 } else { EDGE_RESOLUTION_NS };
+        header.extend_from_slice(&resolution.to_le_bytes());
         header
     }
 
@@ -332,6 +397,7 @@ impl SimEnergy {
             messages.push(Self::end(RESTARTED, stream.next));
             return messages;
         };
+        // Each pairs message, then the edges up to its last pair, as the probe sends them.
         let available = capture.pairs(now);
         while stream.next < available {
             let count = (available - stream.next).min(PAIRS_A_MESSAGE);
@@ -344,6 +410,9 @@ impl SimEnergy {
             }
             messages.push(message);
             stream.next += count;
+            let last = capture.micros(stream.next - 1);
+            messages.extend(self.edges(stream.pins, stream.edges_after, last));
+            stream.edges_after = stream.edges_after.max(last);
         }
         if capture.stopped_at.is_some() {
             self.stream = None;
@@ -360,7 +429,13 @@ impl SimEnergy {
     /// `0x90` mode 5, which only Verge Aux has: a start, as mode 0, streamed from its first pair.
     /// The firmware holds stream messages back while the request is out, so its reply comes
     /// first, then the end of any stream the start restarted, then the header.
-    pub fn start_stream(&mut self, pro: bool, now: Duration, rate: [u8; 4]) -> Vec<Vec<u8>> {
+    pub fn start_stream(
+        &mut self,
+        pro: bool,
+        now: Duration,
+        rate: [u8; 4],
+        pins: u8,
+    ) -> Vec<Vec<u8>> {
         let mut messages = self.stream_messages(now);
         let mut request = vec![0];
         request.extend_from_slice(&rate);
@@ -369,18 +444,21 @@ impl SimEnergy {
         messages.push(reply);
         messages.extend(self.stream_messages(now));
         if let Some(capture) = self.capture.filter(|_| started) {
+            let pins = pins & 0x0F;
             self.stream = Some(Stream {
                 since: capture.since,
                 next: 0,
+                pins,
+                edges_after: 0,
             });
-            messages.push(Self::header(&capture, 1, true));
+            messages.push(Self::header(&capture, 1, true, pins, self.marker(0)));
         }
         messages
     }
 
     /// `0x90` mode 6: the running capture, streamed from its next pair. Its reply, then the end of
     /// any stream it replaces, then the header.
-    pub fn stream_running(&mut self, pro: bool, now: Duration) -> Vec<Vec<u8>> {
+    pub fn stream_running(&mut self, pro: bool, now: Duration, pins: u8) -> Vec<Vec<u8>> {
         let mut messages = self.stream_messages(now);
         let running = self.capture.filter(|capture| capture.stopped_at.is_none());
         let result = match running {
@@ -398,11 +476,21 @@ impl SimEnergy {
         if let Some(capture) = running.filter(|_| result == OK) {
             let next = capture.pairs(now);
             let previous_low = next == 0 || self.pair(&capture, next - 1).1;
+            let pins = pins & 0x0F;
+            let started = (now.saturating_sub(capture.since)).as_micros() as u64;
             self.stream = Some(Stream {
                 since: capture.since,
                 next,
+                pins,
+                edges_after: started,
             });
-            messages.push(Self::header(&capture, (next + 1) as u32, previous_low));
+            messages.push(Self::header(
+                &capture,
+                (next + 1) as u32,
+                previous_low,
+                pins,
+                self.marker(started),
+            ));
         }
         messages
     }
