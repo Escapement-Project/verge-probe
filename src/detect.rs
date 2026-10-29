@@ -400,6 +400,7 @@ mod tests {
             bcd_device,
             dap_v2: false,
             hid: false,
+            aux: false,
         }
     }
 

@@ -32,7 +32,7 @@ use crate::ids::{self, Role};
 use crate::image::{Image, PAGE};
 use crate::version::StockVersion;
 
-pub use dap::SimDap;
+pub use dap::{SimAux, SimDap};
 pub use rom::SimRom;
 
 /// A firmware a simulated unit can run.
@@ -510,6 +510,9 @@ impl World {
             },
             dap_v2,
             hid,
+            // Every Pro running Verge has it, whatever its jumpers.
+            aux: matches!(u.mode, Mode::Firmware(SimFirmware::Ours { .. }))
+                && u.board == Some(Ours::BOARD_MCU_LINK_PRO),
         })
     }
 
@@ -1084,6 +1087,7 @@ impl SimBus {
 impl Bus for SimBus {
     type Dap = SimDap;
     type Isp = SimRom;
+    type Aux = SimAux;
 
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
         let mut world = self.world();
@@ -1119,6 +1123,25 @@ impl Bus for SimBus {
         let stale = std::mem::take(&mut world.units[unit].stale_replies);
         let generation = world.units[unit].generation;
         Ok(SimDap::new(self.world.clone(), unit, generation, stale))
+    }
+
+    fn open_aux(&self, device: &UsbDevice) -> Result<SimAux, BusError> {
+        let mut world = self.world();
+        world.settle();
+        let unit = world.unit_for(device).ok_or_else(|| BusError::Gone {
+            device: device.to_string(),
+        })?;
+        let u = &world.units[unit];
+        if !(matches!(u.mode, Mode::Firmware(SimFirmware::Ours { .. }))
+            && u.board == Some(Ours::BOARD_MCU_LINK_PRO))
+        {
+            return Err(BusError::Open {
+                device: device.to_string(),
+                reason: "it has no Verge Aux interface".into(),
+            });
+        }
+        let generation = u.generation;
+        Ok(SimAux::new(self.world.clone(), unit, generation))
     }
 
     fn device_control_out(

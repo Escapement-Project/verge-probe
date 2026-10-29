@@ -52,6 +52,7 @@ struct Exclusive<'a> {
 }
 
 impl Bus for Exclusive<'_> {
+    type Aux = verge_probe::sim::SimAux;
     type Dap = Held;
     type Isp = SimRom;
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
@@ -76,6 +77,10 @@ impl Bus for Exclusive<'_> {
             }
         }
     }
+    fn open_aux(&self, device: &UsbDevice) -> Result<verge_probe::sim::SimAux, BusError> {
+        self.bus.open_aux(device)
+    }
+
     fn device_control_out(
         &self,
         device: &UsbDevice,

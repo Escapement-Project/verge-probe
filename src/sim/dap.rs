@@ -246,3 +246,95 @@ impl DapLink for SimDap {
         world.control_out(self.unit, request_type, request, value, index)
     }
 }
+
+/// A simulated Pro's Verge Aux interface: `0x82`, `0x8F` and `0x90` as on CMSIS-DAP, `0x90` modes 5
+/// to 7 besides, and the energy stream.
+pub struct SimAux {
+    world: Arc<Mutex<World>>,
+    unit: usize,
+    generation: u64,
+    /// Replies and stream messages on the IN endpoint, oldest first.
+    pending: VecDeque<Vec<u8>>,
+}
+
+/// While the host waits on IN, simulated time passes in steps of this, and the stream with it.
+const WAIT_STEP: Duration = Duration::from_millis(10);
+
+impl SimAux {
+    pub(super) fn new(world: Arc<Mutex<World>>, unit: usize, generation: u64) -> SimAux {
+        SimAux {
+            world,
+            unit,
+            generation,
+            pending: VecDeque::new(),
+        }
+    }
+
+    fn live(&self, world: &mut World) -> Result<(), LinkError> {
+        world.settle();
+        if world.is_current(self.unit, self.generation) {
+            Ok(())
+        } else {
+            Err(LinkError::Disconnected)
+        }
+    }
+}
+
+impl crate::aux::AuxLink for SimAux {
+    fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
+        let mut world = self.world.lock().expect("the bench lock is not poisoned");
+        self.live(&mut world)?;
+        world.advance(COMMAND_TIME);
+        let location = world.units[self.unit].location.clone();
+        world
+            .log
+            .push(format!("{location}: AUX {}", hex::encode(request)));
+        let now = world.now;
+        let unit = &mut world.units[self.unit];
+        let pro = unit.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+        let messages = match request {
+            [ENERGY_COMMAND, 5, rate @ .., _pins] if rate.len() == 4 => {
+                unit.energy
+                    .start_stream(pro, now, rate.try_into().expect("four bytes"))
+            }
+            [ENERGY_COMMAND, 6, _pins] => unit.energy.stream_running(pro, now),
+            [ENERGY_COMMAND, 7] => unit.energy.stop_stream(pro, now),
+            [dap::VENDOR_IDENTIFY, ..] | [TARGET_POWER_COMMAND, ..] | [ENERGY_COMMAND, ..] => {
+                let mut messages = unit.energy.stream_messages(now);
+                messages.push(answer(&mut world, self.unit, request));
+                messages
+            }
+            _ => vec![vec![dap::ID_DAP_INVALID]],
+        };
+        self.pending.extend(messages);
+        Ok(())
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
+        let mut waited = Duration::ZERO;
+        loop {
+            if let Some(message) = self.pending.pop_front() {
+                return Ok(message);
+            }
+            let real = {
+                let mut world = self.world.lock().expect("the bench lock is not poisoned");
+                self.live(&mut world)?;
+                let now = world.now;
+                self.pending
+                    .extend(world.units[self.unit].energy.stream_messages(now));
+                if !self.pending.is_empty() {
+                    continue;
+                }
+                if waited >= timeout {
+                    return Err(LinkError::Timeout);
+                }
+                let step = WAIT_STEP.min(timeout - waited);
+                waited += step;
+                world.advance(step)
+            };
+            if !real.is_zero() {
+                std::thread::sleep(real);
+            }
+        }
+    }
+}

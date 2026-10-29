@@ -200,6 +200,7 @@ mod tests {
                 bcd_device: 0,
                 dap_v2: true,
                 hid: false,
+                aux: false,
             },
             state,
         }

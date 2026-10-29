@@ -5,6 +5,7 @@
 //! USB update and bootloader operations use [`bus::Bus`]. Target debugging uses probe-rs. The
 //! `sim` module provides an in-memory bench for tests and development with the `simulate` feature.
 
+pub mod aux;
 pub mod batch;
 pub mod board;
 pub mod bus;
@@ -22,6 +23,7 @@ pub mod release;
 pub mod sim;
 pub mod source;
 pub mod stock;
+pub mod stream;
 pub mod update;
 pub mod usb;
 pub mod version;

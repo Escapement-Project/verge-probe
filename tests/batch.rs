@@ -65,6 +65,7 @@ impl<'a> Hooked<'a> {
 }
 
 impl Bus for Hooked<'_> {
+    type Aux = verge_probe::sim::SimAux;
     type Dap = SimDap;
     type Isp = SimRom;
 
@@ -82,6 +83,10 @@ impl Bus for Hooked<'_> {
             .push((self.bus.now(), device.instance.clone()));
         (self.on_open)(device);
         self.bus.open_dap(device)
+    }
+
+    fn open_aux(&self, device: &UsbDevice) -> Result<verge_probe::sim::SimAux, BusError> {
+        self.bus.open_aux(device)
     }
 
     fn device_control_out(
@@ -534,6 +539,7 @@ fn stock_probe(product: &str) -> verge_probe::Unit {
             bcd_device: 0x0337,
             dap_v2: true,
             hid: true,
+            aux: false,
         },
         state: State::Probe {
             identity: Identity::default(),

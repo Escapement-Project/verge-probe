@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use mboot::protocols::Protocol;
 
+use crate::aux::AuxLink;
 use crate::dap::{DapLink, LinkError};
 use crate::ids::{self, Role};
 
@@ -31,6 +32,9 @@ pub struct UsbDevice {
     pub dap_v2: bool,
     /// Offers a HID interface, which is all stock V2.x and the ROM bootloader have.
     pub hid: bool,
+    /// Offers Verge Aux, the Pro's interface for its supply and energy beside a debugger
+    /// ([`crate::aux`]).
+    pub aux: bool,
 }
 
 impl UsbDevice {
@@ -69,11 +73,14 @@ pub enum BusError {
 pub trait Bus {
     type Dap: DapLink;
     type Isp: Protocol;
+    type Aux: AuxLink;
 
     /// Every device with an ID in [`ids::KNOWN_IDS`].
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError>;
     /// Claims a probe's CMSIS-DAP v2 interface.
     fn open_dap(&self, device: &UsbDevice) -> Result<Self::Dap, BusError>;
+    /// Claims a Pro's Verge Aux interface.
+    fn open_aux(&self, device: &UsbDevice) -> Result<Self::Aux, BusError>;
     /// Sends a control request with no data stage to the device itself, claiming no interface:
     /// how the tool reaches ours once the SWD jumper has taken away the interface it would claim.
     /// The outer error says the device could not be opened, the inner one that the request failed.

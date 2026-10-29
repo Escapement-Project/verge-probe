@@ -9,6 +9,7 @@ use nusb::transfer::{
 };
 use nusb::{DeviceInfo, ErrorKind, MaybeFuture};
 
+use crate::aux::{self, AuxLink};
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{DapLink, LinkError};
 use crate::hid::HidRom;
@@ -64,10 +65,85 @@ fn describe(info: &DeviceInfo) -> UsbDevice {
         hid: info
             .interfaces()
             .any(|interface| interface.class() == USB_CLASS_HID),
+        aux: info.interfaces().any(|interface| {
+            interface.class() == USB_CLASS_VENDOR
+                && interface.interface_string() == Some(aux::INTERFACE_NAME)
+        }),
     }
 }
 
+type BulkPair = (
+    nusb::Interface,
+    nusb::Endpoint<Bulk, Out>,
+    nusb::Endpoint<Bulk, In>,
+);
+
 impl UsbBus {
+    /// Claims the vendor interface whose string `named` accepts, and its bulk OUT and IN endpoints.
+    fn claim_bulk_pair(
+        &self,
+        device: &UsbDevice,
+        named: impl Fn(Option<&str>) -> bool,
+        missing: &str,
+    ) -> Result<BulkPair, BusError> {
+        let name = device.to_string();
+        let open_error = |reason: String| BusError::Open {
+            device: name.clone(),
+            reason,
+        };
+        let info = self.find(device)?;
+        let usb = info.open().wait().map_err(|error| match error.kind() {
+            ErrorKind::Busy => BusError::Busy {
+                device: name.clone(),
+            },
+            _ => open_error(error.to_string()),
+        })?;
+        let configuration = usb
+            .active_configuration()
+            .map_err(|error| open_error(error.to_string()))?;
+        for interface in configuration.interfaces() {
+            let number = interface.interface_number();
+            let wanted = info
+                .interfaces()
+                .find(|i| i.interface_number() == number)
+                .is_some_and(|i| named(i.interface_string()));
+            for alt in interface.alt_settings() {
+                if alt.class() != USB_CLASS_VENDOR || !wanted {
+                    continue;
+                }
+                let mut endpoints = alt.endpoints();
+                let (Some(out_ep), Some(in_ep)) = (endpoints.next(), endpoints.next()) else {
+                    continue;
+                };
+                if out_ep.transfer_type() != TransferType::Bulk
+                    || out_ep.direction() != Direction::Out
+                    || in_ep.transfer_type() != TransferType::Bulk
+                    || in_ep.direction() != Direction::In
+                {
+                    continue;
+                }
+                let (out_address, in_address) = (out_ep.address(), in_ep.address());
+                let claimed =
+                    usb.claim_interface(number)
+                        .wait()
+                        .map_err(|error| match error.kind() {
+                            ErrorKind::Busy => BusError::Busy {
+                                device: name.clone(),
+                            },
+                            _ => open_error(error.to_string()),
+                        })?;
+                let out = claimed
+                    .endpoint::<Bulk, Out>(out_address)
+                    .map_err(|error| open_error(error.to_string()))?;
+                let input = claimed
+                    .endpoint::<Bulk, In>(in_address)
+                    .map_err(|error| open_error(error.to_string()))?;
+                return Ok((claimed, out, input));
+            }
+        }
+        Err(open_error(missing.into()))
+    }
+
     fn find(&self, device: &UsbDevice) -> Result<DeviceInfo, BusError> {
         nusb::list_devices()
             .wait()
@@ -127,6 +203,7 @@ fn rom_path<'a>(
 impl Bus for UsbBus {
     type Dap = NusbDap;
     type Isp = HidRom;
+    type Aux = NusbAux;
 
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
         Ok(nusb::list_devices()
@@ -138,69 +215,33 @@ impl Bus for UsbBus {
     }
 
     fn open_dap(&self, device: &UsbDevice) -> Result<NusbDap, BusError> {
-        let name = device.to_string();
-        let open_error = |reason: String| BusError::Open {
-            device: name.clone(),
-            reason,
-        };
-        let info = self.find(device)?;
-        let usb = info.open().wait().map_err(|error| match error.kind() {
-            ErrorKind::Busy => BusError::Busy {
-                device: name.clone(),
+        let product = device.product.clone();
+        let (interface, out, input) = self.claim_bulk_pair(
+            device,
+            |name| match name {
+                Some(name) => is_cmsis_dap(name),
+                None => product.as_deref().is_some_and(is_cmsis_dap),
             },
-            _ => open_error(error.to_string()),
-        })?;
-        let configuration = usb
-            .active_configuration()
-            .map_err(|error| open_error(error.to_string()))?;
-        for interface in configuration.interfaces() {
-            let number = interface.interface_number();
-            let named_dap = info
-                .interfaces()
-                .find(|i| i.interface_number() == number)
-                .is_some_and(|i| match i.interface_string() {
-                    Some(name) => is_cmsis_dap(name),
-                    None => device.product.as_deref().is_some_and(is_cmsis_dap),
-                });
-            for alt in interface.alt_settings() {
-                if alt.class() != USB_CLASS_VENDOR || !named_dap {
-                    continue;
-                }
-                let mut endpoints = alt.endpoints();
-                let (Some(out_ep), Some(in_ep)) = (endpoints.next(), endpoints.next()) else {
-                    continue;
-                };
-                if out_ep.transfer_type() != TransferType::Bulk
-                    || out_ep.direction() != Direction::Out
-                    || in_ep.transfer_type() != TransferType::Bulk
-                    || in_ep.direction() != Direction::In
-                {
-                    continue;
-                }
-                let (out_address, in_address) = (out_ep.address(), in_ep.address());
-                let claimed =
-                    usb.claim_interface(number)
-                        .wait()
-                        .map_err(|error| match error.kind() {
-                            ErrorKind::Busy => BusError::Busy {
-                                device: name.clone(),
-                            },
-                            _ => open_error(error.to_string()),
-                        })?;
-                let out = claimed
-                    .endpoint::<Bulk, Out>(out_address)
-                    .map_err(|error| open_error(error.to_string()))?;
-                let input = claimed
-                    .endpoint::<Bulk, In>(in_address)
-                    .map_err(|error| open_error(error.to_string()))?;
-                return Ok(NusbDap {
-                    interface: claimed,
-                    out,
-                    input,
-                });
-            }
-        }
-        Err(open_error("it has no CMSIS-DAP v2 bulk interface".into()))
+            "it has no CMSIS-DAP v2 bulk interface",
+        )?;
+        Ok(NusbDap {
+            interface,
+            out,
+            input,
+        })
+    }
+
+    fn open_aux(&self, device: &UsbDevice) -> Result<NusbAux, BusError> {
+        let (interface, out, input) = self.claim_bulk_pair(
+            device,
+            |name| name == Some(aux::INTERFACE_NAME),
+            "it has no Verge Aux interface",
+        )?;
+        Ok(NusbAux {
+            _interface: interface,
+            out,
+            input,
+        })
     }
 
     fn device_control_out(
@@ -371,6 +412,33 @@ impl DapLink for NusbDap {
                 COMMAND_TIMEOUT,
             )
             .wait()
+            .map_err(link_error)
+    }
+}
+
+/// A claimed Verge Aux interface. Dropping it releases the interface.
+pub struct NusbAux {
+    _interface: nusb::Interface,
+    out: nusb::Endpoint<Bulk, Out>,
+    input: nusb::Endpoint<Bulk, In>,
+}
+
+impl AuxLink for NusbAux {
+    fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
+        self.out
+            .transfer_blocking(Buffer::from(request), COMMAND_TIMEOUT)
+            .into_result()
+            .map(drop)
+            .map_err(link_error)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
+        // A message ends with a short packet, and none is longer than one packet.
+        let len = self.input.max_packet_size();
+        self.input
+            .transfer_blocking(Buffer::new(len), timeout)
+            .into_result()
+            .map(Buffer::into_vec)
             .map_err(link_error)
     }
 }

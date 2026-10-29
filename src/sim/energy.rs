@@ -41,7 +41,23 @@ pub struct SimEnergy {
     pub capture: Option<Capture>,
     /// An acquisition fault, which stops integrating and lasts until a start succeeds.
     pub fault: bool,
+    /// Verge Aux's stream of the capture.
+    pub stream: Option<Stream>,
 }
+
+/// A stream of the capture that started at `since`, its next pair counted from 0.
+#[derive(Clone, Copy, Debug)]
+pub struct Stream {
+    pub since: Duration,
+    pub next: u64,
+}
+
+const FULL_SCALE_MV: u32 = 3_000;
+const PAIRS_A_MESSAGE: u64 = 99;
+const ASKED: u8 = 1;
+const STOPPED_END: u8 = 2;
+const RESTARTED: u8 = 3;
+const FAILED: u8 = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Capture {
@@ -86,6 +102,7 @@ impl SimEnergy {
             supply_on: true,
             capture: Some(Capture::new(now, rate)),
             fault: false,
+            stream: None,
         }
     }
 
@@ -246,5 +263,152 @@ impl SimEnergy {
             _ => reply[1] = DAP_ERROR,
         }
         reply
+    }
+
+    /// Pair `n`'s codes and range, as the probe would read the target's current through its sense
+    /// resistor, the voltage divider's current included.
+    fn pair(&self, capture: &Capture, n: u64) -> ([u8; 5], bool) {
+        let millivolts = self.millivolts();
+        let shunt = self.nanoamps_at(capture.micros(n)) + ((millivolts * 99_297) >> 16);
+        let low = shunt <= LOW_RANGE_NANOAMPS;
+        let table = CALIBRATION[usize::from(!low)];
+        let segment = (0..table.len() - 1)
+            .rev()
+            .find(|&j| j == 0 || shunt >= table[j].1)
+            .unwrap_or(0);
+        let ((c0, i0), (c1, i1)) = (table[segment], table[segment + 1]);
+        let code = i64::from(c0)
+            + (i64::from(shunt) - i64::from(i0)) * (i64::from(c1) - i64::from(c0))
+                / (i64::from(i1) - i64::from(i0));
+        let current_code = code.clamp(0, 65_535) as u16;
+        let voltage_code = ((u64::from(millivolts) << 16) / u64::from(2 * FULL_SCALE_MV)) as u16;
+        let [v0, v1] = voltage_code.to_le_bytes();
+        let [c0, c1] = current_code.to_le_bytes();
+        ([v0, v1, c0, c1, u8::from(low)], low)
+    }
+
+    fn header(capture: &Capture, first_sequence: u32, previous_low: bool) -> Vec<u8> {
+        let mut header = vec![0xA1, 1];
+        header.extend_from_slice(&capture.rate.to_le_bytes());
+        header.push(1);
+        header.extend_from_slice(&(FULL_SCALE_MV as u16).to_le_bytes());
+        header.extend_from_slice(&first_sequence.to_le_bytes());
+        header.push(u8::from(previous_low));
+        for points in CALIBRATION {
+            header.push(points.len() as u8);
+            for slot in 0..4 {
+                let (code, nanoamps) = points.get(slot).copied().unwrap_or((0, 0));
+                header.extend_from_slice(&code.to_le_bytes());
+                header.extend_from_slice(&nanoamps.to_le_bytes());
+            }
+        }
+        header.extend_from_slice(&[0, 0, 0, 0]);
+        header
+    }
+
+    fn end(reason: u8, last_sequence: u64) -> Vec<u8> {
+        let mut end = vec![0xA2, reason];
+        end.extend_from_slice(&(last_sequence as u32).to_le_bytes());
+        end
+    }
+
+    /// The stream's messages due by `now`: pairs up to it, and the end once its capture has
+    /// stopped, failed or been restarted.
+    pub fn stream_messages(&mut self, now: Duration) -> Vec<Vec<u8>> {
+        let Some(mut stream) = self.stream else {
+            return Vec::new();
+        };
+        let Some(capture) = self.capture.filter(|capture| capture.since == stream.since) else {
+            self.stream = None;
+            return vec![Self::end(RESTARTED, stream.next)];
+        };
+        let mut messages = Vec::new();
+        let available = capture.pairs(now);
+        while stream.next < available {
+            let count = (available - stream.next).min(PAIRS_A_MESSAGE);
+            let mut message = vec![0xA0, 0];
+            message.extend_from_slice(&((stream.next + 1) as u32).to_le_bytes());
+            message.extend_from_slice(&(capture.micros(stream.next) * 1_000).to_le_bytes());
+            message.extend_from_slice(&(count as u16).to_le_bytes());
+            for n in stream.next..stream.next + count {
+                message.extend_from_slice(&self.pair(&capture, n).0);
+            }
+            messages.push(message);
+            stream.next += count;
+        }
+        if capture.stopped_at.is_some() {
+            self.stream = None;
+            messages.push(Self::end(
+                if self.fault { FAILED } else { STOPPED_END },
+                stream.next,
+            ));
+        } else {
+            self.stream = Some(stream);
+        }
+        messages
+    }
+
+    /// `0x90` mode 5, which only Verge Aux has: a start, as mode 0, streamed from its first pair.
+    /// The firmware holds stream messages back while the request is out, so its reply comes
+    /// first, then the end of any stream the start restarted, then the header.
+    pub fn start_stream(&mut self, pro: bool, now: Duration, rate: [u8; 4]) -> Vec<Vec<u8>> {
+        let mut messages = self.stream_messages(now);
+        let mut request = vec![0];
+        request.extend_from_slice(&rate);
+        let reply = self.energy(pro, now, &request);
+        let started = reply[2] == OK;
+        messages.push(reply);
+        messages.extend(self.stream_messages(now));
+        if let Some(capture) = self.capture.filter(|_| started) {
+            self.stream = Some(Stream {
+                since: capture.since,
+                next: 0,
+            });
+            messages.push(Self::header(&capture, 1, true));
+        }
+        messages
+    }
+
+    /// `0x90` mode 6: the running capture, streamed from its next pair. Its reply, then the end of
+    /// any stream it replaces, then the header.
+    pub fn stream_running(&mut self, pro: bool, now: Duration) -> Vec<Vec<u8>> {
+        let mut messages = self.stream_messages(now);
+        let running = self.capture.filter(|capture| capture.stopped_at.is_none());
+        let result = match running {
+            _ if !pro => UNAVAILABLE,
+            _ if self.fault => DMA_ERROR,
+            None => STOPPED,
+            Some(_) => OK,
+        };
+        messages.push(vec![ENERGY_COMMAND, DAP_OK, result]);
+        if result == OK
+            && let Some(stream) = self.stream.take()
+        {
+            messages.push(Self::end(ASKED, stream.next));
+        }
+        if let Some(capture) = running.filter(|_| result == OK) {
+            let next = capture.pairs(now);
+            let previous_low = next == 0 || self.pair(&capture, next - 1).1;
+            self.stream = Some(Stream {
+                since: capture.since,
+                next,
+            });
+            messages.push(Self::header(&capture, (next + 1) as u32, previous_low));
+        }
+        messages
+    }
+
+    /// `0x90` mode 7: the stream stops, the capture carries on. The reply, then the end.
+    pub fn stop_stream(&mut self, pro: bool, now: Duration) -> Vec<Vec<u8>> {
+        let mut messages = self.stream_messages(now);
+        messages.push(vec![
+            ENERGY_COMMAND,
+            DAP_OK,
+            if pro { OK } else { UNAVAILABLE },
+        ]);
+        if let Some(stream) = self.stream.take() {
+            messages.push(Self::end(ASKED, stream.next));
+        }
+        messages
     }
 }

@@ -536,6 +536,7 @@ struct Watch<'b, B> {
 impl<B: Bus> Bus for Watch<'_, B> {
     type Dap = B::Dap;
     type Isp = B::Isp;
+    type Aux = B::Aux;
 
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
         let devices = self.bus.devices()?;
@@ -554,6 +555,10 @@ impl<B: Bus> Bus for Watch<'_, B> {
 
     fn open_dap(&self, device: &UsbDevice) -> Result<B::Dap, BusError> {
         self.bus.open_dap(device)
+    }
+
+    fn open_aux(&self, device: &UsbDevice) -> Result<B::Aux, BusError> {
+        self.bus.open_aux(device)
     }
 
     fn device_control_out(
