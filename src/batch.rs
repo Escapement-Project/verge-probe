@@ -186,6 +186,12 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::Unreadable { reason, .. } => {
             return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
         }
+        State::Held { .. } => {
+            return Verdict::Skip(
+                "another program holds its CMSIS-DAP interface, which an update goes through"
+                    .into(),
+            );
+        }
         State::SwdJumper {
             firmware: Jumpered::Ours,
         } => {
@@ -216,7 +222,10 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::Bootloader => {
             return Verdict::Skip("in ISP mode, which this batch does not take".into());
         }
-        State::MiniBootloader | State::Unreadable { .. } | State::SwdJumper { .. } => {
+        State::MiniBootloader
+        | State::Held { .. }
+        | State::Unreadable { .. }
+        | State::SwdJumper { .. } => {
             unreachable!("judged above")
         }
         State::Probe {

@@ -127,6 +127,9 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 );
             }
         }
+        State::Held { .. } => offer.notes.push(
+            "Another program holds its CMSIS-DAP interface, which the jumper-free update goes through. Close it and look again.".into(),
+        ),
         State::SwdJumper {
             firmware: Jumpered::Ours,
         } => {

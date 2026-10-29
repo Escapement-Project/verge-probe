@@ -142,6 +142,41 @@ fn a_probe_held_by_another_program_is_named_and_guessed() {
     assert_eq!(offer.paths, [Path::Jumper]);
 }
 
+/// A debugger holding CMSIS-DAP leaves Verge Aux, which says what the Pro runs; nothing that goes
+/// through CMSIS-DAP is offered.
+#[test]
+fn a_pro_held_by_a_debugger_is_asked_over_verge_aux() {
+    let bus = SimBus::scenario("ours-pro-debugger").unwrap();
+    let units = detect(&bus).unwrap();
+    let State::Held { ours } = &units[0].state else {
+        panic!("{:?}", units[0].state);
+    };
+    assert_eq!(ours.firmware, "26ea505");
+    assert_eq!(units[0].hardware(), Hardware::Board(Board::McuLinkPro));
+    assert_eq!(
+        units[0].build(),
+        Some(verge_probe::version::Build::parse("26ea505"))
+    );
+    assert_eq!(units[0].serial(), units[0].device.serial.as_deref());
+    let offer = offer(&units[0], &units);
+    assert_eq!(offer.paths, [Path::Jumper]);
+    assert!(
+        offer
+            .notes
+            .iter()
+            .any(|n| n.contains("holds its CMSIS-DAP"))
+    );
+
+    bus.set_aux_busy(0, true);
+    assert_eq!(
+        detect(&bus).unwrap()[0].state,
+        State::Unreadable {
+            reason: "another program has it open".into(),
+            guess: Guess::Ours,
+        }
+    );
+}
+
 #[test]
 fn stock_v2_speaks_hid_only_and_gets_the_jumper() {
     let bus = SimBus::scenario("stock-hid").unwrap();

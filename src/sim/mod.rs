@@ -158,6 +158,8 @@ pub struct SimUnit {
     pub jumper: bool,
     /// Another program holds the CMSIS-DAP interface.
     pub busy: bool,
+    /// Another program holds Verge Aux.
+    pub aux_busy: bool,
     /// An MCU-Link mini, whose bootloader enumerates as `1fc9:0022`.
     pub mini: bool,
     /// Replies an earlier host left unread on the bulk IN endpoint.
@@ -635,6 +637,14 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("pro", "one MCU-Link Pro running stock V3.172"),
     ("ours-pro", "one MCU-Link Pro running a current Verge image"),
     (
+        "ours-pro-debugger",
+        "one MCU-Link Pro running a current Verge image, its CMSIS-DAP held by another program as a debugger would",
+    ),
+    (
+        "ours-pro-aux-taken",
+        "one MCU-Link Pro running a current Verge image, its Verge Aux held by another program",
+    ),
+    (
         "ours-pro-energy",
         "one MCU-Link Pro running a current Verge image, its target supply on, capturing energy at 1,000 pairs a second for 10 s",
     ),
@@ -716,6 +726,7 @@ impl SimBus {
             generation: 0,
             jumper: false,
             busy: false,
+            aux_busy: false,
             mini: false,
             stale_replies: Vec::new(),
             plugged: true,
@@ -784,6 +795,10 @@ impl SimBus {
 
     pub fn set_busy(&self, unit: usize, busy: bool) {
         self.world().units[unit].busy = busy;
+    }
+
+    pub fn set_aux_busy(&self, unit: usize, busy: bool) {
+        self.world().units[unit].aux_busy = busy;
     }
 
     /// A unit running `firmware` that is plugged in `after` from now, on a port of its own.
@@ -939,6 +954,16 @@ impl SimBus {
             "ours-pro" => {
                 let unit = bus.add_ours("26ea505");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+            }
+            "ours-pro-debugger" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.set_busy(unit, true);
+            }
+            "ours-pro-aux-taken" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.set_aux_busy(unit, true);
             }
             "ours-pro-energy" => {
                 let unit = bus.add_ours("26ea505");
@@ -1138,6 +1163,11 @@ impl Bus for SimBus {
             return Err(BusError::Open {
                 device: device.to_string(),
                 reason: "it has no Verge Aux interface".into(),
+            });
+        }
+        if u.aux_busy {
+            return Err(BusError::Busy {
+                device: device.to_string(),
             });
         }
         let generation = u.generation;

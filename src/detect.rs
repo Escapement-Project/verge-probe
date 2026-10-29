@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::aux::Aux;
 use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapError, Identity, Ours};
@@ -84,6 +85,10 @@ pub enum State {
         identity: Identity,
         firmware: Firmware,
     },
+    /// Running Verge with its CMSIS-DAP interface held by another program, a debugger most likely,
+    /// and asked over Verge Aux instead. Nothing that goes through CMSIS-DAP reaches it, an update
+    /// included.
+    Held { ours: Ours },
     /// Running a firmware the tool could not query.
     Unreadable { reason: String, guess: Guess },
     /// Running a firmware with its SWD jumper fitted. The jumper takes the CMSIS-DAP interfaces
@@ -201,16 +206,23 @@ impl Unit {
         .or(self.device.serial.as_deref())
     }
 
-    /// The build ours runs, parsed.
+    /// What Verge says it is, asked over CMSIS-DAP or Verge Aux.
     #[must_use]
-    pub fn build(&self) -> Option<Build> {
+    pub fn verge(&self) -> Option<&Ours> {
         match &self.state {
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } => Some(Build::parse(&ours.firmware)),
+            }
+            | State::Held { ours } => Some(ours),
             _ => None,
         }
+    }
+
+    /// The build ours runs, parsed.
+    #[must_use]
+    pub fn build(&self) -> Option<Build> {
+        self.verge().map(|ours| Build::parse(&ours.firmware))
     }
 
     #[must_use]
@@ -226,7 +238,8 @@ impl Unit {
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } => Hardware::from_ours(ours),
+            }
+            | State::Held { ours } => Hardware::from_ours(ours),
             State::SwdJumper {
                 firmware: Jumpered::Ours,
             } => self
@@ -264,6 +277,11 @@ impl fmt::Display for State {
                 firmware: Firmware::Stock { version: None },
                 ..
             } => write!(f, "stock, version not reported"),
+            State::Held { ours } => write!(
+                f,
+                "Verge, build {}, its CMSIS-DAP held by another program",
+                ours.firmware
+            ),
             State::Unreadable { guess, .. } => match guess {
                 Guess::Ours => write!(f, "probably Verge, could not ask"),
                 Guess::Stock(Some(v)) => write!(f, "probably stock V{v}, could not ask"),
@@ -284,7 +302,8 @@ impl fmt::Display for State {
 /// Every attached MCU-Link and what it runs.
 ///
 /// A probe is opened, asked `DAP_Info` and vendor command 0x82, and released. Both are read-only.
-/// A bootloader is not opened, nor a probe without a CMSIS-DAP v2 interface.
+/// A Pro whose CMSIS-DAP another program holds is asked 0x82 over Verge Aux. A bootloader is not
+/// opened, nor a probe without a CMSIS-DAP v2 interface.
 pub fn detect<B: Bus>(bus: &B) -> Result<Vec<Unit>, BusError> {
     Ok(bus
         .devices()?
@@ -347,9 +366,17 @@ fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
                     guess: Guess::from_strings(&device),
                 },
             },
-            Err(BusError::Busy { .. }) => State::Unreadable {
-                reason: "another program has it open".into(),
-                guess: Guess::from_strings(&device),
+            Err(BusError::Busy { .. }) => match device.aux.then(|| ask_aux(bus, &device)) {
+                Some(Ok(ours)) => State::Held { ours },
+                held => {
+                    if let Some(Err(error)) = held {
+                        tracing::debug!("{device}: Verge Aux did not say what it runs: {error}");
+                    }
+                    State::Unreadable {
+                        reason: "another program has it open".into(),
+                        guess: Guess::from_strings(&device),
+                    }
+                }
             },
             Err(error) => State::Unreadable {
                 reason: error.to_string(),
@@ -358,6 +385,18 @@ fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
         },
     };
     Unit { device, state }
+}
+
+/// Vendor command 0x82 over Verge Aux, which only Verge offers.
+fn ask_aux<B: Bus>(bus: &B, device: &UsbDevice) -> Result<Ours, String> {
+    let link = bus.open_aux(device).map_err(|error| error.to_string())?;
+    let mut aux = Aux::open(link).map_err(|error| error.to_string())?;
+    let reply = aux
+        .exchange(&[dap::VENDOR_IDENTIFY])
+        .map_err(|error| error.to_string())?;
+    dap::parse_identify(&reply)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "it answered 0x82 as stock would".to_owned())
 }
 
 fn ask(link: &mut dyn dap::DapLink, device: &UsbDevice) -> Result<State, DapError> {
