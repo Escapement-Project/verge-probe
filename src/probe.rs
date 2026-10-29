@@ -24,6 +24,8 @@ use crate::protocol::{
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
+use crate::dap::{DapLink, ID_DAP_INVALID};
+
 /// A failure from a typed Verge command.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -297,6 +299,34 @@ pub enum EnergyTotal {
     NoSample,
     /// No capture has started since the probe booted.
     Stopped,
+}
+
+/// A current range the energy circuit calibrates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalibrationRange {
+    /// The sense resistor alone, for small currents.
+    Low = 0,
+    /// A second sense resistor in parallel, for large currents.
+    High = 1,
+}
+
+/// One calibration point: an ADC code and the current through the sense resistor at that code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CalibrationPoint {
+    pub code: u16,
+    pub current_nanoamps: u32,
+}
+
+/// A range's calibration points, lowest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnergyCalibration {
+    /// The latest calibration succeeded.
+    Calibrated(Vec<CalibrationPoint>),
+    /// The latest calibration failed, with the points it measured before failing, or none ran
+    /// because the jumper setting could not be read.
+    Failed(Vec<CalibrationPoint>),
 }
 
 /// One target-sense conversion returned by vendor command `0x86`.
@@ -629,6 +659,62 @@ impl VergeTransport for Session {
     }
 }
 
+/// Vendor commands over a [`DapLink`], the link verge's own commands open. Replies come back as
+/// probe-rs gives them: without the command byte, and a lone `ID_DAP_Invalid` as a command the
+/// firmware does not know.
+pub struct DapTransport<'a>(pub &'a mut dyn DapLink);
+
+impl VergeTransport for DapTransport<'_> {
+    fn send_vendor_command(
+        &mut self,
+        command_id: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, DebugProbeError> {
+        if !(0x80..=0x9F).contains(&command_id) {
+            return Err(DebugProbeError::Other(format!(
+                "0x{command_id:02x} is not a vendor command"
+            )));
+        }
+        let request = [&[command_id][..], payload].concat();
+        let reply = match self.0.exchange(&request) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.resynchronise();
+                return Err(DebugProbeError::Other(error.to_string()));
+            }
+        };
+        match reply.split_first() {
+            Some((&id, rest)) if id == command_id => Ok(rest.to_vec()),
+            Some((&ID_DAP_INVALID, _)) => Err(DebugProbeError::CommandNotSupportedByProbe {
+                command_name: "vendor command",
+            }),
+            other => {
+                self.resynchronise();
+                Err(DebugProbeError::Other(format!(
+                    "asked for command 0x{command_id:02x} and the reply was {}: the probe is out of step",
+                    other.map_or_else(|| "empty".to_owned(), |(id, _)| format!("0x{id:02x}"))
+                )))
+            }
+        }
+    }
+}
+
+impl DapTransport<'_> {
+    /// Takes off the link any reply still owed after a failure. Left there, it would answer the
+    /// next command in its place, and as every 0x90 mode shares one command byte, nothing would
+    /// notice. A drain takes the replies already on their way. The probe answers in order, so a
+    /// reply later still comes before the answer to a `DAP_Info` sent after it: one that is not
+    /// that answer is stale, and the answer follows it.
+    fn resynchronise(&mut self) {
+        let _ = self.0.drain();
+        if let Ok(reply) = self.0.exchange(&[crate::dap::DAP_INFO, 0xFE])
+            && reply.first() != Some(&crate::dap::DAP_INFO)
+        {
+            let _ = self.0.drain();
+        }
+    }
+}
+
 enum InfoCache {
     Unread,
     NotVerge,
@@ -896,6 +982,16 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
         self.require_capability(CAP_ENERGY_ACCUMULATOR, "the energy accumulator")?;
         let response = self.send(ENERGY_COMMAND, &[3])?;
         parse_energy_accumulator(&response)
+    }
+
+    /// Reads the calibration points the probe's latest calibration left for `range`.
+    pub fn read_energy_calibration(
+        &mut self,
+        range: CalibrationRange,
+    ) -> Result<EnergyCalibration, CommandError<EnergyError>> {
+        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
+        let response = self.send(ENERGY_COMMAND, &[4, range as u8])?;
+        parse_energy_calibration(&response)
     }
 
     /// Hands selected J8 pins from the firmware marker to the host.
@@ -1487,6 +1583,37 @@ fn parse_energy_accumulator(response: &[u8]) -> Result<EnergyTotal, CommandError
         Err(EnergyError::DmaError) => Ok(EnergyTotal::Failed(accumulator)),
         Err(EnergyError::NoSample) => Ok(EnergyTotal::NoSample),
         Err(EnergyError::Stopped) => Ok(EnergyTotal::Stopped),
+        Err(error) => Err(CommandError::Firmware(error)),
+    }
+}
+
+fn parse_energy_calibration(
+    response: &[u8],
+) -> Result<EnergyCalibration, CommandError<EnergyError>> {
+    let mut reader = ResponseReader::new(response);
+    // Firmware from before mode 4 answers it DAP_ERROR.
+    if !vendor_status(reader.u8()?)? {
+        return Err(CommandError::Unsupported("the energy calibration points"));
+    }
+    let status = reader.u8()?;
+    let count = usize::from(reader.u8()?);
+    let mut points = Vec::with_capacity(4);
+    for _ in 0..4 {
+        points.push(CalibrationPoint {
+            code: reader.u16()?,
+            current_nanoamps: reader.u32()?,
+        });
+    }
+    if count > points.len() {
+        return Err(malformed(format!(
+            "{count} calibration points in a reply that holds four"
+        ))
+        .into());
+    }
+    points.truncate(count);
+    match EnergyError::check(status) {
+        Ok(()) => Ok(EnergyCalibration::Calibrated(points)),
+        Err(EnergyError::AdcError) => Ok(EnergyCalibration::Failed(points)),
         Err(error) => Err(CommandError::Firmware(error)),
     }
 }
@@ -2568,6 +2695,114 @@ mod tests {
         no_sample_reply[19] = 0;
         let no_sample = parse_energy_capture_sample(&no_sample_reply, true).unwrap();
         assert_eq!(no_sample, EnergyCaptureSample::NoSample);
+    }
+
+    #[test]
+    fn calibration_points_stop_at_the_count_and_a_failed_calibration_keeps_them() {
+        let reply = |status: u8, count: u8| {
+            let mut reply = vec![0, status, count];
+            for (code, nanoamps) in [(26u16, 0u32), (1_590, 496_000), (3_150, 1_000_000), (0, 0)] {
+                reply.extend_from_slice(&code.to_le_bytes());
+                reply.extend_from_slice(&nanoamps.to_le_bytes());
+            }
+            reply
+        };
+        let point = |code, current_nanoamps| CalibrationPoint {
+            code,
+            current_nanoamps,
+        };
+        assert_eq!(
+            parse_energy_calibration(&reply(0, 3)).unwrap(),
+            EnergyCalibration::Calibrated(vec![
+                point(26, 0),
+                point(1_590, 496_000),
+                point(3_150, 1_000_000)
+            ])
+        );
+        assert_eq!(
+            parse_energy_calibration(&reply(6, 1)).unwrap(),
+            EnergyCalibration::Failed(vec![point(26, 0)])
+        );
+        assert!(matches!(
+            parse_energy_calibration(&reply(0, 5)),
+            Err(CommandError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_energy_calibration(&reply(3, 0)),
+            Err(CommandError::Firmware(EnergyError::Unavailable))
+        ));
+        assert!(matches!(
+            parse_energy_calibration(&[0xFF, 0]),
+            Err(CommandError::Unsupported(_))
+        ));
+        assert!(parse_energy_calibration(&reply(0, 3)[..26]).is_err());
+    }
+
+    /// Replies in order, `None` for an exchange that times out; counts drains.
+    struct ScriptedLink(VecDeque<Option<Vec<u8>>>, usize);
+
+    impl DapLink for ScriptedLink {
+        fn exchange(&mut self, _request: &[u8]) -> Result<Vec<u8>, crate::dap::LinkError> {
+            self.0
+                .pop_front()
+                .unwrap()
+                .ok_or(crate::dap::LinkError::Timeout)
+        }
+
+        fn drain(&mut self) -> Result<usize, crate::dap::LinkError> {
+            self.1 += 1;
+            Ok(0)
+        }
+
+        fn control_out(
+            &mut self,
+            _request_type: u8,
+            _request: u8,
+            _value: u16,
+            _index: u16,
+        ) -> Result<(), crate::dap::LinkError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_dap_link_answers_vendor_commands_as_probe_rs_does() {
+        let info = Some(vec![0x00, 1, 8]);
+        let replies = [
+            Some(vec![0x8F, 0, 1]),
+            Some(vec![0xFF]),
+            // Another command's reply: a drain, then a DAP_Info that answers in step.
+            Some(vec![0x90, 0]),
+            info.clone(),
+            // A timeout: a drain, then a DAP_Info whose reply is the late one, so a second drain.
+            None,
+            Some(vec![0x90, 0, 1]),
+        ];
+        let mut link = ScriptedLink(replies.into(), 0);
+        let send = |link: &mut ScriptedLink, command_id| {
+            DapTransport(link).send_vendor_command(command_id, &[2])
+        };
+        assert_eq!(send(&mut link, 0x8F).unwrap(), [0, 1]);
+        assert!(matches!(
+            send(&mut link, 0x8F),
+            Err(DebugProbeError::CommandNotSupportedByProbe { .. })
+        ));
+        assert_eq!(link.1, 0, "an unknown command leaves nothing owed");
+        assert!(matches!(
+            send(&mut link, 0x8F),
+            Err(DebugProbeError::Other(message)) if message.contains("out of step")
+        ));
+        assert_eq!(link.1, 1, "in step again after one drain");
+        assert!(send(&mut link, 0x90).is_err());
+        assert_eq!(
+            link.1, 3,
+            "a late reply in place of DAP_Info's answer takes a second drain"
+        );
+        assert!(link.0.is_empty());
+        assert!(matches!(
+            send(&mut link, 0x00),
+            Err(DebugProbeError::Other(message)) if message.contains("not a vendor command")
+        ));
     }
 
     #[test]

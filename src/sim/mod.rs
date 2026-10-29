@@ -16,6 +16,7 @@
 //!   the marker boots to nothing, as an unknown image would on the bench.
 
 mod dap;
+mod energy;
 pub mod http;
 mod rom;
 
@@ -189,6 +190,8 @@ pub struct SimUnit {
     /// What something attached holds the DIO pins at, which an input reads: low, the Pro's own
     /// pull-downs, unless set.
     pub dio_held: u8,
+    /// A Pro's target supply and energy capture, which a restart turns off and clears.
+    pub energy: energy::SimEnergy,
 }
 
 /// What ours offers after a restart: OScan1, OScan2 and OScan5.
@@ -361,6 +364,7 @@ impl World {
                 self.units[unit].scan_formats = SIM_SCAN_FORMATS;
                 self.units[unit].dio_outputs = 0;
                 self.units[unit].dio_levels = 0;
+                self.units[unit].energy.reset();
                 let u = &self.units[unit];
                 // The ROM starts ISP mode when flash holds no image at all (UM11126, passive boot).
                 let blank = u
@@ -631,6 +635,14 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "one MCU-Link Pro running a current image of ours",
     ),
     (
+        "ours-pro-energy",
+        "one MCU-Link Pro running a current image of ours, its target supply on, capturing energy at 1,000 pairs a second for 10 s",
+    ),
+    (
+        "ours-pro-energy-failed",
+        "as ours-pro-energy, its capture stopped by an acquisition fault at 10 s",
+    ),
+    (
         "ours-pro-held",
         "one MCU-Link Pro running a current image of ours, with something holding DIO3 high",
     ),
@@ -714,6 +726,7 @@ impl SimBus {
             dio_outputs: 0,
             dio_levels: 0,
             dio_held: 0,
+            energy: energy::SimEnergy::default(),
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -842,6 +855,21 @@ impl SimBus {
         self.world().units[unit].board = Some(board);
     }
 
+    /// Turns a unit's target supply on and starts a capture at `rate` pairs a second, `age` ago.
+    pub fn start_energy(&self, unit: usize, rate: u32, age: Duration) {
+        let mut world = self.world();
+        let now = world.now;
+        world.units[unit].energy = energy::SimEnergy::running(now, rate);
+        world.advance(age);
+    }
+
+    /// Gives a unit's capture an acquisition fault now, as a DMA error or an ADC overrun would.
+    pub fn fail_energy(&self, unit: usize) {
+        let mut world = self.world();
+        let now = world.now;
+        world.units[unit].energy.fail(now);
+    }
+
     /// Gives a unit's stock firmware this USB product string, whatever its board.
     pub fn set_stock_product(&self, unit: usize, product: &str) {
         self.world().units[unit].stock_product = Some(product.to_owned());
@@ -907,6 +935,17 @@ impl SimBus {
             "ours-pro" => {
                 let unit = bus.add_ours("26ea505");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+            }
+            "ours-pro-energy" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.start_energy(unit, 1000, Duration::from_secs(10));
+            }
+            "ours-pro-energy-failed" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.start_energy(unit, 1000, Duration::from_secs(10));
+                bus.fail_energy(unit);
             }
             "ours-pro-held" => {
                 let unit = bus.add_ours("26ea505");

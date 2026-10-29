@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
+use crate::protocol::{
+    CAP_CALIBRATED_ENERGY, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_TARGET_POWER,
+    ENERGY_COMMAND, TARGET_POWER_COMMAND,
+};
 
 /// Each command costs this much simulated time.
 const COMMAND_TIME: Duration = Duration::from_micros(250);
@@ -109,16 +113,17 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         },
         [dap::VENDOR_IDENTIFY] => match &firmware {
             SimFirmware::Ours { build } => {
-                // A unit with a board answers as the current image does, in format 4; one without
+                // A unit with a board answers as the current image does, in format 6; one without
                 // as recorded.
                 let board = world.units[unit].board;
                 let format = if board.is_some() {
-                    4
+                    6
                 } else {
                     world.ours.1.format
                 };
-                let flags = if board == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
-                    world.ours.1.flags | dap::Ours::FLAG_DIO
+                let pro = board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let flags = if pro {
+                    world.ours.1.flags | dap::Ours::FLAG_DIO | CAP_TARGET_POWER
                 } else {
                     world.ours.1.flags
                 };
@@ -129,6 +134,12 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 if let Some(board) = board {
                     reply.push(board);
                     reply.extend_from_slice(&world.units[unit].scan_formats.to_le_bytes());
+                    let extended = if pro {
+                        CAP_ENERGY_CAPTURE | CAP_ENERGY_ACCUMULATOR | CAP_CALIBRATED_ENERGY
+                    } else {
+                        0
+                    };
+                    reply.extend_from_slice(&extended.to_le_bytes());
                 }
                 reply
             }
@@ -161,6 +172,22 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         [dap::VENDOR_DIO, mask, outputs, levels] => match &firmware {
             SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
                 dio_reply(&mut world.units[unit], *mask, *outputs, *levels)
+            }
+            _ => vec![dap::ID_DAP_INVALID],
+        },
+        [TARGET_POWER_COMMAND, mode] => match &firmware {
+            SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
+                let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let now = world.now;
+                world.units[unit].energy.target_power(pro, *mode, now)
+            }
+            _ => vec![dap::ID_DAP_INVALID],
+        },
+        [ENERGY_COMMAND, request @ ..] => match &firmware {
+            SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
+                let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let now = world.now;
+                world.units[unit].energy.energy(pro, now, request)
             }
             _ => vec![dap::ID_DAP_INVALID],
         },

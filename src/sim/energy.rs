@@ -1,0 +1,250 @@
+//! A simulated Pro's target supply (`0x8F`) and energy capture (`0x90`), as HOST-INTERFACE.md
+//! describes them.
+//!
+//! The target is a sleeping microcontroller that wakes for 10 ms every 100 ms: 20 µA asleep and
+//! 5 mA awake, at 3.3 V while the Pro's supply is on and nothing while it is off. Its values are
+//! made up; only their shape matters to a host.
+
+use std::time::Duration;
+
+use crate::protocol::{ENERGY_COMMAND, TARGET_POWER_COMMAND};
+
+const DAP_OK: u8 = 0x00;
+const DAP_ERROR: u8 = 0xFF;
+const OK: u8 = 0;
+const STOPPED: u8 = 1;
+const NO_SAMPLE: u8 = 2;
+const UNAVAILABLE: u8 = 3;
+const BAD_RATE: u8 = 4;
+const BAD_ARGUMENT: u8 = 5;
+const DMA_ERROR: u8 = 7;
+const MAX_RATE: u32 = 100_000;
+
+const SUPPLY_MILLIVOLTS: u32 = 3_300;
+const ASLEEP_NANOAMPS: u32 = 20_000;
+const AWAKE_NANOAMPS: u32 = 5_000_000;
+const PERIOD_MICROS: u64 = 100_000;
+const AWAKE_MICROS: u64 = 10_000;
+/// The 350 mA setting's low range ends at 2 mA (100 mV across 50 Ω).
+const LOW_RANGE_NANOAMPS: u32 = 2_000_000;
+
+/// The points a calibration of each range leaves, lowest first.
+const CALIBRATION: [&[(u16, u32)]; 2] = [
+    &[(410, 0), (31_200, 960_000), (62_100, 1_930_000)],
+    &[(390, 0), (24_800, 98_000_000), (49_600, 197_000_000)],
+];
+
+#[derive(Clone, Debug, Default)]
+pub struct SimEnergy {
+    pub supply_on: bool,
+    /// The capture since the last start, `None` before the first.
+    pub capture: Option<Capture>,
+    /// An acquisition fault, which stops integrating and lasts until a start succeeds.
+    pub fault: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Capture {
+    pub since: Duration,
+    pub rate: u32,
+    pub stopped_at: Option<Duration>,
+    /// When the supply last switched, in µs into the capture, and the energy integrated by then.
+    pub banked: (u64, u64),
+}
+
+impl Capture {
+    fn new(since: Duration, rate: u32) -> Self {
+        Self {
+            since,
+            rate,
+            stopped_at: None,
+            banked: (0, 0),
+        }
+    }
+
+    /// Complete pairs by `now`, or by the stop if it came first.
+    fn pairs(&self, now: Duration) -> u64 {
+        let end = self.stopped_at.unwrap_or(now).max(self.since);
+        ((end - self.since).as_micros() * u128::from(self.rate) / 1_000_000) as u64
+    }
+
+    /// When pair `n` was taken, in microseconds from the start.
+    fn micros(&self, n: u64) -> u64 {
+        n * 1_000_000 / u64::from(self.rate)
+    }
+}
+
+impl SimEnergy {
+    /// What a restart leaves: supply off, no capture, no total.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Supply on and a capture running since `now` at `rate`.
+    pub fn running(now: Duration, rate: u32) -> Self {
+        Self {
+            supply_on: true,
+            capture: Some(Capture::new(now, rate)),
+            fault: false,
+        }
+    }
+
+    /// An acquisition fault at `now`, as a DMA error or an ADC overrun mid-capture leaves.
+    pub fn fail(&mut self, now: Duration) {
+        if let Some(capture) = &mut self.capture {
+            capture.stopped_at.get_or_insert(now);
+        }
+        self.fault = true;
+    }
+
+    fn millivolts(&self) -> u32 {
+        if self.supply_on { SUPPLY_MILLIVOLTS } else { 0 }
+    }
+
+    fn nanoamps_at(&self, micros: u64) -> u32 {
+        match (self.supply_on, micros % PERIOD_MICROS < AWAKE_MICROS) {
+            (false, _) => 0,
+            (true, true) => AWAKE_NANOAMPS,
+            (true, false) => ASLEEP_NANOAMPS,
+        }
+    }
+
+    /// The total `micros` into the capture: what was banked at the last supply switch, and
+    /// what the target has drawn since if the supply is on.
+    fn nanojoules(&self, capture: &Capture, micros: u64) -> u64 {
+        let (switched, banked) = capture.banked;
+        if !self.supply_on {
+            return banked;
+        }
+        banked + Self::drawn(micros) - Self::drawn(switched.min(micros))
+    }
+
+    /// The energy the target draws over the first `micros` of a capture with the supply on, in nJ.
+    fn drawn(micros: u64) -> u64 {
+        let awake =
+            micros / PERIOD_MICROS * AWAKE_MICROS + (micros % PERIOD_MICROS).min(AWAKE_MICROS);
+        // nA times µs is fC; times mV, 1e-18 J.
+        let charge = u128::from(ASLEEP_NANOAMPS) * u128::from(micros)
+            + u128::from(AWAKE_NANOAMPS - ASLEEP_NANOAMPS) * u128::from(awake);
+        (charge * u128::from(SUPPLY_MILLIVOLTS) / 1_000_000_000) as u64
+    }
+
+    pub fn target_power(&mut self, pro: bool, mode: u8, now: Duration) -> Vec<u8> {
+        let status = match (pro, mode) {
+            (true, 0 | 1) => {
+                if let Some(capture) = self.capture {
+                    let micros = capture.micros(capture.pairs(now));
+                    let banked = self.nanojoules(&capture, micros);
+                    self.capture = Some(Capture {
+                        banked: (micros, banked),
+                        ..capture
+                    });
+                }
+                self.supply_on = mode == 1;
+                DAP_OK
+            }
+            (true, 2) => DAP_OK,
+            _ => DAP_ERROR,
+        };
+        vec![TARGET_POWER_COMMAND, status, u8::from(self.supply_on)]
+    }
+
+    pub fn energy(&mut self, pro: bool, now: Duration, request: &[u8]) -> Vec<u8> {
+        let mut reply = vec![ENERGY_COMMAND, DAP_OK];
+        match request {
+            [0, rate @ ..] if rate.len() == 4 => {
+                let rate = u32::from_le_bytes(rate.try_into().expect("four bytes"));
+                let result = if !pro {
+                    UNAVAILABLE
+                } else if rate == 0 || rate > MAX_RATE {
+                    BAD_RATE
+                } else {
+                    self.capture = Some(Capture::new(now, rate));
+                    self.fault = false;
+                    OK
+                };
+                reply.push(result);
+                let effective = if result == OK { rate } else { 0 };
+                reply.extend_from_slice(&effective.to_le_bytes());
+            }
+            [1] => {
+                let pairs = self
+                    .capture
+                    .filter(|c| c.stopped_at.is_none())
+                    .map(|c| (c, c.pairs(now)));
+                let (result, sample) = match pairs {
+                    _ if !pro => (UNAVAILABLE, None),
+                    _ if self.fault => (DMA_ERROR, None),
+                    None => (STOPPED, None),
+                    Some((_, 0)) => (NO_SAMPLE, None),
+                    Some((capture, pairs)) => (OK, Some((pairs, capture.micros(pairs)))),
+                };
+                reply.push(result);
+                let (sequence, millivolts, nanoamps) = sample
+                    .map_or((0, 0, 0), |(pairs, micros)| {
+                        (pairs as u32, self.millivolts(), self.nanoamps_at(micros))
+                    });
+                let range = match (sample, nanoamps > LOW_RANGE_NANOAMPS) {
+                    (None, _) => 0,
+                    (Some(_), false) => 1,
+                    (Some(_), true) => 2,
+                };
+                // Codes as a 16-bit ADC against 3.0 V would read them: half the voltage, and the
+                // current as 30 times its drop across the range's sense resistor.
+                let voltage_code = (u64::from(millivolts) * 65_535 / 6_000) as u16;
+                let current_code = (u64::from(nanoamps) * 65_535 / 2_000_000).min(65_535) as u16;
+                reply.extend_from_slice(&voltage_code.to_le_bytes());
+                reply.extend_from_slice(&current_code.to_le_bytes());
+                reply.extend_from_slice(&sequence.to_le_bytes());
+                reply.extend_from_slice(&millivolts.to_le_bytes());
+                reply.extend_from_slice(&(nanoamps as i32).to_le_bytes());
+                reply.extend_from_slice(&[range, u8::from(sample.is_some())]);
+            }
+            [2] => {
+                if let Some(capture) = &mut self.capture {
+                    capture.stopped_at.get_or_insert(now);
+                }
+                // A stop still stops, but answers with a fault until a start clears it.
+                reply.push(match (pro, self.fault) {
+                    (false, _) => UNAVAILABLE,
+                    (true, true) => DMA_ERROR,
+                    (true, false) => OK,
+                });
+            }
+            [3] => {
+                let (result, nanojoules, pairs) = match self.capture {
+                    _ if !pro => (UNAVAILABLE, 0, 0),
+                    None => (STOPPED, 0, 0),
+                    Some(capture) => match capture.pairs(now) {
+                        0 if !self.fault => (NO_SAMPLE, 0, 0),
+                        pairs => (
+                            if self.fault { DMA_ERROR } else { OK },
+                            self.nanojoules(&capture, capture.micros(pairs)),
+                            pairs,
+                        ),
+                    },
+                };
+                reply.push(result);
+                reply.extend_from_slice(&nanojoules.to_le_bytes());
+                reply.extend_from_slice(&pairs.to_le_bytes());
+            }
+            [4, range] => {
+                let points = CALIBRATION.get(usize::from(*range)).filter(|_| pro);
+                reply.push(match points {
+                    Some(_) => OK,
+                    None if pro => BAD_ARGUMENT,
+                    None => UNAVAILABLE,
+                });
+                let points = points.copied().unwrap_or(&[]);
+                reply.push(points.len() as u8);
+                for slot in 0..4 {
+                    let (code, nanoamps) = points.get(slot).copied().unwrap_or((0, 0));
+                    reply.extend_from_slice(&code.to_le_bytes());
+                    reply.extend_from_slice(&nanoamps.to_le_bytes());
+                }
+            }
+            _ => reply[1] = DAP_ERROR,
+        }
+        reply
+    }
+}
