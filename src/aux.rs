@@ -20,6 +20,9 @@ pub const INTERFACE_NAME: &str = "Verge Aux";
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+/// What a probe can have waiting for a host: the 16 messages it keeps, the transfer already armed,
+/// and a reply to a request the last program never read.
+const WAITING: usize = 18;
 /// Stream messages kept while a caller reads only replies: about a second at the top rate.
 const KEPT_MESSAGES: usize = 1024;
 const ID_DAP_INVALID: u8 = 0xFF;
@@ -60,20 +63,43 @@ pub struct Aux<L: AuxLink> {
 
 impl<L: AuxLink> Aux<L> {
     /// Takes the interface, dropping what the program before this one left waiting on it: a reply
-    /// or a stream message meant for that program.
-    pub fn open(mut link: L) -> Result<Aux<L>, LinkError> {
-        loop {
-            match link.read(DRAIN_TIMEOUT) {
-                Ok(_) => {}
-                Err(LinkError::Timeout) => break,
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(Aux {
+    /// or a stream message meant for that program. A stream it left running is ended (`0x90` mode
+    /// 7): no other program can hold the interface, so nothing else would read it, and the probe
+    /// keeps a stream nobody reads running. Its capture carries on.
+    pub fn open(link: L) -> Result<Aux<L>, LinkError> {
+        let mut aux = Aux {
             link,
             messages: VecDeque::new(),
             dropped: 0,
-        })
+        };
+        if aux.drain()? {
+            aux.exchange(&[0x90, 7])?;
+            if aux.drain()? {
+                return Err(LinkError::Usb(
+                    "the probe kept streaming after it was asked to stop".into(),
+                ));
+            }
+            aux.messages.clear();
+        }
+        Ok(aux)
+    }
+
+    /// Reads and drops what is waiting, until the probe goes quiet or [`WAITING`] transfers have
+    /// come. True when a stream may still be running: pairs came after anything that ended it.
+    fn drain(&mut self) -> Result<bool, LinkError> {
+        let mut streaming = false;
+        for _ in 0..WAITING {
+            match self.link.read(DRAIN_TIMEOUT) {
+                Ok(data) => match data.first() {
+                    Some(&stream::PAIRS | &stream::HEADER) => streaming = true,
+                    Some(&stream::END) => streaming = false,
+                    _ => {}
+                },
+                Err(LinkError::Timeout) => return Ok(streaming),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     fn keep(&mut self, message: Vec<u8>) {

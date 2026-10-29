@@ -226,3 +226,26 @@ fn the_typed_stream_calls_drive_the_stream() {
         "mode 5 is Verge Aux's alone"
     );
 }
+
+/// A stream the last program left running, as one killed mid-recording leaves it, is ended as
+/// the interface is opened: nothing else can hold the interface, so nothing else reads it.
+#[test]
+fn opening_ends_a_stream_the_last_program_left_running() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut first = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    first.exchange(&rate(1000)).unwrap();
+    drop(first);
+    bus.sleep(Duration::from_millis(500));
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    assert_eq!(
+        aux.message(Duration::from_millis(500)).unwrap(),
+        None,
+        "the stream still runs"
+    );
+    assert_eq!(
+        aux.exchange(&[0x90, 1]).unwrap()[2],
+        0,
+        "the capture runs on"
+    );
+}
