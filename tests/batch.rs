@@ -456,7 +456,7 @@ fn each_unit_gets_a_record_line() {
     assert_eq!(json["result"], "updated");
     assert_eq!(json["serial_before"], "QK7RM2VTX8D41");
     assert_eq!(json["firmware_before"], "stock V3.172");
-    assert_eq!(json["firmware_after"], "ours, build v0.3.0");
+    assert_eq!(json["firmware_after"], "Verge, build v0.3.0");
     assert!(json["serial_after"].as_str().unwrap().starts_with("CJ"));
     assert!(json["time"].as_str().unwrap().ends_with('Z'));
     assert!(json["seconds"].as_f64().unwrap() > 2.4);
@@ -754,7 +754,7 @@ fn a_bus_error_after_an_install_still_records_it() {
     assert_eq!(seen.records[0].result, Settled::Updated);
     assert_eq!(
         seen.records[0].firmware_after.as_deref(),
-        Some("ours, build v0.3.0")
+        Some("Verge, build v0.3.0")
     );
 }
 

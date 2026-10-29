@@ -31,10 +31,10 @@ impl Path {
     pub fn describe(self) -> &'static str {
         match self {
             Path::OursJumperFree => {
-                "No jumper needed. The tool asks the firmware to restart into its bootloader, flashes it, and restarts it."
+                "The tool asks the firmware to restart into its bootloader, flashes it, and restarts it."
             }
             Path::StockJumperFree => {
-                "No jumper needed. The tool sends the request NXP's LinkServer uses, then flashes and restarts the unit."
+                "The tool sends the request NXP's LinkServer uses, then flashes and restarts the unit."
             }
             Path::Jumper => {
                 "Unplug the unit, fit the ISP jumper, and plug it back in so that its bootloader starts. Flash it, then unplug it and take the jumper off."
@@ -47,7 +47,7 @@ impl Path {
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Path::OursJumperFree => "jumper-free (ours)",
+            Path::OursJumperFree => "jumper-free (Verge)",
             Path::StockJumperFree => "jumper-free (stock)",
             Path::Jumper => "ISP jumper",
             Path::FlashNow => "flash now",

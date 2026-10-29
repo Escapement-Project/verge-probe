@@ -37,6 +37,15 @@ impl Board {
             .find(|board| board.number() == number)
     }
 
+    /// Its name alone, for a label.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Board::McuLink => "MCU-Link",
+            Board::McuLinkPro => "MCU-Link Pro",
+        }
+    }
+
     /// Its name with its article, for a sentence.
     #[must_use]
     pub fn a(self) -> &'static str {

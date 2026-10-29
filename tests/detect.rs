@@ -87,7 +87,7 @@ fn the_bench_reads_back_as_recorded() {
             other => panic!("{label}: {other:?}"),
         }
     }
-    assert_eq!(units[0].state.to_string(), "ours, build 14d05d4");
+    assert_eq!(units[0].state.to_string(), "Verge, build 14d05d4");
     assert_eq!(units[1].state.to_string(), "stock V3.172");
 }
 
@@ -228,6 +228,29 @@ fn stocks_product_string_names_the_board() {
 }
 
 #[test]
+fn a_label_names_the_board_without_an_article() {
+    for (hardware, label) in [
+        (Hardware::Board(Board::McuLink), "MCU-Link"),
+        (Hardware::Board(Board::McuLinkPro), "MCU-Link Pro"),
+        (
+            Hardware::from_stock_product("MCU-LINK MR (r0C3) CMSIS-DAP V3.172"),
+            "MCU-Link MR",
+        ),
+        (
+            Hardware::from_stock_product("MCU-LINK on-board (r0E7) CMSIS-DAP V3.122"),
+            "on-board MCU-Link",
+        ),
+        (
+            Hardware::from_stock_product("MCU-LINK FRDM-MCXN947 (r0E7) CMSIS-DAP V3.172"),
+            "MCU-Link on a FRDM-MCXN947",
+        ),
+        (Hardware::Unknown, "not reported"),
+    ] {
+        assert_eq!(hardware.name(), label);
+    }
+}
+
+#[test]
 fn each_unit_says_which_board_it_is() {
     let bus = SimBus::default();
     let plain_ours = bus.add_ours("v0.3.0");
@@ -273,14 +296,14 @@ fn a_unit_with_its_swd_jumper_is_read_from_its_usb_descriptors() {
             Jumpered::Ours,
             Hardware::Unknown,
             ours_paths.clone(),
-            "ours, SWD jumper fitted",
+            "Verge, SWD jumper fitted",
         ),
         (
             "pro-swd-jumper",
             Jumpered::Ours,
             Hardware::Board(Board::McuLinkPro),
             ours_paths.clone(),
-            "ours, SWD jumper fitted",
+            "Verge, SWD jumper fitted",
         ),
         (
             "stock-swd-jumper",

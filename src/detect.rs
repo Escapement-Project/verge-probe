@@ -157,6 +157,22 @@ impl Hardware {
     }
 }
 
+impl Hardware {
+    /// Its name alone, for a label rather than a sentence: "MCU-Link Pro", not "an MCU-Link Pro".
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Hardware::Board(board) => board.name().to_owned(),
+            Hardware::Other(name) => ["an ", "a ", "the "]
+                .iter()
+                .find_map(|article| name.strip_prefix(article))
+                .unwrap_or(name)
+                .to_owned(),
+            Hardware::Unknown => "not reported".to_owned(),
+        }
+    }
+}
+
 impl fmt::Display for Hardware {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -235,11 +251,11 @@ impl fmt::Display for State {
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } if ours.firmware.is_empty() => write!(f, "ours, identify format {}", ours.version),
+            } if ours.firmware.is_empty() => write!(f, "Verge, identify format {}", ours.version),
             State::Probe {
                 firmware: Firmware::Ours(ours),
                 ..
-            } => write!(f, "ours, build {}", ours.firmware),
+            } => write!(f, "Verge, build {}", ours.firmware),
             State::Probe {
                 firmware: Firmware::Stock { version: Some(v) },
                 ..
@@ -249,13 +265,13 @@ impl fmt::Display for State {
                 ..
             } => write!(f, "stock, version not reported"),
             State::Unreadable { guess, .. } => match guess {
-                Guess::Ours => write!(f, "probably ours, could not ask"),
+                Guess::Ours => write!(f, "probably Verge, could not ask"),
                 Guess::Stock(Some(v)) => write!(f, "probably stock V{v}, could not ask"),
                 Guess::Stock(None) => write!(f, "probably stock, could not ask"),
                 Guess::Unknown => write!(f, "a CMSIS-DAP firmware, could not ask"),
             },
             State::SwdJumper { firmware } => match firmware {
-                Jumpered::Ours => write!(f, "ours, SWD jumper fitted"),
+                Jumpered::Ours => write!(f, "Verge, SWD jumper fitted"),
                 Jumpered::Stock(Some(v)) => write!(f, "stock V{v}, SWD jumper fitted"),
                 Jumpered::Stock(None) => write!(f, "stock, SWD jumper fitted"),
             },
