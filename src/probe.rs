@@ -731,7 +731,7 @@ impl InfoCache {
 }
 
 /// Verge firmware operations on an opened probe or an attached probe-rs session.
-pub struct VergeControl<'a, T: VergeTransport> {
+pub struct VergeControl<'a, T: VergeTransport + ?Sized> {
     transport: &'a mut T,
     info: InfoCache,
 }
@@ -742,7 +742,7 @@ pub type VergeProbe<'a> = VergeControl<'a, Probe>;
 /// Verge commands sent through an attached probe-rs session.
 pub type VergeSession<'a> = VergeControl<'a, Session>;
 
-impl<'a, T: VergeTransport> VergeControl<'a, T> {
+impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
     /// Creates a Verge command client for an opened probe or attached session.
     pub fn new(transport: &'a mut T) -> Self {
         Self {
@@ -1273,12 +1273,12 @@ impl<'a, T: VergeTransport> VergeControl<'a, T> {
 }
 
 /// Stops energy capture if dropped while armed, so an unwinding callback does not leave it running.
-struct StopOnDrop<'c, 'a, T: VergeTransport> {
+struct StopOnDrop<'c, 'a, T: VergeTransport + ?Sized> {
     control: &'c mut VergeControl<'a, T>,
     armed: bool,
 }
 
-impl<T: VergeTransport> Drop for StopOnDrop<'_, '_, T> {
+impl<T: VergeTransport + ?Sized> Drop for StopOnDrop<'_, '_, T> {
     fn drop(&mut self) {
         if self.armed {
             // A transport that panics again here, on a poisoned lock for one, would abort the
