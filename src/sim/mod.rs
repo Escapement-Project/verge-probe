@@ -643,6 +643,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "as ours-pro-energy, its capture stopped by an acquisition fault at 10 s",
     ),
     (
+        "ours-pro-and-plain",
+        "an MCU-Link Pro and a plain MCU-Link, both running a current image of ours",
+    ),
+    (
         "ours-pro-held",
         "one MCU-Link Pro running a current image of ours, with something holding DIO3 high",
     ),
@@ -946,6 +950,12 @@ impl SimBus {
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
                 bus.start_energy(unit, 1000, Duration::from_secs(10));
                 bus.fail_energy(unit);
+            }
+            "ours-pro-and-plain" => {
+                let pro = bus.add_ours("26ea505");
+                bus.set_board(pro, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                let plain = bus.add_ours("26ea505");
+                bus.set_board(plain, crate::dap::Ours::BOARD_MCU_LINK);
             }
             "ours-pro-held" => {
                 let unit = bus.add_ours("26ea505");
