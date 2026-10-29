@@ -134,14 +134,16 @@ fn a_stream_sums_to_the_firmware_total() {
             &points(&case["high"]),
         );
         let mut paused = false;
+        let mut sequence = 0;
         for event in case["events"].as_array().unwrap() {
             if event == "pause" {
                 paused = true;
                 continue;
             }
+            sequence += 1;
             let message = Pairs::new(
                 u8::from(paused),
-                0,
+                sequence,
                 0,
                 vec![Pair {
                     voltage_code: event[0].as_u64().unwrap() as u16,
@@ -152,7 +154,22 @@ fn a_stream_sums_to_the_firmware_total() {
             convert.add_message(&message);
             paused = false;
         }
-        let total = convert.finish();
+        convert.end();
+        let total = convert.total();
+        // The samples are the pairs the total counted, each once and in order, and sum to it.
+        let samples = convert.take_samples();
+        assert_eq!(samples.len() as u64, total.pairs);
+        assert!(samples.iter().zip(1..).all(|(s, n)| s.sequence == n));
+        // HOST-INTERFACE.md's rule: mv × nA per pair, scaled by floor(2^32 / rate).
+        let scale = (1u128 << 32) / u128::from(rate);
+        let q32 = samples.iter().fold(0u128, |sum, s| {
+            sum + u128::from(s.millivolts) * u128::from(s.nanoamps) * scale
+        });
+        assert_eq!(
+            (q32 >> 32, q32 & 0xFFFF_FFFF),
+            (u128::from(total.picojoules), u128::from(total.fraction_q32)),
+            "the samples at {rate} pairs/s"
+        );
         assert_eq!(
             (total.picojoules, u64::from(total.fraction_q32), total.pairs),
             (
@@ -212,4 +229,43 @@ fn messages_parse_as_the_probe_lays_them_out() {
     header[1] = 2;
     assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(2)));
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
+}
+
+/// Step 5 in the samples: a pair at a range switch keeps its time and voltage, takes the next
+/// pair's current, and comes out with that pair.
+#[test]
+fn a_switching_pair_takes_the_next_pairs_current() {
+    let low = [(0, 0), (60_000, 60_000)];
+    let high = [(0, 0), (60_000, 6_000_000)];
+    let mut convert = converter(1000, 3300, &low, &high);
+    let pair = |voltage_code, current_code, low| Pair {
+        voltage_code,
+        current_code,
+        low,
+    };
+    // The header says the range before was low.
+    convert.add_message(&Pairs::new(
+        0,
+        7,
+        5_000_000,
+        vec![pair(30_000, 100, true), pair(31_000, 200, false)],
+    ));
+    let first = convert.take_samples();
+    assert_eq!(first.len(), 1, "the switching pair waits: {first:?}");
+    convert.add_message(&Pairs::new(0, 9, 7_000_000, vec![pair(32_000, 300, false)]));
+    let next = convert.take_samples();
+    let taken = convert.reading(&pair(31_000, 300, false));
+    assert_eq!(
+        next[0],
+        stream::Sample {
+            sequence: 8,
+            time_ns: 6_000_000,
+            millivolts: taken.millivolts,
+            nanoamps: taken.nanoamps,
+        }
+    );
+    assert_eq!(
+        (next[1].sequence, next[1].time_ns, next.len()),
+        (9, 7_000_000, 2)
+    );
 }

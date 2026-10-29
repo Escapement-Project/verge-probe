@@ -318,30 +318,52 @@ impl Total {
     }
 }
 
+/// One pair as the total counts it: its voltage, and the current step 5 gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub sequence: u32,
+    /// In ns since the capture started.
+    pub time_ns: u64,
+    pub millivolts: u32,
+    pub nanoamps: u32,
+}
+
+/// A pair whose range differs from the one before, waiting for the next pair's current.
+#[derive(Clone, Copy, Debug)]
+struct Waiting {
+    sequence: u32,
+    time_ns: u64,
+    millivolts: u32,
+    shunt_nanoamps: u32,
+}
+
 /// Converts a stream's pairs, and sums them as the probe does (step 5 and the total).
 #[derive(Clone, Debug)]
 pub struct Converter {
+    rate: u32,
     full_scale_mv: u16,
     low: Table,
     high: Table,
     scale_q32: u64,
     previous_low: bool,
-    /// A pair whose range differs from the one before, waiting for the next pair's current.
-    held: Option<(u32, u32)>,
+    waiting: Option<Waiting>,
     total: Total,
+    samples: Vec<Sample>,
 }
 
 impl Converter {
     #[must_use]
     pub fn new(header: &Header) -> Converter {
         Converter {
+            rate: header.rate,
             full_scale_mv: header.full_scale_mv,
             low: Table::new(&header.low),
             high: Table::new(&header.high),
             scale_q32: (1u64 << 32) / u64::from(header.rate.max(1)),
             previous_low: header.previous_low,
-            held: None,
+            waiting: None,
             total: Total::default(),
+            samples: Vec::new(),
         }
     }
 
@@ -358,8 +380,9 @@ impl Converter {
         }
     }
 
-    fn add_pair(&mut self, millivolts: u32, shunt_nanoamps: u32) {
-        let power = u64::from(millivolts) * u64::from(target_nanoamps(shunt_nanoamps, millivolts));
+    fn count(&mut self, pair: Waiting, shunt_nanoamps: u32) {
+        let nanoamps = target_nanoamps(shunt_nanoamps, pair.millivolts);
+        let power = u64::from(pair.millivolts) * u64::from(nanoamps);
         let low = (power & 0xFFFF_FFFF) * self.scale_q32;
         let mut increment = (power >> 32) * self.scale_q32 + (low >> 32);
         let previous = self.total.fraction_q32;
@@ -367,40 +390,46 @@ impl Converter {
         increment += u64::from(self.total.fraction_q32 < previous);
         self.total.picojoules = self.total.picojoules.saturating_add(increment);
         self.total.pairs = self.total.pairs.saturating_add(1);
+        self.samples.push(Sample {
+            sequence: pair.sequence,
+            time_ns: pair.time_ns,
+            millivolts: pair.millivolts,
+            nanoamps,
+        });
     }
 
     /// A pause: a waiting pair keeps its own current, and the range before is low again.
-    pub fn pause(&mut self) {
-        if let Some((millivolts, shunt)) = self.held.take() {
-            self.add_pair(millivolts, shunt);
+    fn pause(&mut self) {
+        if let Some(waiting) = self.waiting.take() {
+            self.count(waiting, waiting.shunt_nanoamps);
         }
         self.previous_low = true;
     }
 
     /// One pair into the total, step 5 included.
-    pub fn add(&mut self, pair: &Pair) {
+    fn add(&mut self, pair: &Pair, sequence: u32, time_ns: u64) {
         let reading = self.reading(pair);
+        let this = Waiting {
+            sequence,
+            time_ns,
+            millivolts: reading.millivolts,
+            shunt_nanoamps: reading.shunt_nanoamps,
+        };
         let switched = pair.low != self.previous_low;
-        if !switched && self.held.is_none() {
-            self.add_pair(reading.millivolts, reading.shunt_nanoamps);
-            return;
-        }
         self.previous_low = pair.low;
-        if let Some((millivolts, own)) = self.held.take() {
-            self.add_pair(
-                millivolts,
-                if switched {
-                    own
-                } else {
-                    reading.shunt_nanoamps
-                },
-            );
+        if let Some(waiting) = self.waiting.take() {
+            let shunt = if switched {
+                waiting.shunt_nanoamps
+            } else {
+                reading.shunt_nanoamps
+            };
+            self.count(waiting, shunt);
         }
         if switched {
-            self.held = Some((reading.millivolts, reading.shunt_nanoamps));
-            return;
+            self.waiting = Some(this);
+        } else {
+            self.count(this, reading.shunt_nanoamps);
         }
-        self.add_pair(reading.millivolts, reading.shunt_nanoamps);
     }
 
     /// A pairs message into the total.
@@ -408,18 +437,23 @@ impl Converter {
         if pairs.paused() {
             self.pause();
         }
-        for pair in &pairs.pairs {
-            self.add(pair);
+        for (index, pair) in pairs.pairs.iter().enumerate() {
+            let sequence = pairs.first_sequence.wrapping_add(index as u32);
+            self.add(pair, sequence, pairs.time_of(index, self.rate));
         }
     }
 
-    /// The total once the stream has ended: a pair still waiting keeps its own current.
-    #[must_use]
-    pub fn finish(mut self) -> Total {
-        if let Some((millivolts, shunt)) = self.held.take() {
-            self.add_pair(millivolts, shunt);
+    /// The stream ended: a pair still waiting keeps its own current.
+    pub fn end(&mut self) {
+        if let Some(waiting) = self.waiting.take() {
+            self.count(waiting, waiting.shunt_nanoamps);
         }
-        self.total
+    }
+
+    /// The pairs the total has counted since the last call, in order. A pair at a range switch
+    /// comes with the pair after it, or at [`Converter::end`].
+    pub fn take_samples(&mut self) -> Vec<Sample> {
+        std::mem::take(&mut self.samples)
     }
 
     /// The total so far, leaving a pair still waiting out of it.
