@@ -65,22 +65,23 @@ impl<L: AuxLink> Aux<L> {
     /// Takes the interface, dropping what the program before this one left waiting on it: a reply
     /// or a stream message meant for that program. A stream it left running is ended (`0x90` mode
     /// 7): no other program can hold the interface, so nothing else would read it, and the probe
-    /// keeps a stream nobody reads running. Its capture carries on.
+    /// keeps a stream nobody reads running. Its capture carries on. Mode 7 goes whether or not a
+    /// stream shows: a slow one can stay quiet past the drain, and with none it changes nothing.
     pub fn open(link: L) -> Result<Aux<L>, LinkError> {
         let mut aux = Aux {
             link,
             messages: VecDeque::new(),
             dropped: 0,
         };
+        // A reply the last program left comes first and is taken for this one's; the drain after
+        // drops the real one with the stream's last pairs and its end.
+        aux.exchange(&[0x90, 7])?;
         if aux.drain()? {
-            aux.exchange(&[0x90, 7])?;
-            if aux.drain()? {
-                return Err(LinkError::Usb(
-                    "the probe kept streaming after it was asked to stop".into(),
-                ));
-            }
-            aux.messages.clear();
+            return Err(LinkError::Usb(
+                "the probe kept streaming after it was asked to stop".into(),
+            ));
         }
+        aux.messages.clear();
         Ok(aux)
     }
 

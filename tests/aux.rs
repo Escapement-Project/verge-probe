@@ -250,6 +250,27 @@ fn opening_ends_a_stream_the_last_program_left_running() {
     );
 }
 
+/// A stream so slow that it stays quiet through the drain is ended too: the opener asks whether
+/// or not one shows.
+#[test]
+fn opening_ends_a_stream_too_slow_to_show() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut first = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    first.exchange(&rate(1)).unwrap();
+    assert!(matches!(
+        first.message(Duration::from_secs(1)).unwrap(),
+        Some(Message::Header(_))
+    ));
+    drop(first);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    assert_eq!(
+        aux.message(Duration::from_secs(3)).unwrap(),
+        None,
+        "the slow stream still runs"
+    );
+}
+
 /// The probe keeps 14 pairs messages for a host that does not read: the rest are lost, which the
 /// sequence shows, and the end still says which pair was the last.
 #[test]
