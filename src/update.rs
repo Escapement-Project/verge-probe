@@ -50,7 +50,7 @@ pub enum UpdateError {
     Image(#[from] ImageError),
     #[error(transparent)]
     StockEntry(#[from] EntryError),
-    #[error("ours did not take the bootloader request ({0}). Use the ISP jumper")]
+    #[error("Verge did not take the bootloader request ({0}). Use the ISP jumper")]
     OursEntry(LinkError),
     #[error(transparent)]
     Isp(#[from] IspError),
@@ -180,7 +180,7 @@ pub fn check_entry(unit: &Unit, stock: bool) -> Result<(), UpdateError> {
         Hardware::Board(Board::McuLink) | Hardware::Unknown => Ok(()),
         _ if stock => Ok(()),
         other => Err(UpdateError::Refused(format!(
-            "the unit is {other}. In ISP mode nothing tells which board it is, so a flash there could not check that an image of ours is built for it"
+            "the unit is {other}. In ISP mode nothing tells which board it is, so a flash there could not check that a Verge image is built for it"
         ))),
     }
 }

@@ -72,8 +72,8 @@ impl Filter {
         }
         match self.ours {
             OursFilter::None => {}
-            OursFilter::Any => firmware.push("ours".to_owned()),
-            OursFilter::Older => firmware.push("ours older than the image".to_owned()),
+            OursFilter::Any => firmware.push("Verge".to_owned()),
+            OursFilter::Older => firmware.push("Verge older than the image".to_owned()),
         }
         let mut kinds = Vec::new();
         if !firmware.is_empty() {
@@ -118,7 +118,7 @@ impl Filter {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArmError {
     #[error(
-        "the image carries no version of ours, so the batch cannot tell which units running ours are older than it"
+        "the image carries no Verge version, so the batch cannot tell which units running Verge are older than it"
     )]
     OursUndated,
     #[error("the batch takes the {board}, and the image is built for {built_for}")]
@@ -231,7 +231,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             }
             match (filter.ours, version) {
                 (OursFilter::None, _) => {
-                    Verdict::Skip("runs ours, which this batch does not take".into())
+                    Verdict::Skip("runs Verge, which this batch does not take".into())
                 }
                 (OursFilter::Any, _) => Verdict::Take,
                 (OursFilter::Older, ImageVersion::Ours(tag)) => match build.compare(tag) {
@@ -243,7 +243,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
                     Relation::UpToDate => Verdict::Current,
                 },
                 (OursFilter::Older, _) => {
-                    Verdict::Skip("the image carries no version of ours to compare with".into())
+                    Verdict::Skip("the image carries no Verge version to compare with".into())
                 }
             }
         }

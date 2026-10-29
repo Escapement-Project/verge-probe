@@ -83,7 +83,7 @@ pub enum LoadError {
     AlreadyRuns { tag: String },
     #[error("the unit runs {build}, which is newer than release {tag}")]
     Newer { build: String, tag: String },
-    #[error("the unit is {board}, which no image of ours supports. NXP's stock image can go on it")]
+    #[error("the unit is {board}, which no Verge image supports. NXP's stock image can go on it")]
     OtherBoard { board: String },
     #[error(
         "the unit is {board}, and this image is built for {built_for}. NXP's stock image can go on it"

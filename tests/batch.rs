@@ -507,7 +507,7 @@ fn ours_older_than_the_image_needs_an_image_of_ours() {
     for version in [&stock, &ImageVersion::Unknown] {
         assert_eq!(
             judge(old, &older, version),
-            Verdict::Skip("the image carries no version of ours to compare with".into())
+            Verdict::Skip("the image carries no Verge version to compare with".into())
         );
         assert_eq!(judge(old, &any, version), Verdict::Take);
         assert_eq!(judge(current, &any, version), Verdict::Take);

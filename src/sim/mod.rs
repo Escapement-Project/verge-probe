@@ -593,8 +593,8 @@ impl Default for SimBus {
 
 /// The names [`SimBus::scenario`] knows, with what each sets up.
 pub const SCENARIOS: &[(&str, &str)] = &[
-    ("bench", "ours and stock V3.172, as on the bench"),
-    ("ours", "one unit running ours"),
+    ("bench", "Verge and stock V3.172, as on the bench"),
+    ("ours", "one unit running Verge"),
     ("stock", "one unit running stock V3.172"),
     (
         "stock-old",
@@ -609,34 +609,31 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("two-isp", "two units in ISP mode"),
     (
         "ours-beside-isp",
-        "one unit running ours, build 14d05d4, and another in ISP mode",
+        "one unit running Verge, build 14d05d4, and another in ISP mode",
     ),
     (
         "isp-ours",
-        "one unit in ISP mode whose flash holds ours, build v0.3.0",
+        "one unit in ISP mode whose flash holds Verge, build v0.3.0",
     ),
     (
         "two-isp-ours",
-        "two units in ISP mode whose flash holds ours, build v0.3.0",
+        "two units in ISP mode whose flash holds Verge, build v0.3.0",
     ),
     ("mini", "an MCU-Link mini in ISP mode"),
     (
         "isp-mini",
         "one unit in ISP mode and an MCU-Link mini in ISP mode",
     ),
-    ("busy", "ours, held open by another program"),
+    ("busy", "Verge, held open by another program"),
     (
         "arrivals",
         "an empty bench where five units are plugged in over ten seconds, for a batch",
     ),
     ("pro", "one MCU-Link Pro running stock V3.172"),
-    (
-        "ours-pro",
-        "one MCU-Link Pro running a current image of ours",
-    ),
+    ("ours-pro", "one MCU-Link Pro running a current Verge image"),
     (
         "ours-pro-energy",
-        "one MCU-Link Pro running a current image of ours, its target supply on, capturing energy at 1,000 pairs a second for 10 s",
+        "one MCU-Link Pro running a current Verge image, its target supply on, capturing energy at 1,000 pairs a second for 10 s",
     ),
     (
         "ours-pro-energy-failed",
@@ -644,15 +641,15 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ),
     (
         "ours-pro-and-plain",
-        "an MCU-Link Pro and a plain MCU-Link, both running a current image of ours",
+        "an MCU-Link Pro and a plain MCU-Link, both running a current Verge image",
     ),
     (
         "ours-pro-held",
-        "one MCU-Link Pro running a current image of ours, with something holding DIO3 high",
+        "one MCU-Link Pro running a current Verge image, with something holding DIO3 high",
     ),
     (
         "ours-plain",
-        "one plain MCU-Link running a current image of ours",
+        "one plain MCU-Link running a current Verge image",
     ),
     (
         "pro-old",
@@ -668,11 +665,11 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ),
     (
         "swd-jumper",
-        "one unit running ours with its SWD jumper fitted",
+        "one unit running Verge with its SWD jumper fitted",
     ),
     (
         "pro-swd-jumper",
-        "one MCU-Link Pro running ours with its SWD jumper fitted",
+        "one MCU-Link Pro running Verge with its SWD jumper fitted",
     ),
     (
         "stock-swd-jumper",
