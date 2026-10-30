@@ -518,6 +518,13 @@ impl Converter {
         }
     }
 
+    /// A missing sequence leaves a pending range-switch pair without its correcting current.
+    /// Keep its own reading and start the next received range without inferring a lost switch.
+    pub fn discontinuity(&mut self, next_low: bool) {
+        self.end();
+        self.previous_low = next_low;
+    }
+
     /// The stream ended: a pair still waiting keeps its own current.
     pub fn end(&mut self) {
         if let Some(waiting) = self.waiting.take() {
