@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BLOCK: usize = 1024;
+/// The most bins a view holds, however many pixels ask.
+const BINS: usize = 8192;
 const FAN: u64 = 16;
 const APPLICATION: i64 = 0x56475245;
 // Bump user_version when changing the postcard layouts stored in this archive.
@@ -34,12 +36,15 @@ pub struct View {
     pub envelopes: Vec<Envelope>,
     pub lost_pairs: u64,
     pub ended: bool,
+    /// Every sample the interval overlaps, when there are no more of them than bins.
+    pub samples: Option<Vec<Supported>>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-struct Supported {
-    sample: Sample,
-    end_ns: u64,
+/// A sample and the end of the time it covers: the next sample's time, or one period on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Supported {
+    pub sample: Sample,
+    pub end_ns: u64,
 }
 
 struct Bins<'a> {
@@ -204,15 +209,16 @@ impl Archive {
         self.db.execute_batch("ROLLBACK")?;
         result
     }
-    /// A stable snapshot, with at most `pixels` extrema bins regardless of capture length.
+    /// A stable snapshot, with at most `pixels` extrema bins regardless of capture length, and
+    /// the samples themselves once they are no more than the bins.
     pub fn view(&self, interval: Interval, pixels: usize, cancel: &AtomicBool) -> Result<View> {
         self.db.execute_batch("BEGIN")?;
         let result = (|| {
             let extent = self.extent()?;
             let statistics = self.statistics_inner(interval, cancel)?;
             let pixels = pixels
-                .clamp(1, 2048)
-                .min(interval.duration_ns().clamp(1, 2048) as usize);
+                .clamp(1, BINS)
+                .min(interval.duration_ns().clamp(1, BINS as u64) as usize);
             let blocks: u64 = self.meta("blocks")?;
             let mut level = 0;
             let mut covered = 1u64;
@@ -242,6 +248,16 @@ impl Archive {
                     })
                 })
                 .collect();
+            let samples = if statistics.samples <= pixels as u64 {
+                let mut samples = Vec::new();
+                self.overlapping(interval, cancel, |block| {
+                    samples.extend(block);
+                    Ok(())
+                })?;
+                Some(samples)
+            } else {
+                None
+            };
             Ok(View {
                 extent,
                 interval,
@@ -249,6 +265,7 @@ impl Archive {
                 envelopes,
                 lost_pairs: self.meta("lost")?,
                 ended: self.meta("ended")?,
+                samples,
             })
         })();
         self.db.execute_batch("ROLLBACK")?;
@@ -295,6 +312,32 @@ impl Archive {
         }
         Ok(())
     }
+    /// Each stored block's samples whose support overlaps `interval`, in order.
+    fn overlapping(
+        &self,
+        interval: Interval,
+        cancel: &AtomicBool,
+        mut each: impl FnMut(Vec<Supported>) -> Result<()>,
+    ) -> Result<()> {
+        let mut statement = self
+            .db
+            .prepare("SELECT data FROM blocks WHERE end_ns>? AND start_ns<? ORDER BY n")?;
+        let mut rows = statement.query(params![
+            interval.start_ns.min(i64::MAX as u64) as i64,
+            interval.end_ns.min(i64::MAX as u64) as i64
+        ])?;
+        while let Some(row) = rows.next()? {
+            cancelled(cancel)?;
+            let samples: Vec<Supported> = decode(&row.get::<_, Vec<u8>>(0)?)?;
+            each(
+                samples
+                    .into_iter()
+                    .filter(|s| s.end_ns > interval.start_ns && s.sample.time_ns < interval.end_ns)
+                    .collect(),
+            )?;
+        }
+        Ok(())
+    }
     /// SQLite copies a consistent snapshot, including committed WAL records, to a new file.
     pub fn save(&self, path: &Path) -> Result<()> {
         ensure(!path.exists(), CaptureError::Exists(path.to_owned()))?;
@@ -323,23 +366,10 @@ impl Archive {
             let temp = temp_beside(path)?;
             let mut sink = Sink::from_file(temp.reopen()?, csv)?;
             sink.begin(header.rate, 0, 0)?;
-            let mut statement = self
-                .db
-                .prepare("SELECT data FROM blocks WHERE end_ns>? AND start_ns<? ORDER BY n")?;
-            let mut rows = statement.query(params![
-                interval.start_ns.min(i64::MAX as u64) as i64,
-                interval.end_ns.min(i64::MAX as u64) as i64
-            ])?;
-            while let Some(row) = rows.next()? {
-                cancelled(cancel)?;
-                let samples: Vec<Supported> = decode(&row.get::<_, Vec<u8>>(0)?)?;
-                let selected: Vec<_> = samples
-                    .into_iter()
-                    .filter(|s| s.end_ns > interval.start_ns && s.sample.time_ns < interval.end_ns)
-                    .map(|s| s.sample)
-                    .collect();
-                sink.samples(&selected)?;
-            }
+            self.overlapping(interval, cancel, |block| {
+                let samples: Vec<_> = block.into_iter().map(|s| s.sample).collect();
+                Ok(sink.samples(&samples)?)
+            })?;
             sink.finish()?;
             persist(temp, path)
         })();
@@ -743,6 +773,47 @@ mod tests {
         assert!((s.energy_j() - 0.0003).abs() < 1e-15);
         let cancel = AtomicBool::new(true);
         assert!(archive.statistics(interval, &cancel).is_err());
+    }
+    #[test]
+    fn a_view_holds_its_samples_once_they_are_no_more_than_its_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        for block in (0..3000).step_by(BLOCK) {
+            writer
+                .append((block..(block + BLOCK as u32).min(3000)).map(sample))
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        // Sample 1000 starts before the interval, and its support reaches into it.
+        let interval = Interval::new(1_000_500_000, 1_100_000_000);
+        let samples = archive
+            .view(interval, 100, &cancel)
+            .unwrap()
+            .samples
+            .unwrap();
+        assert_eq!(samples.len(), 100);
+        assert_eq!(samples[0].sample, sample(1000));
+        assert_eq!(samples[99].end_ns, 1_100_000_000);
+        assert!(
+            archive
+                .view(interval, 99, &cancel)
+                .unwrap()
+                .samples
+                .is_none()
+        );
+        // Across a block boundary, in order.
+        let interval = Interval::new(1_000_000_000, 1_048_000_000);
+        let samples = archive
+            .view(interval, 64, &cancel)
+            .unwrap()
+            .samples
+            .unwrap();
+        let sequences: Vec<_> = samples.iter().map(|s| s.sample.sequence).collect();
+        assert_eq!(sequences, (1000..1048).collect::<Vec<_>>());
     }
     #[test]
     fn raw_metadata_wrap_loss_end_and_recovery_survive_reopen() {

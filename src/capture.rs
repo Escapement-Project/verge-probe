@@ -4,7 +4,7 @@
 mod recorder;
 mod store;
 pub use recorder::Recorder;
-pub use store::{Archive, CaptureWriter, Envelope, View, recovered_sessions, remove};
+pub use store::{Archive, CaptureWriter, Envelope, Supported, View, recovered_sessions, remove};
 
 use crate::record::RecordError;
 use crate::stream::Sample;
