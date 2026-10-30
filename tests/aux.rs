@@ -227,6 +227,28 @@ fn the_typed_stream_calls_drive_the_stream() {
     );
 }
 
+#[test]
+fn driving_a_pin_during_a_stream_reports_its_edge() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut control = VergeControl::new(&mut aux);
+    control.start_energy_stream(1000, 7).unwrap();
+    control.access_dio(7, 7, 1).unwrap();
+    control.access_dio(1, 1, 0).unwrap();
+    control.end_energy_stream().unwrap();
+    let messages = until(control.transport(), |m| matches!(m, Message::End(_)));
+    let levels: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Edges(edges) => Some(edges.edges.iter().map(|e| e.levels)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(levels, [1, 0]);
+}
+
 /// The simulated target marks its 10 ms awake every 100 ms on DIO3. A stream that asks for it
 /// gets those edges, each after the pairs message whose last pair it does not come after, and
 /// before the next.

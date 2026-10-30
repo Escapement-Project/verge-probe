@@ -190,6 +190,8 @@ pub struct SimUnit {
     pub scan_formats: u32,
     /// The DIO pins a Pro running ours drives, bit n for DIOn. A restart makes them inputs again.
     pub dio_outputs: u8,
+    pub dio_aux: bool,
+    pub dio_disabled: bool,
     /// Each DIO pin's output level, which a restart clears.
     pub dio_levels: u8,
     /// What something attached holds the DIO pins at, which an input reads: low, the Pro's own
@@ -641,6 +643,15 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("pro", "one MCU-Link Pro running stock V3.172"),
     ("ours-pro", "one MCU-Link Pro running a current Verge image"),
     (
+        "ours-pro-old-aux",
+        "a Pro whose Verge Aux predates DIO commands",
+    ),
+    (
+        "ours-pro-edge-loss",
+        "a Pro reporting one interval of lost DIO edges",
+    ),
+    ("ours-pro-j15", "a Pro with J15 fitted, disabling DIO"),
+    (
         "ours-pro-debugger",
         "one MCU-Link Pro running a current Verge image, its CMSIS-DAP held by another program as a debugger would",
     ),
@@ -744,6 +755,8 @@ impl SimBus {
             swd_jumper: false,
             scan_formats: SIM_SCAN_FORMATS,
             dio_outputs: 0,
+            dio_aux: true,
+            dio_disabled: false,
             dio_levels: 0,
             dio_held: 0,
             energy: energy::SimEnergy::default(),
@@ -986,6 +999,17 @@ impl SimBus {
                 bus.set_board(pro, crate::dap::Ours::BOARD_MCU_LINK_PRO);
                 let plain = bus.add_ours("26ea505");
                 bus.set_board(plain, crate::dap::Ours::BOARD_MCU_LINK);
+            }
+            "ours-pro-old-aux" | "ours-pro-j15" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.world().units[unit].dio_aux = name != "ours-pro-old-aux";
+                bus.world().units[unit].dio_disabled = name == "ours-pro-j15";
+            }
+            "ours-pro-edge-loss" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.world().units[unit].energy.lose_next_edges = true;
             }
             "ours-pro-held" => {
                 let unit = bus.add_ours("26ea505");

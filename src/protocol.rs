@@ -32,6 +32,7 @@ pub(crate) const CAP_ENERGY_CAPTURE: u32 = 1 << 0;
 // firmware's current a thousand times too small, so those probes give raw samples only.
 pub(crate) const CAP_CALIBRATED_ENERGY: u32 = 1 << 5;
 pub(crate) const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
+pub(crate) const CAP_DIO_AUX: u32 = 1 << 6;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;
 pub(crate) const SPI_SOURCE_HZ: u32 = 96_000_000;
@@ -131,6 +132,11 @@ impl VergeInfo {
     /// Whether the firmware exposes its DIO pins.
     pub fn supports_dio(&self) -> bool {
         self.capabilities & CAP_DIO != 0
+    }
+
+    /// Whether Verge Aux carries DIO commands.
+    pub fn supports_dio_on_aux(&self) -> bool {
+        self.extended_capabilities & CAP_DIO_AUX != 0
     }
 
     /// Whether the firmware can switch the target supply.
@@ -243,6 +249,7 @@ impl VergeInfo {
                 (CAP_ENERGY_ACCUMULATOR, "energy accumulator"),
                 (CAP_SPI, "SPI bridge"),
                 (CAP_I2C, "I2C bridge"),
+                (CAP_DIO_AUX, "DIO on Aux"),
             ]
             .into_iter()
             .filter(|(bit, _)| self.extended_capabilities & bit != 0)

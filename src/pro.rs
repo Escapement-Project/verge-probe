@@ -38,6 +38,7 @@ impl ProLink for DapTransport<'_> {
 pub enum Feature {
     Supply,
     Energy,
+    Dio,
 }
 
 impl Feature {
@@ -45,12 +46,14 @@ impl Feature {
         match self {
             Self::Supply => "target supply",
             Self::Energy => "energy measurement",
+            Self::Dio => "DIO pins",
         }
     }
     fn offered(self, info: &VergeInfo) -> bool {
         match self {
             Self::Supply => info.supports_target_power(),
             Self::Energy => info.supports_energy_capture(),
+            Self::Dio => info.supports_dio(),
         }
     }
 }
@@ -87,6 +90,10 @@ pub enum ProError {
     },
     #[error("{name} has no Verge Aux, which recording needs: update the firmware first")]
     NoAux { name: String },
+    #[error("{name} has DIO disabled: remove J15 and restart the probe")]
+    DioDisabled { name: String },
+    #[error("{name} runs build {firmware}, which predates DIO on Verge Aux: update it first")]
+    NoAuxDio { name: String, firmware: String },
     #[error("{name} no longer answers as Verge")]
     Gone { name: String },
     #[error("asking {name} what it runs")]
@@ -146,6 +153,7 @@ pub fn check_offered<T: VergeTransport + ?Sized>(
     pro: &mut VergeControl<'_, T>,
     feature: Feature,
 ) -> Result<(), ProError> {
+    let aux = pro.transport().is_aux();
     let info = pro
         .info()
         .map_err(|source| ProError::Info {
@@ -155,6 +163,19 @@ pub fn check_offered<T: VergeTransport + ?Sized>(
         .ok_or_else(|| ProError::Gone {
             name: name.to_owned(),
         })?;
+    if feature == Feature::Dio {
+        if info.version >= 6 && !info.supports_dio() {
+            return Err(ProError::DioDisabled {
+                name: name.to_owned(),
+            });
+        }
+        if aux && !info.supports_dio_on_aux() {
+            return Err(ProError::NoAuxDio {
+                name: name.to_owned(),
+                firmware: info.firmware.clone(),
+            });
+        }
+    }
     if feature.offered(info) {
         return Ok(());
     }

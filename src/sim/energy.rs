@@ -43,6 +43,10 @@ pub struct SimEnergy {
     pub capture: Option<Capture>,
     /// An acquisition fault, which stops integrating and lasts until a start succeeds.
     pub fault: bool,
+    pub lose_next_edges: bool,
+    pub dio_outputs: u8,
+    pub dio_levels: u8,
+    pub dio_held: u8,
     /// Verge Aux's stream of the capture.
     pub stream: Option<Stream>,
     /// Stream messages an event produced ahead of the next read: the last pairs of a capture a
@@ -104,6 +108,33 @@ impl Capture {
 }
 
 impl SimEnergy {
+    pub fn set_dio(&mut self, outputs: u8, levels: u8, held: u8, now: Duration) {
+        let elapsed = self.capture.map_or(0, |capture| {
+            now.saturating_sub(capture.since).as_micros() as u64
+        });
+        let before = self.marker(elapsed);
+        let due = self.stream_messages(now);
+        self.outbox.extend(due);
+        self.dio_outputs = outputs;
+        self.dio_levels = levels;
+        self.dio_held = held;
+        let after = self.marker(elapsed);
+        if let Some(stream) = self.stream
+            && (before ^ after) & stream.pins != 0
+        {
+            self.outbox.push(
+                Edges::new(
+                    0,
+                    vec![Edge {
+                        time_ns: elapsed * 1000,
+                        levels: after & stream.pins,
+                    }],
+                )
+                .to_bytes(),
+            );
+        }
+    }
+
     /// What a restart leaves: supply off, no capture, no total.
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -115,6 +146,10 @@ impl SimEnergy {
             supply_on: true,
             capture: Some(Capture::new(now, rate)),
             fault: false,
+            lose_next_edges: false,
+            dio_outputs: 0,
+            dio_levels: 0,
+            dio_held: 0,
             stream: None,
             outbox: Vec::new(),
         }
@@ -307,16 +342,17 @@ impl SimEnergy {
 
     /// The marker's level `micros` into the capture.
     fn marker(&self, micros: u64) -> u8 {
-        if self.supply_on && micros % PERIOD_MICROS < AWAKE_MICROS {
+        let target = if self.supply_on && micros % PERIOD_MICROS < AWAKE_MICROS {
             MARKER
         } else {
             0
-        }
+        };
+        ((target | self.dio_held) & !self.dio_outputs) | (self.dio_levels & self.dio_outputs)
     }
 
     /// The edges of `pins` after `after` µs into the capture and up to `until`, as one message
     /// each 99, flagged as the probe flags them.
-    fn edges(&self, pins: u8, after: u64, until: u64) -> Vec<Vec<u8>> {
+    fn edges(&mut self, pins: u8, after: u64, until: u64) -> Vec<Vec<u8>> {
         if pins & MARKER == 0 || !self.supply_on || until <= after {
             return Vec::new();
         }
@@ -324,10 +360,13 @@ impl SimEnergy {
         let mut period = after / PERIOD_MICROS * PERIOD_MICROS;
         while period <= until {
             for at in [period, period + AWAKE_MICROS] {
-                if at > after && at <= until {
+                if at > after
+                    && at <= until
+                    && (self.marker(at) ^ self.marker(at.saturating_sub(1))) & pins != 0
+                {
                     edges.push(Edge {
                         time_ns: at * 1_000,
-                        levels: self.marker(at),
+                        levels: self.marker(at) & pins,
                     });
                 }
             }
@@ -348,7 +387,17 @@ impl SimEnergy {
         }
         messages
             .into_iter()
-            .map(|edges| Edges::new(0, edges).to_bytes())
+            .map(|edges| {
+                Edges::new(
+                    if std::mem::take(&mut self.lose_next_edges) {
+                        Edges::LOST
+                    } else {
+                        0
+                    },
+                    edges,
+                )
+                .to_bytes()
+            })
             .collect()
     }
 

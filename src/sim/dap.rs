@@ -7,8 +7,8 @@ use std::time::Duration;
 use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
 use crate::protocol::{
-    CAP_CALIBRATED_ENERGY, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_TARGET_POWER,
-    ENERGY_COMMAND, TARGET_POWER_COMMAND,
+    CAP_CALIBRATED_ENERGY, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
+    CAP_TARGET_POWER, ENERGY_COMMAND, TARGET_POWER_COMMAND,
 };
 
 /// Each command costs this much simulated time.
@@ -20,8 +20,8 @@ const DIO_GROUPS: [u8; 2] = [0x07, 0x08];
 
 /// Ours' answer to the DIO command: a Pro sets its pins as a group or not at all, and any other
 /// board has none. An input reads what is attached holds it at.
-fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8) -> Vec<u8> {
-    let pro = u.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8, now: Duration) -> Vec<u8> {
+    let pro = u.board == Some(dap::Ours::BOARD_MCU_LINK_PRO) && !u.dio_disabled;
     let next = (u.dio_outputs & !mask) | (outputs & mask);
     let accepted = pro
         && mask & !DIO_PINS == 0
@@ -31,6 +31,8 @@ fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8) -> Vec<u8> {
     if accepted {
         u.dio_outputs = next;
         u.dio_levels = (u.dio_levels & !mask) | (levels & mask);
+        u.energy
+            .set_dio(u.dio_outputs, u.dio_levels, u.dio_held, now);
     }
     let mut reply = vec![
         dap::VENDOR_DIO,
@@ -123,7 +125,13 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 };
                 let pro = board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
                 let flags = if pro {
-                    world.ours.1.flags | dap::Ours::FLAG_DIO | CAP_TARGET_POWER
+                    world.ours.1.flags
+                        | CAP_TARGET_POWER
+                        | if world.units[unit].dio_disabled {
+                            0
+                        } else {
+                            dap::Ours::FLAG_DIO
+                        }
                 } else {
                     world.ours.1.flags
                 };
@@ -135,7 +143,14 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                     reply.push(board);
                     reply.extend_from_slice(&world.units[unit].scan_formats.to_le_bytes());
                     let extended = if pro {
-                        CAP_ENERGY_CAPTURE | CAP_ENERGY_ACCUMULATOR | CAP_CALIBRATED_ENERGY
+                        CAP_ENERGY_CAPTURE
+                            | CAP_ENERGY_ACCUMULATOR
+                            | CAP_CALIBRATED_ENERGY
+                            | if world.units[unit].dio_aux && !world.units[unit].dio_disabled {
+                                CAP_DIO_AUX
+                            } else {
+                                0
+                            }
                     } else {
                         0
                     };
@@ -171,7 +186,7 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         // A unit without a board answers as the recorded image, which predates the command.
         [dap::VENDOR_DIO, mask, outputs, levels] => match &firmware {
             SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
-                dio_reply(&mut world.units[unit], *mask, *outputs, *levels)
+                dio_reply(&mut world.units[unit], *mask, *outputs, *levels, world.now)
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
@@ -306,6 +321,9 @@ impl crate::aux::AuxLink for SimAux {
         let now = world.now;
         let unit = &mut world.units[self.unit];
         let pro = unit.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+        unit.energy.dio_outputs = unit.dio_outputs;
+        unit.energy.dio_levels = unit.dio_levels;
+        unit.energy.dio_held = unit.dio_held;
         let messages = match request {
             [ENERGY_COMMAND, 5, rate @ .., pins] if rate.len() == 4 => {
                 unit.energy
@@ -313,7 +331,11 @@ impl crate::aux::AuxLink for SimAux {
             }
             [ENERGY_COMMAND, 6, pins] => unit.energy.stream_running(pro, now, *pins),
             [ENERGY_COMMAND, 7] => unit.energy.stop_stream(pro, now),
-            [dap::VENDOR_IDENTIFY, ..] | [TARGET_POWER_COMMAND, ..] | [ENERGY_COMMAND, ..] => {
+            [dap::VENDOR_DIO, ..] if !unit.dio_aux => vec![vec![dap::ID_DAP_INVALID]],
+            [dap::VENDOR_DIO, ..]
+            | [dap::VENDOR_IDENTIFY, ..]
+            | [TARGET_POWER_COMMAND, ..]
+            | [ENERGY_COMMAND, ..] => {
                 let mut messages = unit.energy.stream_messages(now);
                 messages.push(answer(&mut world, self.unit, request));
                 messages

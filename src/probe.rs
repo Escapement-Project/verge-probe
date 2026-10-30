@@ -631,6 +631,11 @@ pub struct JtagGenerationLogEntry {
 
 /// A CMSIS-DAP target that accepts Verge vendor commands.
 pub trait VergeTransport {
+    /// Whether commands use Verge Aux rather than CMSIS-DAP.
+    fn is_aux(&self) -> bool {
+        false
+    }
+
     /// Sends one CMSIS-DAP vendor command and returns its reply.
     fn send_vendor_command(
         &mut self,
@@ -835,6 +840,12 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         levels: u8,
     ) -> Result<DioState, CommandError<Refused<DioState>>> {
         self.require_flag(CAP_DIO, "the DIO pins")?;
+        if self.transport.is_aux() {
+            self.require_capability(
+                protocol::CAP_DIO_AUX,
+                "DIO on Verge Aux: update the firmware first",
+            )?;
+        }
         let response = self.send(DIO_COMMAND, &protocol::encode_dio(mask, outputs, levels))?;
         let state = protocol::decode_dio(&response).map_err(malformed)?;
         match state.status {

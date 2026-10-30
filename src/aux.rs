@@ -150,10 +150,14 @@ impl<L: AuxLink> Aux<L> {
     }
 }
 
-/// The interface carries `0x82`, `0x8F` and `0x90`, in their CMSIS-DAP formats. Replies come back
+/// The interface carries `0x82`, `0x8E`, `0x8F` and `0x90`, in their CMSIS-DAP formats. Replies come back
 /// as [`crate::DapTransport`] gives them: without the command byte, and a lone `0xFF` as a command
 /// the interface does not carry.
 impl<L: AuxLink> VergeTransport for Aux<L> {
+    fn is_aux(&self) -> bool {
+        true
+    }
+
     fn send_vendor_command(
         &mut self,
         command_id: u8,
