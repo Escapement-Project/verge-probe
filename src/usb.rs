@@ -444,3 +444,12 @@ impl AuxLink for NusbAux {
             .map_err(link_error)
     }
 }
+
+impl Drop for NusbAux {
+    fn drop(&mut self) {
+        self.input.cancel_all();
+        while self.input.pending() > 0 {
+            self.input.wait_next_complete(COMMAND_TIMEOUT);
+        }
+    }
+}
