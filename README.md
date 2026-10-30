@@ -45,6 +45,10 @@ is a `VergeTransport`, so the same typed calls run on it while a debugger holds 
 also streams every energy pair through it: `stream` parses the messages and converts each pair as
 the firmware does, checked against the vectors the firmware's own converter writes.
 
+`pro::with_pro` runs a call on a Pro through Aux, or through CMSIS-DAP when another program holds
+Aux; `pro::open_stream` needs Aux, the only way to the stream. Both refuse a unit that is not a Pro
+running Verge, or whose firmware lacks the feature, with a `ProError` that says which.
+
 Both frontends use the library for discovery, image loading and updates:
 
 ```rust,no_run

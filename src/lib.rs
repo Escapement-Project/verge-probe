@@ -17,6 +17,7 @@ pub mod ids;
 pub mod image;
 pub mod isp;
 pub mod paths;
+pub mod pro;
 pub mod progress;
 pub mod release;
 #[cfg(feature = "simulate")]
