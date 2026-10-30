@@ -433,10 +433,12 @@ impl AuxLink for NusbAux {
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
-        // A message ends with a short packet, and none is longer than one packet.
-        let len = self.input.max_packet_size();
+        if self.input.pending() == 0 {
+            self.input.submit(Buffer::new(self.input.max_packet_size()));
+        }
         self.input
-            .transfer_blocking(Buffer::new(len), timeout)
+            .wait_next_complete(timeout)
+            .ok_or(LinkError::Timeout)?
             .into_result()
             .map(Buffer::into_vec)
             .map_err(link_error)
