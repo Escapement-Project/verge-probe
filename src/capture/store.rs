@@ -425,7 +425,7 @@ impl CaptureWriter {
             CREATE TABLE dio_blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
             CREATE INDEX dio_time ON dio_blocks(end_ns,start_ns);
             CREATE TABLE dio_nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;"))?;
-        let mut writer = Self {
+        let writer = Self {
             db,
             header: None,
             period: 0,
@@ -513,11 +513,8 @@ impl CaptureWriter {
                 for (index, &edge) in edges.edges.iter().enumerate() {
                     self.digital.edge(edge, index == 0 && edges.lost())?;
                 }
-                if edges.lost()
-                    && edges.edges.is_empty()
-                    && let Some((_, levels)) = &mut self.digital.tail
-                {
-                    *levels = None;
+                if edges.lost() && edges.edges.is_empty() {
+                    self.digital.lost();
                 }
             }
             // Kept with the original messages; nothing indexes them by time yet.
@@ -557,7 +554,21 @@ impl CaptureWriter {
         let result = self.flush_inner();
         match result {
             Ok(()) => {
-                self.db.execute_batch("COMMIT")?;
+                if let Err(error) = self.db.execute_batch("COMMIT") {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+                self.message_n += self.messages.len() as u64;
+                self.messages.clear();
+                if !self.samples.is_empty() {
+                    if self.blocks == 0 {
+                        self.extent.start_ns = self.samples[0].sample.time_ns;
+                    }
+                    self.extent.end_ns = self.samples.last().unwrap().end_ns;
+                    self.blocks += 1;
+                    self.samples.clear();
+                }
+                self.digital.committed();
                 Ok(())
             }
             Err(error) => {
@@ -569,14 +580,12 @@ impl CaptureWriter {
     fn flush_inner(&mut self) -> Result<()> {
         self.digital
             .flush(&self.db, self.header.as_ref().map_or(0, |h| h.dio_mask))?;
-        for message in &self.messages {
+        for (offset, message) in self.messages.iter().enumerate() {
             self.db.execute(
                 "INSERT INTO messages VALUES(?,?)",
-                params![self.message_n as i64, encode(message)?],
+                params![(self.message_n + offset as u64) as i64, encode(message)?],
             )?;
-            self.message_n += 1;
         }
-        self.messages.clear();
         if !self.samples.is_empty() {
             let start = self.samples[0].sample.time_ns;
             let end = self.samples.last().expect("samples").end_ns;
@@ -626,14 +635,22 @@ impl CaptureWriter {
                     break;
                 }
             }
-            if self.blocks == 0 {
-                self.extent.start_ns = start;
-            }
-            self.extent.end_ns = end;
-            self.blocks += 1;
-            self.samples.clear();
+            let extent = Interval::new(
+                if self.blocks == 0 {
+                    start
+                } else {
+                    self.extent.start_ns
+                },
+                end,
+            );
+            self.set("blocks", &(self.blocks + 1))?;
+            self.set("extent", &extent)?;
+        } else {
+            self.set("blocks", &self.blocks)?;
+            self.set("extent", &self.extent)?;
         }
-        self.metadata()
+        self.set("lost", &self.lost)?;
+        self.set("ended", &self.ended)
     }
     fn put_node(&self, level: u32, index: u64, node: &Node) -> Result<()> {
         self.db.execute(
@@ -754,6 +771,166 @@ mod tests {
         }
     }
     #[test]
+    fn review_the_edge_before_a_loss_keeps_its_level() {
+        use crate::stream::{Edge, Edges};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loss.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        let mut h = header(1000);
+        h.dio_mask = 8;
+        writer.header = Some(h.clone());
+        writer.set("header", &h).unwrap();
+        writer.append((1..8).map(sample)).unwrap();
+        for (flags, time_ns, levels) in [(0, 2_000_000, 8), (Edges::LOST, 5_000_000, 0)] {
+            writer
+                .ingest(Message::Edges(Edges::new(
+                    flags,
+                    vec![Edge { time_ns, levels }],
+                )))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let extent = archive.extent().unwrap();
+        let view = archive.digital(extent, 1000, &cancel).unwrap();
+        assert!(view.bins.iter().any(|b| b.high & 8 != 0));
+        let out = dir.path().join("loss.csv");
+        archive.export(&out, true, extent, &cancel).unwrap();
+        let csv = fs::read_to_string(out).unwrap();
+        assert!(csv.contains(",2000000,,,1,0\n,2000000,,,,1\n"), "{csv}");
+    }
+
+    #[test]
+    fn review_pulse_at_block_end_lands_in_its_own_bin() {
+        use crate::stream::{Edge, Edges};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pulse.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let mut h = header(1000);
+        h.dio_mask = 8;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer.append((0..2).map(sample)).unwrap();
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![
+                    Edge {
+                        time_ns: 1_000_000,
+                        levels: 8,
+                    },
+                    Edge {
+                        time_ns: 1_000_000,
+                        levels: 0,
+                    },
+                ],
+            )))
+            .unwrap();
+        writer.flush().unwrap();
+        writer.append((2..5).map(sample)).unwrap();
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        for pixels in [2, 4] {
+            let view = archive
+                .digital(Interval::new(0, 2_000_000), pixels, &cancel)
+                .unwrap();
+            let high: Vec<_> = view.bins.iter().filter(|b| b.high & 8 != 0).collect();
+            assert_eq!(high.len(), 1);
+            assert_eq!(high[0].interval.start_ns, 1_000_000);
+        }
+        let out = dir.path().join("pulse.csv");
+        archive
+            .export(&out, true, archive.extent().unwrap(), &cancel)
+            .unwrap();
+        let csv = fs::read_to_string(out).unwrap();
+        assert!(!csv.lines().any(|row| row.starts_with(",0,")), "{csv}");
+        assert_eq!(csv.lines().filter(|row| row.starts_with(',')).count(), 2);
+    }
+
+    #[test]
+    fn origin_pulse_exports_both_real_edges_without_a_header_edge() {
+        use crate::stream::{Edge, Edges};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("origin.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let mut h = header(1000);
+        h.dio_mask = 8;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![
+                    Edge {
+                        time_ns: 0,
+                        levels: 8,
+                    },
+                    Edge {
+                        time_ns: 0,
+                        levels: 0,
+                    },
+                ],
+            )))
+            .unwrap();
+        writer.append((0..4).map(sample)).unwrap();
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let out = dir.path().join("origin.csv");
+        archive
+            .export(
+                &out,
+                true,
+                archive.extent().unwrap(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let csv = fs::read_to_string(out).unwrap();
+        let edges: Vec<_> = csv.lines().filter(|row| row.starts_with(',')).collect();
+        assert_eq!(edges, [",0,,,1,0", ",0,,,0,0"]);
+        assert!(csv.contains("1,1000000,3000,1000000,0,0"), "{csv}");
+    }
+
+    #[test]
+    fn failed_flush_can_retry_without_losing_digital_or_analog_blocks() {
+        use crate::stream::{Edge, Edges};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retry.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        writer.append((0..8).map(sample)).unwrap();
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![Edge {
+                    time_ns: 2_000_000,
+                    levels: 8,
+                }],
+            )))
+            .unwrap();
+        writer.db.execute_batch("CREATE TRIGGER fail_blocks BEFORE INSERT ON blocks BEGIN SELECT RAISE(FAIL, 'injected write failure'); END;").unwrap();
+        assert!(writer.flush().is_err());
+        assert_eq!(writer.blocks, 0);
+        assert_eq!(writer.message_n, 0);
+        let blocks: i64 = writer
+            .db
+            .query_row("SELECT count(*) FROM dio_blocks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blocks, 0);
+        writer.db.execute_batch("DROP TRIGGER fail_blocks").unwrap();
+        writer.flush().unwrap();
+        assert_eq!(writer.message_n, 2);
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        assert_eq!(
+            archive
+                .statistics(archive.extent().unwrap(), &AtomicBool::new(false))
+                .unwrap()
+                .samples,
+            8
+        );
+        assert_eq!(archive.meta::<u64>("dio_blocks").unwrap(), 1);
+    }
+
+    #[test]
     fn digital_queries_and_exports_keep_pulses_and_unknown_intervals() {
         use crate::stream::{Edge, Edges};
         use std::io::Read;
@@ -825,7 +1002,10 @@ mod tests {
             if csv {
                 let text = fs::read_to_string(&out).unwrap();
                 assert!(text.contains(",1200000,,,0,0,0,1,0\n"), "{text}");
-                assert!(text.contains(",3000000,,,,,,,1\n"), "{text}");
+                assert!(
+                    text.contains(",3000000,,,0,0,0,1,0\n,3000000,,,,,,,1\n"),
+                    "{text}"
+                );
                 assert!(text.contains("4,4000000,3000,1000000,,,,,1\n"), "{text}");
                 assert!(!text.contains("9,9000000"));
             } else {
@@ -836,7 +1016,7 @@ mod tests {
                     .read_to_end(&mut logic)
                     .unwrap();
                 // DIO3's pulse is stretched at 2 ms. Bit 5 marks unknown DIO at 3..6 ms.
-                assert_eq!(logic, [0, 16, 32, 32, 32, 32, 0, 16]);
+                assert_eq!(logic, [0, 16, 48, 48, 48, 32, 0, 16]);
             }
         }
         let out = dir.path().join("inside-loss.csv");

@@ -54,6 +54,12 @@ impl DigitalWriter {
             if edge.time_ns < start {
                 return Err(CaptureError::Timestamps);
             }
+            if lost && levels.is_some() {
+                self.spans.push(DigitalSpan {
+                    interval: Interval::new(start, start),
+                    levels,
+                });
+            }
             if edge.time_ns >= start {
                 self.spans.push(DigitalSpan {
                     interval: Interval::new(start, edge.time_ns),
@@ -64,7 +70,18 @@ impl DigitalWriter {
         self.tail = Some((edge.time_ns, Some(edge.levels)));
         Ok(())
     }
-    pub fn flush(&mut self, db: &rusqlite::Connection, pins: u8) -> Result<()> {
+    pub fn lost(&mut self) {
+        if let Some((at, levels)) = &mut self.tail {
+            if levels.is_some() {
+                self.spans.push(DigitalSpan {
+                    interval: Interval::new(*at, *at),
+                    levels: *levels,
+                });
+            }
+            *levels = None;
+        }
+    }
+    pub fn flush(&self, db: &rusqlite::Connection, pins: u8) -> Result<()> {
         if !self.spans.is_empty() {
             let mut node = DigitalBin {
                 interval: Interval::new(
@@ -114,11 +131,12 @@ impl DigitalWriter {
                     break;
                 }
             }
-            self.blocks += 1;
-            self.spans.clear();
         }
         for (key, value) in [
-            ("dio_blocks", encode(&self.blocks)?),
+            (
+                "dio_blocks",
+                encode(&(self.blocks + u64::from(!self.spans.is_empty())))?,
+            ),
             ("dio_tail", encode(&self.tail)?),
             ("dio_losses", encode(&self.losses)?),
         ] {
@@ -128,6 +146,10 @@ impl DigitalWriter {
             )?;
         }
         Ok(())
+    }
+    pub fn committed(&mut self) {
+        self.blocks += u64::from(!self.spans.is_empty());
+        self.spans.clear();
     }
 }
 fn time(value: u64) -> Result<i64> {
@@ -244,11 +266,7 @@ impl Archive {
         let last = bin_at(
             interval,
             query.bins.len(),
-            node.interval
-                .end_ns
-                .min(interval.end_ns)
-                .saturating_sub(1)
-                .max(node.interval.start_ns),
+            node.interval.end_ns.min(interval.end_ns.saturating_sub(1)),
         );
         if first == last
             && node.interval.start_ns >= interval.start_ns
@@ -353,6 +371,8 @@ impl Archive {
             sample.time_ns = start;
             gap_seed = Some(sample);
         }
+        let header_levels = self.header()?.dio_levels;
+        let mut first_span = true;
         self.digital_spans(Interval::new(start, interval.end_ns), cancel, |span| {
             if span.interval.start_ns < start {
                 return Ok(());
@@ -370,7 +390,10 @@ impl Archive {
                 pending = next()?;
             }
             sink.advance_to(at)?;
-            sink.dio_state(at, span.levels);
+            if !first_span || at != 0 || span.levels != Some(header_levels) {
+                sink.dio_state(at, span.levels);
+            }
+            first_span = false;
             Ok(())
         })?;
         if let Some(sample) = gap_seed {
