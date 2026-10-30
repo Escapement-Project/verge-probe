@@ -1,6 +1,8 @@
 //! Disk-backed energy captures. Intervals are half-open and samples cover one nominal period.
 //! Gaps never contribute to charge, energy or time-weighted means.
 
+mod digital;
+pub use digital::{DigitalBin, DigitalSpan, DigitalView};
 mod recorder;
 mod store;
 pub use recorder::Recorder;

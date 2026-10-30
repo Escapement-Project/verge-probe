@@ -31,25 +31,45 @@ type Result<T> = std::result::Result<T, RecordError>;
 struct Dio {
     pins: u8,
     levels: u8,
-    edges: VecDeque<Edge>,
+    edges: VecDeque<DioEvent>,
+    unknown: bool,
+    gaps: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DioEvent {
+    time_ns: u64,
+    levels: Option<u8>,
 }
 
 impl Dio {
     /// The levels at `time_ns`, taking the edges up to it. A pin that moved and came back since
     /// the last call reads the other way, so a pulse between two samples shows in one.
-    fn at(&mut self, time_ns: u64) -> u8 {
+    fn at(&mut self, time_ns: u64) -> (u8, bool) {
         let before = self.levels;
+        let was_unknown = self.unknown;
+        let mut uncertain = self.unknown;
         let mut moved = 0;
         while let Some(edge) = self.next_until(time_ns) {
-            moved |= self.levels ^ edge.levels;
-            self.levels = edge.levels;
+            if let Some(levels) = edge.levels {
+                if !self.unknown {
+                    moved |= self.levels ^ levels;
+                }
+                self.levels = levels;
+            }
+            self.unknown = edge.levels.is_none();
+            uncertain |= self.unknown;
         }
-        let back = moved & !(before ^ self.levels);
-        (self.levels ^ back) & self.pins
+        let back = if was_unknown || self.unknown {
+            0
+        } else {
+            moved & !(before ^ self.levels)
+        };
+        ((self.levels ^ back) & self.pins, uncertain)
     }
 
     /// The next edge, if it comes by `time_ns`.
-    fn next_until(&mut self, time_ns: u64) -> Option<Edge> {
+    fn next_until(&mut self, time_ns: u64) -> Option<DioEvent> {
         self.edges.pop_front_if(|edge| edge.time_ns <= time_ns)
     }
 
@@ -107,14 +127,28 @@ impl Sink {
 
     /// The stream began at `rate` pairs a second, reporting the edges of `pins`, at `levels`.
     pub fn begin(&mut self, rate: u32, pins: u8, levels: u8) -> Result<()> {
+        self.begin_mode(rate, pins, levels, false)
+    }
+
+    /// Includes a DIO_GAP channel (dio_gap in CSV) for intervals of unknown levels.
+    pub fn begin_with_dio_gaps(&mut self, rate: u32, pins: u8, levels: u8) -> Result<()> {
+        self.begin_mode(rate, pins, levels, true)
+    }
+
+    fn begin_mode(&mut self, rate: u32, pins: u8, levels: u8, gaps: bool) -> Result<()> {
         let dio = Dio {
             pins,
             levels: levels & pins,
             edges: VecDeque::new(),
+            unknown: false,
+            gaps,
         };
         match self {
             Sink::Csv(csv) => {
-                let columns: String = dio.names().map(|pin| format!(",dio{pin}")).collect();
+                let mut columns: String = dio.names().map(|pin| format!(",dio{pin}")).collect();
+                if pins != 0 && gaps {
+                    columns.push_str(",dio_gap");
+                }
                 writeln!(csv.file, "sequence,time_ns,millivolts,nanoamps{columns}")?;
                 csv.dio = dio;
             }
@@ -127,10 +161,55 @@ impl Sink {
     }
 
     pub fn edges(&mut self, edges: Vec<Edge>) {
-        match self {
-            Sink::Csv(csv) => csv.dio.edges.extend(edges),
-            Sink::Sigrok(sigrok) => sigrok.dio.edges.extend(edges),
+        for edge in edges {
+            self.dio_state(edge.time_ns, Some(edge.levels));
         }
+    }
+
+    /// Sets the state preceding the exported events without creating a transition.
+    pub fn seed_dio(&mut self, levels: Option<u8>) {
+        let dio = match self {
+            Sink::Csv(csv) => &mut csv.dio,
+            Sink::Sigrok(sigrok) => &mut sigrok.dio,
+        };
+        dio.unknown = levels.is_none();
+        dio.levels = levels.unwrap_or(0) & dio.pins;
+    }
+
+    /// A known level, or the start of an interval whose edges were lost.
+    pub fn dio_state(&mut self, time_ns: u64, levels: Option<u8>) {
+        let dio = match self {
+            Sink::Csv(csv) => &mut csv.dio,
+            Sink::Sigrok(sigrok) => &mut sigrok.dio,
+        };
+        dio.edges.push_back(DioEvent { time_ns, levels });
+    }
+
+    /// Flush events and missing pairs before `time_ns` without buffering the interval.
+    pub fn advance_to(&mut self, time_ns: u64) -> Result<()> {
+        match self {
+            Sink::Csv(csv) => csv.before(time_ns.saturating_sub(1)),
+            Sink::Sigrok(sigrok) => sigrok.before(time_ns),
+        }
+    }
+
+    /// Starts a missing analog interval without treating its placeholder as a measurement.
+    pub fn gap_sample(&mut self, sample: Sample) -> Result<()> {
+        match self {
+            Sink::Sigrok(sigrok) => {
+                sigrok.put(&sample, true, sample.time_ns)?;
+                sigrok.last = Some(sample);
+                sigrok.advanced = 1;
+            }
+            Sink::Csv(csv) => {
+                csv.before(sample.time_ns)?;
+                csv.edge(DioEvent {
+                    time_ns: sample.time_ns,
+                    levels: (!csv.dio.unknown).then_some(csv.dio.levels),
+                })?;
+            }
+        }
+        Ok(())
     }
 
     pub fn samples(&mut self, samples: &[Sample]) -> Result<()> {
@@ -166,18 +245,38 @@ pub struct Csv {
 }
 
 impl Csv {
-    fn edge(&mut self, edge: Edge) -> Result<()> {
-        let fields = self.dio.fields(edge.levels);
+    fn fields(&self) -> String {
+        if self.dio.pins == 0 {
+            return String::new();
+        }
+        if !self.dio.gaps {
+            return self.dio.fields(self.dio.levels);
+        }
+        if self.dio.unknown {
+            format!("{},1", ",".repeat(self.dio.names().count()))
+        } else {
+            format!("{},0", self.dio.fields(self.dio.levels))
+        }
+    }
+    fn edge(&mut self, edge: DioEvent) -> Result<()> {
+        self.dio.unknown = edge.levels.is_none();
+        if let Some(levels) = edge.levels {
+            self.dio.levels = levels;
+        }
+        let fields = self.fields();
         writeln!(self.file, ",{},,{fields}", edge.time_ns)?;
         Ok(())
     }
 
-    fn sample(&mut self, sample: &Sample) -> Result<()> {
-        while let Some(edge) = self.dio.next_until(sample.time_ns) {
-            self.dio.levels = edge.levels;
+    fn before(&mut self, time_ns: u64) -> Result<()> {
+        while let Some(edge) = self.dio.next_until(time_ns) {
             self.edge(edge)?;
         }
-        let fields = self.dio.fields(self.dio.levels);
+        Ok(())
+    }
+    fn sample(&mut self, sample: &Sample) -> Result<()> {
+        self.before(sample.time_ns)?;
+        let fields = self.fields();
         writeln!(
             self.file,
             "{},{},{},{}{fields}",
@@ -208,6 +307,7 @@ pub struct Sigrok {
     milliamps: Vec<f32>,
     logic: Vec<u8>,
     chunks: u32,
+    advanced: u64,
 }
 
 /// Samples a chunk file holds: 4 MiB of each analog channel.
@@ -228,6 +328,7 @@ impl Sigrok {
             milliamps: Vec::new(),
             logic: Vec::new(),
             chunks: 0,
+            advanced: 0,
         })
     }
 
@@ -236,7 +337,7 @@ impl Sigrok {
         self.volts.push(sample.millivolts as f32 / 1e3);
         self.milliamps.push(sample.nanoamps as f32 / 1e6);
         // GAP is bit 0, then the pins in order.
-        let levels = self.dio.at(time_ns);
+        let (levels, unknown) = self.dio.at(time_ns);
         let dio = self
             .dio
             .names()
@@ -244,27 +345,36 @@ impl Sigrok {
             .fold(0, |logic, (channel, pin)| {
                 logic | (levels >> pin & 1) << (channel + 1)
             });
-        self.logic.push(if gap { GAP } else { 0 } | dio);
+        let dio_gap = if unknown && self.dio.pins != 0 && self.dio.gaps {
+            1 << (self.logic_channels() - 1)
+        } else {
+            0
+        };
+        self.logic.push(if gap { GAP } else { 0 } | dio | dio_gap);
         if self.logic.len() == CHUNK {
             self.flush()?;
         }
         Ok(())
     }
 
-    fn push(&mut self, sample: &Sample) -> Result<()> {
+    fn before(&mut self, time_ns: u64) -> Result<()> {
         if let Some(last) = self.last {
-            // Periods since the last pair, to the nearest: more than one is a pause, a hold or
-            // pairs lost.
             let rate = u128::from(self.rate.max(1));
-            let elapsed = u128::from(sample.time_ns.saturating_sub(last.time_ns));
+            let elapsed = u128::from(time_ns.saturating_sub(last.time_ns));
             let periods = (elapsed * rate + 500_000_000) / 1_000_000_000;
-            for period in 1..periods {
-                let time_ns = last.time_ns + (period * 1_000_000_000 / rate) as u64;
-                self.put(&last, true, time_ns)?;
+            for period in u128::from(self.advanced.max(1))..periods {
+                let at = last.time_ns + (period * 1_000_000_000 / rate) as u64;
+                self.put(&last, true, at)?;
             }
+            self.advanced = self.advanced.max(periods as u64);
         }
+        Ok(())
+    }
+    fn push(&mut self, sample: &Sample) -> Result<()> {
+        self.before(sample.time_ns)?;
         self.put(sample, false, sample.time_ns)?;
         self.last = Some(*sample);
+        self.advanced = 1;
         Ok(())
     }
 
@@ -295,7 +405,7 @@ impl Sigrok {
 
     /// GAP and the pins.
     fn logic_channels(&self) -> usize {
-        1 + self.dio.names().count()
+        1 + self.dio.names().count() + usize::from(self.dio.pins != 0 && self.dio.gaps)
     }
 
     fn finish(mut self) -> Result<()> {
@@ -308,7 +418,8 @@ impl Sigrok {
             samplerate(self.rate)
         );
         let names = std::iter::once("GAP".to_owned())
-            .chain(self.dio.names().map(|pin| format!("DIO{pin}")));
+            .chain(self.dio.names().map(|pin| format!("DIO{pin}")))
+            .chain((self.dio.pins != 0 && self.dio.gaps).then(|| "DIO_GAP".to_owned()));
         for (index, name) in names.enumerate() {
             metadata.push_str(&format!("probe{}={name}\n", index + 1));
         }

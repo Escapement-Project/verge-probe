@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const BLOCK: usize = 1024;
 /// The most bins a view holds, however many pixels ask.
-const BINS: usize = 8192;
-const FAN: u64 = 16;
+pub(super) const BINS: usize = 8192;
+pub(super) const FAN: u64 = 16;
 const APPLICATION: i64 = 0x56475245;
 // Bump user_version when changing the postcard layouts stored in this archive.
 
@@ -60,7 +60,7 @@ impl Bins<'_> {
             .min((self.values.len() - 1) as u128) as usize
     }
 }
-fn bin_interval(interval: Interval, pixels: usize, index: usize) -> Interval {
+pub(super) fn bin_interval(interval: Interval, pixels: usize, index: usize) -> Interval {
     let at = |n| {
         interval.start_ns + (u128::from(interval.duration_ns()) * n as u128 / pixels as u128) as u64
     };
@@ -68,7 +68,8 @@ fn bin_interval(interval: Interval, pixels: usize, index: usize) -> Interval {
 }
 
 pub struct Archive {
-    db: Connection,
+    pub(super) db: Connection,
+    pub(super) version: i64,
 }
 
 /// Fails with `error` unless `condition` holds.
@@ -76,7 +77,7 @@ fn ensure(condition: bool, error: CaptureError) -> Result<()> {
     if condition { Ok(()) } else { Err(error) }
 }
 
-fn cancelled(cancel: &AtomicBool) -> Result<()> {
+pub(super) fn cancelled(cancel: &AtomicBool) -> Result<()> {
     ensure(!cancel.load(Ordering::Relaxed), CaptureError::Cancelled)
 }
 
@@ -110,10 +111,10 @@ fn destination_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(postcard::to_stdvec(value)?)
 }
-fn decode<T: for<'a> Deserialize<'a>>(bytes: &[u8]) -> Result<T> {
+pub(super) fn decode<T: for<'a> Deserialize<'a>>(bytes: &[u8]) -> Result<T> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
@@ -126,10 +127,10 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure(version == 1, CaptureError::Version(version))?;
-        Ok(Self { db })
+        ensure((1..=2).contains(&version), CaptureError::Version(version))?;
+        Ok(Self { db, version })
     }
-    fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
+    pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
         let bytes: Vec<u8> =
             self.db
                 .query_row("SELECT value FROM metadata WHERE key=?", [key], |r| {
@@ -351,7 +352,6 @@ impl Archive {
     }
     /// Export whole samples whose measured support overlaps the interval. Statistics clip
     /// boundary support; exports retain original timestamps and complete boundary samples.
-    /// This export contains analog readings and GAP; DIO export remains in `record::Sink`.
     pub fn export(
         &self,
         path: &Path,
@@ -365,11 +365,20 @@ impl Archive {
             let header = self.header()?;
             let temp = temp_beside(path)?;
             let mut sink = Sink::from_file(temp.reopen()?, csv)?;
-            sink.begin(header.rate, 0, 0)?;
-            self.overlapping(interval, cancel, |block| {
-                let samples: Vec<_> = block.into_iter().map(|s| s.sample).collect();
-                Ok(sink.samples(&samples)?)
-            })?;
+            let pins = if self.version >= 2 {
+                header.dio_mask
+            } else {
+                0
+            };
+            sink.begin_with_dio_gaps(header.rate, pins, header.dio_levels)?;
+            if pins == 0 {
+                self.overlapping(interval, cancel, |block| {
+                    let samples: Vec<_> = block.into_iter().map(|s| s.sample).collect();
+                    Ok(sink.samples(&samples)?)
+                })?;
+            } else {
+                self.export_digital(&mut sink, interval, cancel)?;
+            }
             sink.finish()?;
             persist(temp, path)
         })();
@@ -394,6 +403,7 @@ pub struct CaptureWriter {
     extent: Interval,
     ended: bool,
     message_n: u64,
+    digital: super::digital::DigitalWriter,
 }
 
 impl CaptureWriter {
@@ -405,14 +415,17 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=1;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=2;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
             CREATE INDEX blocks_time ON blocks(start_ns,end_ns);
             CREATE TABLE nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;
-            CREATE TABLE messages(n INTEGER PRIMARY KEY,data BLOB NOT NULL);"))?;
-        let writer = Self {
+            CREATE TABLE messages(n INTEGER PRIMARY KEY,data BLOB NOT NULL);
+            CREATE TABLE dio_blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
+            CREATE INDEX dio_time ON dio_blocks(end_ns,start_ns);
+            CREATE TABLE dio_nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;"))?;
+        let mut writer = Self {
             db,
             header: None,
             period: 0,
@@ -426,7 +439,9 @@ impl CaptureWriter {
             extent: Interval::default(),
             ended: false,
             message_n: 0,
+            digital: super::digital::DigitalWriter::default(),
         };
+        writer.digital.flush(&writer.db, 0)?;
         writer.metadata()?;
         Ok(writer)
     }
@@ -457,6 +472,7 @@ impl CaptureWriter {
                 self.header = Some(header.clone());
                 self.converter = Some(Converter::new(header));
                 self.next = Some(header.first_sequence);
+                self.digital.tail = Some((0, Some(header.dio_levels)));
             }
             Message::Pairs(pairs) => {
                 let Some(converter) = self.converter.as_mut() else {
@@ -490,7 +506,20 @@ impl CaptureWriter {
                 self.ended = true;
             }
             Message::Edges(_) if self.header.is_none() => return Ok(false),
-            Message::Edges(_) => {}
+            Message::Edges(edges) => {
+                if edges.lost() {
+                    self.digital.losses += 1;
+                }
+                for (index, &edge) in edges.edges.iter().enumerate() {
+                    self.digital.edge(edge, index == 0 && edges.lost())?;
+                }
+                if edges.lost()
+                    && edges.edges.is_empty()
+                    && let Some((_, levels)) = &mut self.digital.tail
+                {
+                    *levels = None;
+                }
+            }
         }
         self.messages.push(message);
         if self.samples.len() >= BLOCK || self.messages.len() >= 128 || self.ended {
@@ -535,6 +564,8 @@ impl CaptureWriter {
         }
     }
     fn flush_inner(&mut self) -> Result<()> {
+        self.digital
+            .flush(&self.db, self.header.as_ref().map_or(0, |h| h.dio_mask))?;
         for message in &self.messages {
             self.db.execute(
                 "INSERT INTO messages VALUES(?,?)",
@@ -717,6 +748,384 @@ mod tests {
             } else {
                 1_000_000
             },
+        }
+    }
+    #[test]
+    fn digital_queries_and_exports_keep_pulses_and_unknown_intervals() {
+        use crate::stream::{Edge, Edges};
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dio.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let empty = Archive::open(&path).unwrap();
+        assert!(
+            empty
+                .digital(Interval::new(0, 1), 20, &AtomicBool::new(false))
+                .unwrap()
+                .bins
+                .is_empty()
+        );
+        drop(empty);
+        let mut h = header(1000);
+        h.dio_mask = 0x0f;
+        h.dio_levels = 0;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer.digital.tail = Some((0, Some(0)));
+        writer.append((0..10).map(sample)).unwrap();
+        for (flags, edges) in [
+            (0, vec![(1_200_000, 8), (1_400_000, 0), (3_000_000, 8)]),
+            (Edges::LOST, vec![(6_000_000, 0), (8_000_000, 8)]),
+        ] {
+            writer
+                .ingest(Message::Edges(Edges::new(
+                    flags,
+                    edges
+                        .into_iter()
+                        .map(|(time_ns, levels)| Edge { time_ns, levels })
+                        .collect(),
+                )))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let digital = archive
+            .digital(Interval::new(0, 10_000_000), 100, &cancel)
+            .unwrap();
+        assert_eq!((digital.pins, digital.loss_events), (15, 1));
+        assert!(
+            digital
+                .bins
+                .iter()
+                .filter(|b| b.interval.start_ns >= 3_000_000 && b.interval.end_ns <= 6_000_000)
+                .all(|b| b.gap)
+        );
+        assert!(
+            digital
+                .bins
+                .iter()
+                .any(|b| b.interval.start_ns == 1_200_000 && b.high == 8)
+        );
+        let coarse = archive
+            .digital(Interval::new(0, 10_000_000), 1, &cancel)
+            .unwrap();
+        assert_eq!(coarse.bins.len(), 1);
+        assert_eq!(
+            (coarse.bins[0].high, coarse.bins[0].low, coarse.bins[0].gap),
+            (8, 15, true)
+        );
+        for csv in [true, false] {
+            let out = dir.path().join(if csv { "dio.csv" } else { "dio.sr" });
+            archive
+                .export(&out, csv, Interval::new(1_000_000, 9_000_000), &cancel)
+                .unwrap();
+            if csv {
+                let text = fs::read_to_string(&out).unwrap();
+                assert!(text.contains(",1200000,,,0,0,0,1,0\n"), "{text}");
+                assert!(text.contains(",3000000,,,,,,,1\n"), "{text}");
+                assert!(text.contains("4,4000000,3000,1000000,,,,,1\n"), "{text}");
+                assert!(!text.contains("9,9000000"));
+            } else {
+                let mut zip = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
+                let mut logic = Vec::new();
+                zip.by_name("logic-1-1")
+                    .unwrap()
+                    .read_to_end(&mut logic)
+                    .unwrap();
+                // DIO3's pulse is stretched at 2 ms. Bit 5 marks unknown DIO at 3..6 ms.
+                assert_eq!(logic, [0, 16, 32, 32, 32, 32, 0, 16]);
+            }
+        }
+        let out = dir.path().join("inside-loss.csv");
+        archive
+            .export(&out, true, Interval::new(4_500_000, 5_500_000), &cancel)
+            .unwrap();
+        let text = fs::read_to_string(out).unwrap();
+        assert!(text.contains("4,4000000,3000,1000000,,,,,1"), "{text}");
+        assert!(
+            archive
+                .digital(Interval::new(0, 10), 3, &AtomicBool::new(true))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn digital_history_is_bounded_and_old_analog_archives_still_open() {
+        use crate::stream::Edge;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let mut h = header(1000);
+        h.dio_mask = 1;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer.digital.tail = Some((0, Some(0)));
+        for block in 0..300u32 {
+            for n in block * 100..(block + 1) * 100 {
+                writer
+                    .digital
+                    .edge(
+                        Edge {
+                            time_ns: u64::from(n + 1) * 10_000,
+                            levels: (n % 2) as u8,
+                        },
+                        false,
+                    )
+                    .unwrap();
+            }
+            writer.append([sample(block)]).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let view = archive
+            .digital(Interval::new(0, 300_000_000), 13, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(view.bins.len(), 13);
+        assert!(view.bins.iter().all(|bin| bin.high == 1 && bin.low == 1));
+        drop(archive);
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA user_version=1; DROP TABLE dio_nodes; DROP TABLE dio_blocks;")
+            .unwrap();
+        drop(db);
+        let archive = Archive::open(&path).unwrap();
+        assert_eq!(
+            archive
+                .digital(archive.extent().unwrap(), 13, &AtomicBool::new(false))
+                .unwrap()
+                .pins,
+            0
+        );
+        assert_eq!(
+            archive
+                .statistics(archive.extent().unwrap(), &AtomicBool::new(false))
+                .unwrap()
+                .samples,
+            300
+        );
+    }
+
+    #[test]
+    fn attached_stream_accepts_edges_before_its_first_pair_and_same_time_pulses() {
+        use crate::stream::{Edge, Edges};
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attached.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let mut h = header(1000);
+        h.dio_mask = 8;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer
+            .ingest(Message::Pairs(Pairs::new(
+                0,
+                u32::MAX - 2,
+                1_000_000,
+                vec![
+                    Pair {
+                        voltage_code: 32768,
+                        current_code: 1000,
+                        low: true
+                    };
+                    4
+                ],
+            )))
+            .unwrap();
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![
+                    Edge {
+                        time_ns: 500_000,
+                        levels: 8,
+                    },
+                    Edge {
+                        time_ns: 1_500_000,
+                        levels: 0,
+                    },
+                    Edge {
+                        time_ns: 2_700_000,
+                        levels: 8,
+                    },
+                    Edge {
+                        time_ns: 2_700_000,
+                        levels: 0,
+                    },
+                ],
+            )))
+            .unwrap();
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let view = archive
+            .digital(Interval::new(0, 4_000_000), 40, &cancel)
+            .unwrap();
+        assert!(view.bins.iter().all(|b| b.interval.start_ns >= 1_000_000));
+        assert!(
+            view.bins
+                .iter()
+                .any(|b| b.interval.start_ns == 2_700_000 && b.high == 8 && b.low == 8)
+        );
+        let csv = dir.path().join("attached.csv");
+        archive
+            .export(&csv, true, archive.extent().unwrap(), &cancel)
+            .unwrap();
+        let text = fs::read_to_string(csv).unwrap();
+        assert!(text.contains(",2700000,,,1,0\n,2700000,,,0,0\n"), "{text}");
+        let sr = dir.path().join("attached.sr");
+        archive
+            .export(&sr, false, archive.extent().unwrap(), &cancel)
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(sr).unwrap()).unwrap();
+        let mut logic = Vec::new();
+        zip.by_name("logic-1-1")
+            .unwrap()
+            .read_to_end(&mut logic)
+            .unwrap();
+        assert_eq!(
+            logic,
+            [2, 0, 2, 0],
+            "the sub-sample pulse must be stretched"
+        );
+    }
+
+    #[test]
+    fn sigrok_selection_in_an_analog_gap_keeps_digital_data() {
+        use crate::stream::{Edge, Edges};
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gap.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        let mut h = header(1000);
+        h.dio_mask = 8;
+        writer.ingest(Message::Header(h)).unwrap();
+        writer.append([sample(0), sample(10)]).unwrap();
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![
+                    Edge {
+                        time_ns: 3_000_000,
+                        levels: 8,
+                    },
+                    Edge {
+                        time_ns: 4_000_000,
+                        levels: 0,
+                    },
+                ],
+            )))
+            .unwrap();
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let csv = dir.path().join("static-gap.csv");
+        archive
+            .export(
+                &csv,
+                true,
+                Interval::new(4_500_000, 6_000_000),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(
+            fs::read_to_string(csv)
+                .unwrap()
+                .contains(",4500000,,,0,0\n")
+        );
+        for (name, interval, expected) in [
+            (
+                "edge-start.sr",
+                Interval::new(4_000_000, 6_000_000),
+                vec![1, 1],
+            ),
+            (
+                "high-gap.sr",
+                Interval::new(3_500_000, 6_000_000),
+                vec![3, 1, 1],
+            ),
+            (
+                "gap.sr",
+                Interval::new(2_000_000, 6_000_000),
+                vec![1, 3, 1, 1],
+            ),
+            (
+                "leading.sr",
+                Interval::new(2_000_000, 11_000_000),
+                vec![1, 3, 1, 1, 1, 1, 1, 1, 0],
+            ),
+        ] {
+            let sr = dir.path().join(name);
+            archive
+                .export(&sr, false, interval, &AtomicBool::new(false))
+                .unwrap();
+            let mut zip = zip::ZipArchive::new(fs::File::open(sr).unwrap()).unwrap();
+            let mut logic = Vec::new();
+            zip.by_name("logic-1-1")
+                .unwrap()
+                .read_to_end(&mut logic)
+                .unwrap();
+            assert_eq!(logic, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn selected_digital_state_is_seeded_without_creating_an_edge() {
+        use crate::stream::{Edge, Edges};
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        for pulse in [false, true] {
+            let path = dir.path().join(format!("seed-{pulse}.vergecapture"));
+            let mut writer = CaptureWriter::create(&path).unwrap();
+            let mut h = header(1000);
+            h.dio_mask = 8;
+            h.dio_levels = 8;
+            writer.ingest(Message::Header(h)).unwrap();
+            writer.append((1..5).map(sample)).unwrap();
+            let edges = if pulse {
+                vec![(1_000_000, 0), (2_000_000, 8), (2_000_000, 0)]
+            } else {
+                vec![(2_000_000, 0)]
+            };
+            writer
+                .ingest(Message::Edges(Edges::new(
+                    0,
+                    edges
+                        .into_iter()
+                        .map(|(time_ns, levels)| Edge { time_ns, levels })
+                        .collect(),
+                )))
+                .unwrap();
+            writer.finish().unwrap();
+            let archive = Archive::open(&path).unwrap();
+            for (suffix, interval, expected) in [
+                (
+                    "selected",
+                    Interval::new(2_000_000, 4_000_000),
+                    if pulse { vec![2, 0] } else { vec![0, 0] },
+                ),
+                (
+                    "before",
+                    Interval::new(0, 2_000_000),
+                    if pulse { vec![0] } else { vec![2] },
+                ),
+                ("after", Interval::new(30_000_000, 31_000_000), vec![]),
+            ] {
+                let out = dir.path().join(format!("{pulse}-{suffix}.sr"));
+                archive
+                    .export(&out, false, interval, &AtomicBool::new(false))
+                    .unwrap();
+                let mut zip = zip::ZipArchive::new(fs::File::open(out).unwrap()).unwrap();
+                let mut logic = Vec::new();
+                if let Ok(mut file) = zip.by_name("logic-1-1") {
+                    file.read_to_end(&mut logic).unwrap();
+                }
+                assert_eq!(logic, expected, "{pulse} {suffix}");
+            }
+            let view = archive
+                .digital(
+                    Interval::new(2_000_000, 4_000_000),
+                    20,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(view.bins[0].high & 8 != 0, pulse);
         }
     }
     #[test]
