@@ -14,13 +14,14 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::protocol::{
-    self, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_SPI,
-    CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND,
-    CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MAX_READ,
-    I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND,
-    JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, REBOOT_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX,
-    SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER, SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND,
-    TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+    self, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN,
+    CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND,
+    CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND,
+    I2C_MAX_CLOCK_HZ, I2C_MAX_READ, I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND, J8_COMMAND,
+    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, MARK_COMMAND, REBOOT_COMMAND,
+    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER,
+    SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND,
+    TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
@@ -63,6 +64,20 @@ impl<E: std::error::Error + 'static> CommandError<E> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("the firmware refused the request")]
 pub struct Refused<S: Debug = ()>(pub S);
+
+/// Where a marker went (mculink-verge HOST-INTERFACE.md, "Markers: 0x94").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Marked {
+    /// It is in the energy stream.
+    Sent,
+    /// No capture runs.
+    NoCapture,
+    /// A capture runs, but no host streams it.
+    NoStream,
+    /// The probe had no room for it. The stream's next markers message says one was lost.
+    Full,
+}
 
 /// Why a target-sense conversion failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -1012,6 +1027,32 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_status(&response)
     }
 
+    /// Marks this moment in the energy stream a host is recording, with `number` and a `label` of
+    /// at most 32 bytes. The probe stamps it as it runs the command, so in a batch it falls
+    /// between the commands around it. Only [`Marked::Sent`] puts it anywhere.
+    pub fn mark(&mut self, number: u32, label: &[u8]) -> Result<Marked, CommandError<Refused>> {
+        if label.len() > crate::stream::LABEL_MAX {
+            return Err(CommandError::InvalidRequest(
+                "a marker's label is at most 32 bytes",
+            ));
+        }
+        self.require_capability(CAP_MARKS, "markers")?;
+        let mut payload = number.to_le_bytes().to_vec();
+        payload.push(label.len() as u8);
+        payload.extend_from_slice(label);
+        let response = self.send(MARK_COMMAND, &payload)?;
+        if !vendor_status(response_byte(&response, 0)?)? {
+            return Err(CommandError::Firmware(Refused(())));
+        }
+        match response_byte(&response, 1)? {
+            0 => Ok(Marked::Sent),
+            1 => Ok(Marked::NoCapture),
+            2 => Ok(Marked::NoStream),
+            3 => Ok(Marked::Full),
+            other => Err(malformed(format!("marker result {other}")).into()),
+        }
+    }
+
     /// Reads the latest complete voltage/current pair.
     pub fn latest_energy_sample(
         &mut self,
@@ -1956,6 +1997,7 @@ fn command_name(command_id: u8) -> &'static str {
         ENERGY_COMMAND => "energy capture",
         SPI_COMMAND => "the SPI bridge",
         I2C_COMMAND => "the I2C bridge",
+        MARK_COMMAND => "markers",
         _ => "this vendor command",
     }
 }

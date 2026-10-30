@@ -261,6 +261,45 @@ fn messages_parse_as_the_probe_lays_them_out() {
         stream::parse(&edges[..11]),
         Err(stream::StreamError::Short(11))
     );
+
+    // Markers: count, then each marker's time, number, label length and label.
+    let mut marks = vec![stream::MARKS, 1, 2];
+    marks.extend_from_slice(&(u64::from(u32::MAX) + 5).to_le_bytes());
+    marks.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+    marks.push(0);
+    marks.extend_from_slice(&7u64.to_le_bytes());
+    marks.extend_from_slice(&2u32.to_le_bytes());
+    marks.push(32);
+    marks.extend_from_slice(b"0123456789abcdef0123456789ABCDEF");
+    let Message::Markers(message) = stream::parse(&marks).unwrap() else {
+        panic!("not markers");
+    };
+    assert!(message.lost() && stream::is_stream_message(&marks));
+    assert_eq!(
+        message.markers,
+        [
+            stream::Marker {
+                time_ns: u64::from(u32::MAX) + 5,
+                number: 0xDEAD_BEEF,
+                label: vec![]
+            },
+            stream::Marker {
+                time_ns: 7,
+                number: 2,
+                label: b"0123456789abcdef0123456789ABCDEF".to_vec()
+            },
+        ]
+    );
+    assert_eq!(message.to_bytes(), marks);
+    // Short anywhere: before the count, inside a marker's fixed part, and inside its label.
+    for length in [2, 15, 28, marks.len() - 1] {
+        assert_eq!(
+            stream::parse(&marks[..length]),
+            Err(stream::StreamError::Short(length)),
+            "{length} bytes"
+        );
+    }
+    assert!(!stream::is_stream_message(&[0xA5]));
 }
 
 /// Step 5 in the samples: a pair at a range switch keeps its time and voltage, takes the next

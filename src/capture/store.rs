@@ -520,6 +520,9 @@ impl CaptureWriter {
                     *levels = None;
                 }
             }
+            // Kept with the original messages; nothing indexes them by time yet.
+            Message::Markers(_) if self.header.is_none() => return Ok(false),
+            Message::Markers(_) => {}
         }
         self.messages.push(message);
         if self.samples.len() >= BLOCK || self.messages.len() >= 128 || self.ended {

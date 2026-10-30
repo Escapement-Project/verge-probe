@@ -192,6 +192,8 @@ pub struct SimUnit {
     pub dio_outputs: u8,
     pub dio_aux: bool,
     pub dio_disabled: bool,
+    /// Whether ours takes markers (`0x94`), which images from before them answer as unknown.
+    pub marks: bool,
     /// Each DIO pin's output level, which a restart clears.
     pub dio_levels: u8,
     /// What something attached holds the DIO pins at, which an input reads: low, the Pro's own
@@ -757,6 +759,7 @@ impl SimBus {
             dio_outputs: 0,
             dio_aux: true,
             dio_disabled: false,
+            marks: true,
             dio_levels: 0,
             dio_held: 0,
             energy: energy::SimEnergy::default(),
@@ -1004,6 +1007,7 @@ impl SimBus {
                 let unit = bus.add_ours("26ea505");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
                 bus.world().units[unit].dio_aux = name != "ours-pro-old-aux";
+                bus.world().units[unit].marks = name != "ours-pro-old-aux";
                 bus.world().units[unit].dio_disabled = name == "ours-pro-j15";
             }
             "ours-pro-edge-loss" => {

@@ -7,7 +7,7 @@ use verge_probe::aux::Aux;
 use verge_probe::dap::{DapLink, Ours};
 use verge_probe::sim::SimBus;
 use verge_probe::stream::{EndReason, Message};
-use verge_probe::{Bus, DapTransport, EnergyTotal, VergeControl, detect};
+use verge_probe::{Bus, CommandError, DapTransport, EnergyTotal, Marked, VergeControl, detect};
 
 fn pro(bus: &SimBus) -> verge_probe::UsbDevice {
     let unit = bus.add_ours("26ea505");
@@ -464,4 +464,64 @@ fn a_reply_left_unread_outlasts_its_program() {
         0x82,
         "the probe keeps it"
     );
+}
+
+/// A marker from either interface goes into the stream at the moment it ran; without a stream it
+/// goes nowhere and says why.
+#[test]
+fn markers_reach_the_stream_from_either_interface() {
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut control = VergeControl::new(&mut aux);
+    assert_eq!(control.mark(1, b"early").unwrap(), Marked::NoCapture);
+    assert!(control.info().unwrap().unwrap().supports_markers());
+    assert!(matches!(
+        control.mark(1, &[0; 33]),
+        Err(CommandError::InvalidRequest(_))
+    ));
+    control.start_energy_capture(1000).unwrap();
+    assert_eq!(control.mark(2, b"").unwrap(), Marked::NoStream);
+    control.stream_energy_capture(0).unwrap();
+    assert_eq!(control.mark(3, b"from aux").unwrap(), Marked::Sent);
+    drop(control);
+    {
+        let mut link = bus.open_dap(&device).unwrap();
+        let mut transport = DapTransport(&mut link);
+        let mut debugger = VergeControl::new(&mut transport);
+        assert_eq!(debugger.mark(4, b"from cmsis-dap").unwrap(), Marked::Sent);
+    }
+    let mut control = VergeControl::new(&mut aux);
+    control.end_energy_stream().unwrap();
+    let messages = until(control.transport(), |m| matches!(m, Message::End(_)));
+    let markers: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Markers(markers) => Some(markers.markers.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|m| (m.number, m.label.clone(), m.time_ns))
+        .collect();
+    assert_eq!(
+        markers
+            .iter()
+            .map(|(n, l, _)| (*n, l.as_slice()))
+            .collect::<Vec<_>>(),
+        [(3, &b"from aux"[..]), (4, &b"from cmsis-dap"[..])]
+    );
+    assert!(markers[0].2 < markers[1].2, "times in the order they ran");
+}
+
+#[test]
+fn firmware_without_markers_is_told_apart() {
+    let bus = SimBus::scenario("ours-pro-old-aux").unwrap();
+    let device = detect(&bus).unwrap().remove(0).device;
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    let mut control = VergeControl::new(&mut aux);
+    assert!(!control.info().unwrap().unwrap().supports_markers());
+    assert!(matches!(
+        control.mark(1, b"x"),
+        Err(CommandError::Unsupported(_))
+    ));
 }

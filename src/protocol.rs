@@ -8,6 +8,7 @@ pub(crate) const ENERGY_COMMAND: u8 = 0x90;
 pub(crate) const TARGET_SENSE_COMMAND: u8 = 0x86;
 pub(crate) const TARGET_POWER_COMMAND: u8 = 0x8F;
 pub(crate) const DIO_COMMAND: u8 = 0x8E;
+pub(crate) const MARK_COMMAND: u8 = 0x94;
 pub(crate) const REBOOT_COMMAND: u8 = 0x85;
 pub(crate) const J8_COMMAND: u8 = 0x84;
 pub(crate) const SAMPLE_COMMAND: u8 = 0x87;
@@ -33,6 +34,7 @@ pub(crate) const CAP_ENERGY_CAPTURE: u32 = 1 << 0;
 pub(crate) const CAP_CALIBRATED_ENERGY: u32 = 1 << 5;
 pub(crate) const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
 pub(crate) const CAP_DIO_AUX: u32 = 1 << 6;
+pub(crate) const CAP_MARKS: u32 = 1 << 7;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;
 pub(crate) const SPI_SOURCE_HZ: u32 = 96_000_000;
@@ -137,6 +139,11 @@ impl VergeInfo {
     /// Whether Verge Aux carries DIO commands.
     pub fn supports_dio_on_aux(&self) -> bool {
         self.extended_capabilities & CAP_DIO_AUX != 0
+    }
+
+    /// Whether the firmware takes markers for the energy stream (`0x94`).
+    pub fn supports_markers(&self) -> bool {
+        self.extended_capabilities & CAP_MARKS != 0
     }
 
     /// Whether the firmware can switch the target supply.
@@ -250,6 +257,7 @@ impl VergeInfo {
                 (CAP_SPI, "SPI bridge"),
                 (CAP_I2C, "I2C bridge"),
                 (CAP_DIO_AUX, "DIO on Aux"),
+                (CAP_MARKS, "markers"),
             ]
             .into_iter()
             .filter(|(bit, _)| self.extended_capabilities & bit != 0)

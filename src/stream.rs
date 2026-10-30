@@ -14,6 +14,9 @@ pub const PAIRS: u8 = 0xA0;
 pub const HEADER: u8 = 0xA1;
 pub const END: u8 = 0xA2;
 pub const EDGES: u8 = 0xA3;
+pub const MARKS: u8 = 0xA4;
+/// The longest label a marker carries.
+pub const LABEL_MAX: usize = 32;
 
 const HEADER_BYTES: usize = 68;
 const PAIRS_FIXED: usize = 16;
@@ -21,6 +24,9 @@ const PAIR_BYTES: usize = 5;
 const END_BYTES: usize = 6;
 const EDGES_FIXED: usize = 12;
 const EDGE_BYTES: usize = 5;
+const MARKS_FIXED: usize = 3;
+/// A marker's time, number and label length, before its label.
+const MARK_BYTES: usize = 13;
 
 /// Whether a message from the auxiliary interface is a stream message rather than a reply: its first
 /// byte is outside the vendor command range.
@@ -28,7 +34,7 @@ const EDGE_BYTES: usize = 5;
 pub fn is_stream_message(bytes: &[u8]) -> bool {
     bytes
         .first()
-        .is_some_and(|&first| (PAIRS..=EDGES).contains(&first))
+        .is_some_and(|&first| (PAIRS..=MARKS).contains(&first))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -190,12 +196,62 @@ impl Edges {
     }
 }
 
+/// One moment a debugging host marked with `0x94`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Marker {
+    /// In ns since the capture started, as the probe ran the command.
+    pub time_ns: u64,
+    pub number: u32,
+    /// Up to 32 bytes, UTF-8 by convention, as the host sent them.
+    pub label: Vec<u8>,
+}
+
+/// Up to 11 markers, in the order the probe ran them. They can arrive before or after the pairs
+/// around them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Markers {
+    pub flags: u8,
+    pub markers: Vec<Marker>,
+}
+
+impl Markers {
+    pub const LOST: u8 = 1;
+
+    /// A message as the probe would send it, for a simulator or a test.
+    #[must_use]
+    pub fn new(flags: u8, markers: Vec<Marker>) -> Markers {
+        Markers { flags, markers }
+    }
+
+    /// The probe lost markers before the first one: the record was full, or so was the host's.
+    #[must_use]
+    pub fn lost(&self) -> bool {
+        self.flags & Self::LOST != 0
+    }
+
+    /// The message's bytes, as the probe sends them.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![MARKS, self.flags, self.markers.len() as u8];
+        for marker in &self.markers {
+            bytes.extend_from_slice(&marker.time_ns.to_le_bytes());
+            bytes.extend_from_slice(&marker.number.to_le_bytes());
+            bytes.push(marker.label.len() as u8);
+            bytes.extend_from_slice(&marker.label);
+        }
+        bytes
+    }
+}
+
+/// Recorded captures store these by variant index: add new ones at the end.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Header(Header),
     Pairs(Pairs),
     End(End),
     Edges(Edges),
+    Markers(Markers),
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -303,6 +359,30 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                         levels: edge[4],
                     })
                     .collect(),
+            }))
+        }
+        Some(&MARKS) => {
+            if bytes.len() < MARKS_FIXED {
+                return Err(short());
+            }
+            let mut at = MARKS_FIXED;
+            let mut markers = Vec::with_capacity(usize::from(bytes[2]));
+            for _ in 0..bytes[2] {
+                let label = at + MARK_BYTES;
+                if bytes.len() < label || bytes.len() < label + usize::from(bytes[label - 1]) {
+                    return Err(short());
+                }
+                let end = label + usize::from(bytes[label - 1]);
+                markers.push(Marker {
+                    time_ns: u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes")),
+                    number: u32_at(bytes, at + 8),
+                    label: bytes[label..end].to_vec(),
+                });
+                at = end;
+            }
+            Ok(Message::Markers(Markers {
+                flags: bytes[1],
+                markers,
             }))
         }
         Some(&other) => Err(StreamError::Unknown(other)),

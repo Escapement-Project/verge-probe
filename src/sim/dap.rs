@@ -7,8 +7,8 @@ use std::time::Duration;
 use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
 use crate::protocol::{
-    CAP_CALIBRATED_ENERGY, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
-    CAP_TARGET_POWER, ENERGY_COMMAND, TARGET_POWER_COMMAND,
+    CAP_CALIBRATED_ENERGY, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_MARKS,
+    CAP_TARGET_POWER, ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND,
 };
 
 /// Each command costs this much simulated time.
@@ -151,6 +151,11 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                             } else {
                                 0
                             }
+                            | if world.units[unit].marks {
+                                CAP_MARKS
+                            } else {
+                                0
+                            }
                     } else {
                         0
                     };
@@ -203,6 +208,16 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
                 let now = world.now;
                 world.units[unit].energy.energy(pro, now, request)
+            }
+            _ => vec![dap::ID_DAP_INVALID],
+        },
+        [MARK_COMMAND, request @ ..] => match &firmware {
+            SimFirmware::Ours { .. }
+                if world.units[unit].board.is_some() && world.units[unit].marks =>
+            {
+                let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let now = world.now;
+                world.units[unit].energy.mark(pro, now, request)
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
@@ -262,7 +277,7 @@ impl DapLink for SimDap {
     }
 }
 
-/// A simulated Pro's Verge Aux interface: `0x82`, `0x8F` and `0x90` as on CMSIS-DAP, `0x90` modes 5
+/// A simulated Pro's Verge Aux interface: `0x82`, `0x8E`, `0x8F`, `0x90` and `0x94` as on CMSIS-DAP, `0x90` modes 5
 /// to 7 besides, and the energy stream.
 pub struct SimAux {
     world: Arc<Mutex<World>>,
@@ -335,7 +350,8 @@ impl crate::aux::AuxLink for SimAux {
             [dap::VENDOR_DIO, ..]
             | [dap::VENDOR_IDENTIFY, ..]
             | [TARGET_POWER_COMMAND, ..]
-            | [ENERGY_COMMAND, ..] => {
+            | [ENERGY_COMMAND, ..]
+            | [MARK_COMMAND, ..] => {
                 let mut messages = unit.energy.stream_messages(now);
                 messages.push(answer(&mut world, self.unit, request));
                 messages

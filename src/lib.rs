@@ -49,8 +49,8 @@ pub use probe::{
     CodeLabArena, CodegenMeasurement, CodegenMode, CommandError, DapTransport, DioState,
     EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart, EnergyError,
     EnergyMonitorError, EnergySample, EnergyTotal, JtagCodegenState, JtagGenerationLogEntry,
-    JtagPacingState, JtagWire, LatencyOutcome, ProBusError, RawEnergySample, RebootMode, Refused,
-    SamplePosition, SampleRequest, SampleResult, SpiMode, SwdCodegenState, TargetSenseError,
-    TargetSenseReading, VendorStatus, VergeControl, VergeInfo, VergeProbe, VergeSession,
-    VergeTransport, attach, install_cjtag_support, set_cjtag_scan_formats,
+    JtagPacingState, JtagWire, LatencyOutcome, Marked, ProBusError, RawEnergySample, RebootMode,
+    Refused, SamplePosition, SampleRequest, SampleResult, SpiMode, SwdCodegenState,
+    TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo, VergeProbe,
+    VergeSession, VergeTransport, attach, install_cjtag_support, set_cjtag_scan_formats,
 };

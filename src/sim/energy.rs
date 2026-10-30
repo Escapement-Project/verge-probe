@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
-use crate::protocol::{ENERGY_COMMAND, TARGET_POWER_COMMAND};
-use crate::stream::{Edge, Edges};
+use crate::protocol::{ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND};
+use crate::stream::{Edge, Edges, LABEL_MAX, Marker, Markers};
 
 const DAP_OK: u8 = 0x00;
 const DAP_ERROR: u8 = 0xFF;
@@ -20,6 +20,9 @@ const UNAVAILABLE: u8 = 3;
 const BAD_RATE: u8 = 4;
 const BAD_ARGUMENT: u8 = 5;
 const DMA_ERROR: u8 = 7;
+const MARK_SENT: u8 = 0;
+const MARK_NO_CAPTURE: u8 = 1;
+const MARK_NO_STREAM: u8 = 2;
 const MAX_RATE: u32 = 100_000;
 
 const SUPPLY_MILLIVOLTS: u32 = 3_300;
@@ -542,6 +545,40 @@ impl SimEnergy {
             ));
         }
         messages
+    }
+
+    /// `0x94` (`request` after the command byte): a marker stamped `now` goes into the stream, after
+    /// the pairs due by then. Its reply. The probe keeps 16 waiting; here they never wait.
+    pub fn mark(&mut self, pro: bool, now: Duration, request: &[u8]) -> Vec<u8> {
+        let [n0, n1, n2, n3, length, label @ ..] = request else {
+            return vec![crate::dap::ID_DAP_INVALID];
+        };
+        let length = usize::from(*length);
+        if label.len() < length {
+            return vec![crate::dap::ID_DAP_INVALID];
+        }
+        if !pro || length > LABEL_MAX {
+            return vec![MARK_COMMAND, DAP_ERROR];
+        }
+        let due = self.stream_messages(now);
+        self.outbox.extend(due);
+        let running = self
+            .capture
+            .filter(|capture| capture.stopped_at.is_none() && !self.fault);
+        let result = match (running, self.stream) {
+            (None, _) => MARK_NO_CAPTURE,
+            (Some(_), None) => MARK_NO_STREAM,
+            (Some(capture), Some(_)) => {
+                let marker = Marker {
+                    time_ns: now.saturating_sub(capture.since).as_nanos() as u64,
+                    number: u32::from_le_bytes([*n0, *n1, *n2, *n3]),
+                    label: label[..length].to_vec(),
+                };
+                self.outbox.push(Markers::new(0, vec![marker]).to_bytes());
+                MARK_SENT
+            }
+        };
+        vec![MARK_COMMAND, DAP_OK, result]
     }
 
     /// `0x90` mode 7: the stream stops, the capture carries on. The reply, then the end.
