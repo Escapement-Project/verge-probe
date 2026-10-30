@@ -48,6 +48,7 @@ the firmware does, checked against the vectors the firmware's own converter writ
 `pro::with_pro` runs a call on a Pro through Aux, or through CMSIS-DAP when another program holds
 Aux; `pro::open_stream` needs Aux, the only way to the stream. Both refuse a unit that is not a Pro
 running Verge, or whose firmware lacks the feature, with a `ProError` that says which.
+`record::Sink` writes pairs and DIO edges as CSV or as a sigrok session.
 
 Both frontends use the library for discovery, image loading and updates:
 
