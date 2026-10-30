@@ -50,6 +50,18 @@ Aux; `pro::open_stream` needs Aux, the only way to the stream. Both refuse a uni
 running Verge, or whose firmware lacks the feature, with a `ProError` that says which.
 `record::Sink` writes pairs and DIO edges as CSV or as a sigrok session.
 
+The `capture` feature adds disk-backed captures, in SQLite. `capture::Recorder` takes stream
+messages without waiting for the disk, and fails rather than drop one when the disk falls behind.
+A capture keeps the original messages, the converted pairs, the pairs lost, and sums at several
+scales. `capture::Archive` reads it while a recording continues: statistics for any interval, an
+envelope of at most a set number of bins for drawing one, and exports of an interval as CSV or
+sigrok, with voltage, current and GAP but no DIO.
+
+An interval includes its start and excludes its end. Each pair covers its own period, clipped at
+the next pair's time, and time without pairs adds nothing to charge or energy. The sums are whole
+numbers, so an interval's statistics do not depend on how it was split to compute them. An export
+keeps every pair whose period overlaps the interval, so its first can start before the interval.
+
 Both frontends use the library for discovery, image loading and updates:
 
 ```rust,no_run

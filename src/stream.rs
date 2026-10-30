@@ -5,6 +5,7 @@
 //! capture sums to the total the probe reports. The firmware writes vectors for it
 //! (`tools/energy_vectors.json`); `tests/stream.rs` holds this converter to a copy of them.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::probe::CalibrationPoint;
@@ -41,7 +42,7 @@ pub enum StreamError {
 }
 
 /// The first message of a stream: what converting its pairs takes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Header {
     /// Pairs a second.
@@ -62,7 +63,7 @@ pub struct Header {
 }
 
 /// One voltage and current reading, as the converter left them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pair {
     pub voltage_code: u16,
     pub current_code: u16,
@@ -70,7 +71,7 @@ pub struct Pair {
 }
 
 /// Up to 99 evenly spaced pairs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Pairs {
     pub flags: u8,
@@ -117,7 +118,7 @@ impl Pairs {
 }
 
 /// Why a stream ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndReason {
     /// A host sent `0x90` mode 7.
     Asked,
@@ -129,7 +130,7 @@ pub enum EndReason {
     Other(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct End {
     pub reason: EndReason,
     /// The last pair the capture took.
@@ -137,7 +138,7 @@ pub struct End {
 }
 
 /// One DIO edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Edge {
     /// In ns since the capture started.
     pub time_ns: u64,
@@ -147,7 +148,7 @@ pub struct Edge {
 
 /// Up to 99 DIO edges, in time order. Every edge up to a pairs message's last pair arrives before
 /// the next pairs message or the end.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Edges {
     pub flags: u8,
@@ -189,7 +190,7 @@ impl Edges {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Header(Header),
     Pairs(Pairs),
@@ -394,7 +395,7 @@ impl Total {
 }
 
 /// One pair as the total counts it: its voltage, and the current step 5 gives it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sample {
     pub sequence: u32,
     /// In ns since the capture started.

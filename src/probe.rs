@@ -311,7 +311,7 @@ pub enum CalibrationRange {
 }
 
 /// One calibration point: an ADC code and the current through the sense resistor at that code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CalibrationPoint {
     pub code: u16,
