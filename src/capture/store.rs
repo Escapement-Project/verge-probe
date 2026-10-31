@@ -127,7 +127,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=2).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=3).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -142,7 +142,20 @@ impl Archive {
         self.meta("header")
     }
     pub fn extent(&self) -> Result<Interval> {
-        self.meta("extent")
+        let mut extent: Interval = self.meta("extent")?;
+        if self.version >= 3 {
+            let first: Option<i64> = self.db.query_row("SELECT time_ns FROM markers WHERE time_ns IS NOT NULL ORDER BY time_ns,n LIMIT 1", [], |r| r.get(0)).optional()?;
+            let last: Option<i64> = self.db.query_row("SELECT time_ns FROM markers WHERE time_ns IS NOT NULL ORDER BY time_ns DESC,n DESC LIMIT 1", [], |r| r.get(0)).optional()?;
+            if let (Some(first), Some(last)) = (first, last) {
+                extent.start_ns = if extent.duration_ns() == 0 {
+                    first as u64
+                } else {
+                    extent.start_ns.min(first as u64)
+                };
+                extent.end_ns = extent.end_ns.max((last as u64).saturating_add(1));
+            }
+        }
+        Ok(extent)
     }
     fn node(&self, level: u32, index: u64) -> Result<Option<Node>> {
         let bytes: Option<Vec<u8>> = self
@@ -370,7 +383,21 @@ impl Archive {
             } else {
                 0
             };
+            if self.version >= 3
+                && self.meta::<u64>("marker_count")? + self.meta::<u64>("marker_losses")? > 0
+            {
+                sink.include_markers()?;
+            }
             sink.begin_with_dio_gaps(header.rate, pins, header.dio_levels)?;
+            let extent = self.extent()?;
+            self.export_markers(
+                &mut sink,
+                Interval::new(
+                    interval.start_ns.max(extent.start_ns),
+                    interval.end_ns.min(extent.end_ns),
+                ),
+                cancel,
+            )?;
             if pins == 0 {
                 self.overlapping(interval, cancel, |block| {
                     let samples: Vec<_> = block.into_iter().map(|s| s.sample).collect();
@@ -379,7 +406,8 @@ impl Archive {
             } else {
                 self.export_digital(&mut sink, interval, cancel)?;
             }
-            sink.finish()?;
+            sink.finish_with_cancel(cancel)?;
+            cancelled(cancel)?;
             persist(temp, path)
         })();
         self.db.execute_batch("ROLLBACK")?;
@@ -404,6 +432,7 @@ pub struct CaptureWriter {
     ended: bool,
     message_n: u64,
     digital: super::digital::DigitalWriter,
+    markers: super::markers::MarkerWriter,
 }
 
 impl CaptureWriter {
@@ -415,13 +444,15 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=2;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=3;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
             CREATE INDEX blocks_time ON blocks(start_ns,end_ns);
             CREATE TABLE nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;
             CREATE TABLE messages(n INTEGER PRIMARY KEY,data BLOB NOT NULL);
+            CREATE TABLE markers(n INTEGER PRIMARY KEY,time_ns INTEGER,data BLOB NOT NULL);
+            CREATE INDEX markers_time ON markers(time_ns,n);
             CREATE TABLE dio_blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
             CREATE INDEX dio_time ON dio_blocks(end_ns,start_ns);
             CREATE TABLE dio_nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;"))?;
@@ -440,8 +471,10 @@ impl CaptureWriter {
             ended: false,
             message_n: 0,
             digital: super::digital::DigitalWriter::default(),
+            markers: super::markers::MarkerWriter::default(),
         };
         writer.digital.flush(&writer.db, 0)?;
+        writer.markers.flush(&writer.db)?;
         writer.metadata()?;
         Ok(writer)
     }
@@ -517,9 +550,8 @@ impl CaptureWriter {
                     self.digital.lost();
                 }
             }
-            // Kept with the original messages; nothing indexes them by time yet.
             Message::Markers(_) if self.header.is_none() => return Ok(false),
-            Message::Markers(_) => {}
+            Message::Markers(markers) => self.markers.ingest(markers),
         }
         self.messages.push(message);
         if self.samples.len() >= BLOCK || self.messages.len() >= 128 || self.ended {
@@ -569,6 +601,7 @@ impl CaptureWriter {
                     self.samples.clear();
                 }
                 self.digital.committed();
+                self.markers.committed();
                 Ok(())
             }
             Err(error) => {
@@ -578,6 +611,7 @@ impl CaptureWriter {
         }
     }
     fn flush_inner(&mut self) -> Result<()> {
+        self.markers.flush(&self.db)?;
         self.digital
             .flush(&self.db, self.header.as_ref().map_or(0, |h| h.dio_mask))?;
         for (offset, message) in self.messages.iter().enumerate() {
@@ -770,6 +804,177 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn markers_are_indexed_paged_and_exported_at_their_own_times() {
+        use crate::stream::{Marker, Markers};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("markers.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        writer.append((0..10).map(sample)).unwrap();
+        writer.flush().unwrap();
+        let markers: Vec<_> = (0..1100)
+            .map(|number| Marker {
+                time_ns: 2_000_000,
+                number,
+                label: format!("step,{number}").into_bytes(),
+            })
+            .collect();
+        for chunk in markers.chunks(11) {
+            writer
+                .ingest(Message::Markers(Markers::new(
+                    if chunk[0].number == 0 {
+                        Markers::LOST
+                    } else {
+                        0
+                    },
+                    chunk.to_vec(),
+                )))
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let interval = Interval::new(2_000_000, 3_000_000);
+        let mut after = None;
+        let mut numbers = Vec::new();
+        loop {
+            let page = archive
+                .markers(interval, after, usize::MAX, &cancel)
+                .unwrap();
+            assert!(page.entries.len() <= 512);
+            assert_eq!((page.total, page.loss_events), (1100, 1));
+            numbers.extend(page.entries.iter().map(|m| m.marker.number));
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(numbers, (0..1100).collect::<Vec<_>>());
+        assert!(
+            archive
+                .markers(Interval::new(0, 2_000_000), None, 10, &cancel)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert!(
+            archive
+                .markers(interval, None, 10, &AtomicBool::new(true))
+                .is_err()
+        );
+        let out = dir.path().join("selected.csv");
+        archive.export(&out, true, interval, &cancel).unwrap();
+        let mut csv = csv::Reader::from_path(&out).unwrap();
+        let fields = csv.headers().unwrap().clone();
+        let number = fields.iter().position(|f| f == "marker_number").unwrap();
+        let rows: Vec<_> = csv.records().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.iter().filter(|r| !r[number].is_empty()).count(), 1100);
+        assert!(
+            rows.windows(2).all(
+                |rows| rows[0][1].parse::<u64>().unwrap() <= rows[1][1].parse::<u64>().unwrap()
+            )
+        );
+        assert_eq!(&rows[0][number + 1], "step,0");
+        let saved = dir.path().join("saved.vergecapture");
+        archive.save(&saved).unwrap();
+        assert_eq!(
+            Archive::open(&saved)
+                .unwrap()
+                .markers(interval, None, 1, &cancel)
+                .unwrap()
+                .total,
+            1100
+        );
+        drop(archive);
+        writer.finish().unwrap();
+        let db = Connection::open(&saved).unwrap();
+        db.execute_batch("PRAGMA user_version=2; DROP TABLE markers;")
+            .unwrap();
+        drop(db);
+        assert_eq!(
+            Archive::open(&saved)
+                .unwrap()
+                .markers(interval, None, 10, &cancel)
+                .unwrap()
+                .total,
+            0
+        );
+    }
+
+    #[test]
+    fn marker_extent_includes_before_after_and_marker_only_captures() {
+        use crate::stream::{Marker, Markers};
+        let dir = tempfile::tempdir().unwrap();
+        for analog in [true, false] {
+            let path = dir.path().join(format!("extent-{analog}.vergecapture"));
+            let mut writer = raw_writer(&path, 1000);
+            if analog {
+                writer.append([sample(3)]).unwrap();
+            }
+            writer
+                .ingest(Message::Markers(Markers::new(
+                    0,
+                    vec![
+                        Marker {
+                            time_ns: 2_000_000,
+                            number: 1,
+                            label: b"before".to_vec(),
+                        },
+                        Marker {
+                            time_ns: 8_000_000,
+                            number: 2,
+                            label: b"after".to_vec(),
+                        },
+                    ],
+                )))
+                .unwrap();
+            writer.finish().unwrap();
+            let archive = Archive::open(&path).unwrap();
+            let extent = archive.extent().unwrap();
+            assert_eq!(extent, Interval::new(2_000_000, 8_000_001));
+            let out = dir.path().join(format!("extent-{analog}.csv"));
+            archive
+                .export(&out, true, extent, &AtomicBool::new(false))
+                .unwrap();
+            let text = fs::read_to_string(out).unwrap();
+            assert!(text.contains("before") && text.contains("after"), "{text}");
+        }
+    }
+
+    #[test]
+    fn marker_flush_rolls_back_and_retries_with_analog() {
+        use crate::stream::{Marker, Markers};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retry-markers.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        writer.append((0..8).map(sample)).unwrap();
+        writer
+            .ingest(Message::Markers(Markers::new(
+                Markers::LOST,
+                vec![Marker {
+                    time_ns: 2_000_000,
+                    number: 5,
+                    label: vec![0xff],
+                }],
+            )))
+            .unwrap();
+        writer.db.execute_batch("CREATE TRIGGER fail_blocks BEFORE INSERT ON blocks BEGIN SELECT RAISE(FAIL, 'injected write failure'); END;").unwrap();
+        assert!(writer.flush().is_err());
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let interval = Interval::new(0, 8_000_000);
+        assert_eq!(
+            archive.markers(interval, None, 10, &cancel).unwrap().total,
+            0
+        );
+        writer.db.execute_batch("DROP TRIGGER fail_blocks").unwrap();
+        writer.finish().unwrap();
+        let page = archive.markers(interval, None, 10, &cancel).unwrap();
+        assert_eq!((page.total, page.loss_events), (1, 1));
+        assert_eq!(page.entries[0].marker.label, [0xff]);
+        assert!(page.entries[0].lost_before);
+    }
+
     #[test]
     fn review_the_edge_before_a_loss_keeps_its_level() {
         use crate::stream::{Edge, Edges};

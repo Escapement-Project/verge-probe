@@ -1,10 +1,13 @@
 //! CSV and sigrok session writers shared by frontends.
 
-use crate::stream::{Edge, Sample};
+mod markers;
+use crate::stream::{Edge, Markers, Sample};
+pub use markers::label as marker_label;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use zip::ZipWriter;
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
@@ -22,6 +25,12 @@ pub enum RecordError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Zip(#[from] ZipError),
+    #[error(transparent)]
+    Csv(#[from] csv::Error),
+    #[error("marker times went back")]
+    MarkerTime,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 type Result<T> = std::result::Result<T, RecordError>;
@@ -94,15 +103,22 @@ pub enum Sink {
 
 impl Sink {
     pub fn create(path: &Path, csv: bool) -> Result<Sink> {
-        let file = File::create(path).map_err(|source| RecordError::Create {
-            path: path.to_owned(),
-            source,
-        })?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|source| RecordError::Create {
+                path: path.to_owned(),
+                source,
+            })?;
         Self::from_file(file, csv)
     }
 
     pub fn create_new(path: &Path, csv: bool) -> Result<Sink> {
         let file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(path)
@@ -119,10 +135,46 @@ impl Sink {
             Sink::Csv(Box::new(Csv {
                 file,
                 dio: Dio::default(),
+                markers: None,
             }))
         } else {
             Sink::Sigrok(Box::new(Sigrok::new(file)?))
         })
+    }
+
+    /// Adds marker columns in CSV and an embedded markers.csv in sigrok sessions.
+    /// Call before begin. CSV files must be readable and seekable for the final merge.
+    pub fn include_markers(&mut self) -> Result<()> {
+        match self {
+            Self::Csv(csv) if csv.markers.is_none() => {
+                let position = csv.file.stream_position()?;
+                let _ = csv.file.get_mut().read(&mut [0])?;
+                csv.file.seek(std::io::SeekFrom::Start(position))?;
+                csv.markers = Some(markers::CsvMarkers {
+                    spool: markers::Spool::new()?,
+                });
+            }
+            Self::Sigrok(sigrok) if sigrok.markers.is_none() => {
+                sigrok.markers = Some(markers::Spool::new()?);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    pub fn markers(&mut self, message: &Markers) -> Result<()> {
+        match self {
+            Self::Csv(csv) => {
+                if let Some(markers) = &mut csv.markers {
+                    markers.spool.append(message)?;
+                }
+            }
+            Self::Sigrok(sigrok) => {
+                if let Some(markers) = &mut sigrok.markers {
+                    markers.append(message)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The stream began at `rate` pairs a second, reporting the edges of `pins`, at `levels`.
@@ -149,7 +201,9 @@ impl Sink {
                 if pins != 0 && gaps {
                     columns.push_str(",dio_gap");
                 }
-                writeln!(csv.file, "sequence,time_ns,millivolts,nanoamps{columns}")?;
+                csv.row(format_args!(
+                    "sequence,time_ns,millivolts,nanoamps{columns}"
+                ))?;
                 csv.dio = dio;
             }
             Sink::Sigrok(sigrok) => {
@@ -229,12 +283,24 @@ impl Sink {
     }
 
     pub fn finish(self) -> Result<()> {
+        self.finish_with_cancel(&AtomicBool::new(false))
+    }
+
+    pub fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<()> {
+        check_cancel(cancel)?;
         match self {
-            Sink::Csv(csv) => csv.finish()?,
-            Sink::Sigrok(sigrok) => sigrok.finish()?,
+            Sink::Csv(csv) => csv.finish(cancel)?,
+            Sink::Sigrok(sigrok) => sigrok.finish(cancel)?,
         }
         Ok(())
     }
+}
+
+fn check_cancel(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(RecordError::Cancelled);
+    }
+    Ok(())
 }
 
 /// One line per pair, and one per edge between them, in time order: an edge's line has no
@@ -242,9 +308,14 @@ impl Sink {
 pub struct Csv {
     file: BufWriter<File>,
     dio: Dio,
+    markers: Option<markers::CsvMarkers>,
 }
 
 impl Csv {
+    fn row(&mut self, row: std::fmt::Arguments<'_>) -> Result<()> {
+        writeln!(self.file, "{row}")?;
+        Ok(())
+    }
     fn fields(&self) -> String {
         if self.dio.pins == 0 {
             return String::new();
@@ -264,7 +335,7 @@ impl Csv {
             self.dio.levels = levels;
         }
         let fields = self.fields();
-        writeln!(self.file, ",{},,{fields}", edge.time_ns)?;
+        self.row(format_args!(",{},,{fields}", edge.time_ns))?;
         Ok(())
     }
 
@@ -277,19 +348,22 @@ impl Csv {
     fn sample(&mut self, sample: &Sample) -> Result<()> {
         self.before(sample.time_ns)?;
         let fields = self.fields();
-        writeln!(
-            self.file,
+        self.row(format_args!(
             "{},{},{},{}{fields}",
             sample.sequence, sample.time_ns, sample.millivolts, sample.nanoamps
-        )?;
+        ))?;
         Ok(())
     }
 
-    fn finish(mut self) -> Result<()> {
+    fn finish(mut self, cancel: &AtomicBool) -> Result<()> {
         while let Some(edge) = self.dio.edges.pop_front() {
             self.edge(edge)?;
         }
-        self.file.flush()?;
+        if let Some(markers) = self.markers {
+            markers.finish(self.file, &|| check_cancel(cancel))?;
+        } else {
+            self.file.flush()?;
+        }
         Ok(())
     }
 }
@@ -308,6 +382,8 @@ pub struct Sigrok {
     logic: Vec<u8>,
     chunks: u32,
     advanced: u64,
+    markers: Option<markers::Spool>,
+    origin: Option<u64>,
 }
 
 /// Samples a chunk file holds: 4 MiB of each analog channel.
@@ -329,11 +405,14 @@ impl Sigrok {
             logic: Vec::new(),
             chunks: 0,
             advanced: 0,
+            markers: None,
+            origin: None,
         })
     }
 
     /// `sample` at `time_ns`: itself, or the last pair repeated across a gap.
     fn put(&mut self, sample: &Sample, gap: bool, time_ns: u64) -> Result<()> {
+        self.origin.get_or_insert(time_ns);
         self.volts.push(sample.millivolts as f32 / 1e3);
         self.milliamps.push(sample.nanoamps as f32 / 1e6);
         // GAP is bit 0, then the pins in order.
@@ -408,7 +487,7 @@ impl Sigrok {
         1 + self.dio.names().count() + usize::from(self.dio.pins != 0 && self.dio.gaps)
     }
 
-    fn finish(mut self) -> Result<()> {
+    fn finish(mut self, cancel: &AtomicBool) -> Result<()> {
         self.flush()?;
         // libsigrok reads the keys in order: the totals make the channels the names then rename.
         let logic = self.logic_channels();
@@ -427,6 +506,34 @@ impl Sigrok {
             metadata.push_str(&format!("analog{index}={name}\n"));
         }
         metadata.push_str("unitsize=1\n");
+        if let Some(markers) = self.markers.take() {
+            let origin = self.origin.or(markers.first).unwrap_or(0);
+            metadata.push_str(&format!("verge capture origin ns={origin}\n"));
+            self.zip.start_file("markers.csv", options())?;
+            let mut output = csv::Writer::from_writer(&mut self.zip);
+            output.write_record([
+                "time_ns",
+                "marker_number",
+                "marker_label",
+                "marker_lost",
+                "session_time_ns",
+            ])?;
+            for row in markers.reader()?.records() {
+                check_cancel(cancel)?;
+                let mut row = row?;
+                let relative = if row[0].is_empty() {
+                    String::new()
+                } else {
+                    (i128::from(row[0].parse::<u64>().map_err(|_| RecordError::MarkerTime)?)
+                        - i128::from(origin))
+                    .to_string()
+                };
+                row.push_field(&relative);
+                output.write_record(&row)?;
+            }
+            output.flush()?;
+        }
+        check_cancel(cancel)?;
         self.zip.start_file("metadata", options())?;
         self.zip.write_all(metadata.as_bytes())?;
         self.zip.finish()?.flush()?;

@@ -6,6 +6,7 @@ version = "0.1.0"
 description = "Host library for MCU-Link probes running Verge firmware"
 
 [dependencies]
+csv = "1.4.0"
 dirs = "7.0.0"
 hex = "0.4.3"
 hidapi = "2.6.7"

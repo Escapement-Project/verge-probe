@@ -2,7 +2,9 @@
 //! Gaps never contribute to charge, energy or time-weighted means.
 
 mod digital;
+mod markers;
 pub use digital::{DigitalBin, DigitalSpan, DigitalView};
+pub use markers::{MarkerCursor, MarkerPage, StoredMarker};
 mod recorder;
 mod store;
 pub use recorder::Recorder;
