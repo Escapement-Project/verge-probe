@@ -35,6 +35,7 @@ pub(crate) const CAP_CALIBRATED_ENERGY: u32 = 1 << 5;
 pub(crate) const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
 pub(crate) const CAP_DIO_AUX: u32 = 1 << 6;
 pub(crate) const CAP_MARKS: u32 = 1 << 7;
+pub(crate) const CAP_CAPTURE_ID: u32 = 1 << 8;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;
 pub(crate) const SPI_SOURCE_HZ: u32 = 96_000_000;
@@ -144,6 +145,10 @@ impl VergeInfo {
     /// Whether the firmware takes markers for the energy stream (`0x94`).
     pub fn supports_markers(&self) -> bool {
         self.extended_capabilities & CAP_MARKS != 0
+    }
+
+    pub fn supports_capture_identity(&self) -> bool {
+        self.extended_capabilities & CAP_CAPTURE_ID != 0
     }
 
     /// Whether the firmware can switch the target supply.
@@ -258,6 +263,7 @@ impl VergeInfo {
                 (CAP_I2C, "I2C bridge"),
                 (CAP_DIO_AUX, "DIO on Aux"),
                 (CAP_MARKS, "markers"),
+                (CAP_CAPTURE_ID, "capture identity"),
             ]
             .into_iter()
             .filter(|(bit, _)| self.extended_capabilities & bit != 0)

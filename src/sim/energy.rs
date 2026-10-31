@@ -41,6 +41,9 @@ const CALIBRATION: [&[(u16, u32)]; 2] = [
 
 #[derive(Clone, Debug, Default)]
 pub struct SimEnergy {
+    pub capture_id: Option<crate::CaptureId>,
+    counter: u64,
+    boot: u64,
     pub supply_on: bool,
     /// The capture since the last start, `None` before the first.
     pub capture: Option<Capture>,
@@ -145,17 +148,14 @@ impl SimEnergy {
 
     /// Supply on and a capture running since `now` at `rate`.
     pub fn running(now: Duration, rate: u32) -> Self {
-        Self {
+        let mut state = Self {
             supply_on: true,
-            capture: Some(Capture::new(now, rate)),
-            fault: false,
-            lose_next_edges: false,
-            dio_outputs: 0,
-            dio_levels: 0,
-            dio_held: 0,
-            stream: None,
-            outbox: Vec::new(),
-        }
+            ..Self::default()
+        };
+        let mut request = vec![0];
+        request.extend_from_slice(&rate.to_le_bytes());
+        state.energy(true, now, &request);
+        state
     }
 
     /// An acquisition fault at `now`, as a DMA error or an ADC overrun mid-capture leaves.
@@ -219,6 +219,62 @@ impl SimEnergy {
     }
 
     pub fn energy(&mut self, pro: bool, now: Duration, request: &[u8]) -> Vec<u8> {
+        match request {
+            [8, rate @ ..] if rate.len() == 4 => {
+                let mut legacy = vec![0];
+                legacy.extend_from_slice(rate);
+                let mut reply = self.energy(pro, now, &legacy);
+                reply.extend_from_slice(if reply[2] == OK {
+                    self.capture_id.as_ref().unwrap().as_bytes()
+                } else {
+                    &[0; 24]
+                });
+                return reply;
+            }
+            [11, bytes @ ..] if bytes.len() == 24 => {
+                if !pro {
+                    return vec![ENERGY_COMMAND, DAP_OK, UNAVAILABLE];
+                }
+                if self.capture_id.as_ref().map(|id| id.as_bytes().as_slice()) != Some(bytes) {
+                    return vec![ENERGY_COMMAND, DAP_OK, 8];
+                }
+                return self.energy(pro, now, &[2]);
+            }
+            [12] => {
+                let running = pro
+                    && !self.fault
+                    && self
+                        .capture
+                        .is_some_and(|capture| capture.stopped_at.is_none());
+                let result = if !pro {
+                    UNAVAILABLE
+                } else if self.fault {
+                    DMA_ERROR
+                } else if running {
+                    OK
+                } else {
+                    STOPPED
+                };
+                let mut reply = vec![ENERGY_COMMAND, DAP_OK, result, u8::from(running)];
+                reply.extend_from_slice(
+                    &if running {
+                        self.capture.unwrap().rate
+                    } else {
+                        0
+                    }
+                    .to_le_bytes(),
+                );
+                reply.extend_from_slice(if pro {
+                    self.capture_id
+                        .as_ref()
+                        .map_or(&[0; 24][..], |id| id.as_bytes().as_slice())
+                } else {
+                    &[0; 24]
+                });
+                return reply;
+            }
+            _ => {}
+        }
         let mut reply = vec![ENERGY_COMMAND, DAP_OK];
         match request {
             [0, rate @ ..] if rate.len() == 4 => {
@@ -227,12 +283,24 @@ impl SimEnergy {
                     UNAVAILABLE
                 } else if rate == 0 || rate > MAX_RATE {
                     BAD_RATE
+                } else if self.counter == u64::MAX {
+                    9
                 } else {
                     // The probe streams the replaced capture's last pairs before the end that
                     // says it restarted.
                     let tail = self.stream_messages(now);
                     self.outbox.extend(tail);
                     self.capture = Some(Capture::new(now, rate));
+                    if self.boot == 0 {
+                        static BOOT: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(1);
+                        self.boot = BOOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    self.counter += 1;
+                    let mut bytes = [0; 24];
+                    bytes[..8].copy_from_slice(&self.boot.to_le_bytes());
+                    bytes[16..].copy_from_slice(&self.counter.to_le_bytes());
+                    self.capture_id = crate::CaptureId::from_bytes(bytes);
                     self.fault = false;
                     OK
                 };
@@ -547,6 +615,65 @@ impl SimEnergy {
         messages
     }
 
+    pub fn identified_stream(
+        &mut self,
+        pro: bool,
+        now: Duration,
+        rate: Option<[u8; 4]>,
+        pins: u8,
+    ) -> Vec<Vec<u8>> {
+        let messages = match rate {
+            Some(rate) => self.start_stream(pro, now, rate, pins),
+            None => self.stream_running(pro, now, pins),
+        };
+        let Some(mut reply) = messages
+            .iter()
+            .find(|message| message.first() == Some(&ENERGY_COMMAND))
+            .cloned()
+        else {
+            return messages;
+        };
+        if reply.get(2) != Some(&OK) {
+            if rate.is_some() {
+                reply.extend_from_slice(&[0; 24]);
+                return vec![reply];
+            }
+            return messages;
+        }
+        let id = self
+            .capture_id
+            .expect("successful start/attach has an identity");
+        if rate.is_some() {
+            reply.extend_from_slice(id.as_bytes());
+        }
+        let mut header = messages
+            .into_iter()
+            .rev()
+            .find(|message| message.first() == Some(&0xa1))
+            .expect("successful stream has a header");
+        header[1] = 2;
+        header.extend_from_slice(id.as_bytes());
+        vec![reply, header]
+    }
+
+    pub fn stop_stream_identified(
+        &mut self,
+        pro: bool,
+        now: Duration,
+        bytes: &[u8],
+    ) -> Vec<Vec<u8>> {
+        if !pro {
+            return vec![vec![ENERGY_COMMAND, DAP_OK, UNAVAILABLE]];
+        }
+        if bytes.len() != 24 {
+            return vec![vec![crate::dap::ID_DAP_INVALID]];
+        }
+        if self.capture_id.as_ref().map(|id| id.as_bytes().as_slice()) != Some(bytes) {
+            return vec![vec![ENERGY_COMMAND, DAP_OK, 8]];
+        }
+        self.stop_stream(pro, now)
+    }
+
     /// `0x94` (`request` after the command byte): a marker stamped `now` goes into the stream, after
     /// the pairs due by then. Its reply. The probe keeps 16 waiting; here they never wait.
     pub fn mark(&mut self, pro: bool, now: Duration, request: &[u8]) -> Vec<u8> {
@@ -593,5 +720,25 @@ impl SimEnergy {
             messages.push(Self::end(ASKED, stream.next));
         }
         messages
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn counter_exhaustion_refuses_start_without_disturbing_the_capture() {
+        let mut energy = SimEnergy::running(Duration::ZERO, 1000);
+        let token = energy.capture_id.unwrap();
+        energy.counter = u64::MAX;
+        let reply = energy.energy(true, Duration::from_secs(1), &[8, 0xe8, 3, 0, 0]);
+        assert_eq!(&reply[..3], &[0x90, 0, 9]);
+        assert!(reply[3..].iter().all(|&byte| byte == 0));
+        assert_eq!(energy.capture_id, Some(token));
+        assert!(energy.capture.unwrap().stopped_at.is_none());
+        let status = energy.energy(true, Duration::from_secs(1), &[12]);
+        assert_eq!(&status[..4], &[0x90, 0, 0, 1]);
+        assert_eq!(&status[8..], token.as_bytes());
     }
 }

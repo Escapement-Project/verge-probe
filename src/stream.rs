@@ -39,6 +39,8 @@ pub fn is_stream_message(bytes: &[u8]) -> bool {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StreamError {
+    #[error("the stream header has no valid capture identity")]
+    Identity,
     #[error("a stream message of {0} bytes is too short for its kind")]
     Short(usize),
     #[error("0x{0:02x} starts no stream message")]
@@ -51,6 +53,8 @@ pub enum StreamError {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Header {
+    #[serde(skip)]
+    pub capture_id: Option<crate::CaptureId>,
     /// Pairs a second.
     pub rate: u32,
     /// The current range jumper: 350 or 50 mA, `None` when the probe could not read it.
@@ -280,10 +284,20 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
             if bytes.len() < HEADER_BYTES {
                 return Err(short());
             }
-            if bytes[1] != 1 {
+            if !matches!(bytes[1], 1 | 2) {
                 return Err(StreamError::Format(bytes[1]));
             }
+            let capture_id = if bytes[1] == 2 {
+                let bytes = bytes.get(68..92).ok_or_else(short)?;
+                Some(
+                    crate::CaptureId::from_bytes(bytes.try_into().expect("24 bytes"))
+                        .ok_or(StreamError::Identity)?,
+                )
+            } else {
+                None
+            };
             Ok(Message::Header(Header {
+                capture_id,
                 rate: u32_at(bytes, 2),
                 setting_ma: match bytes[6] {
                     1 => Some(350),

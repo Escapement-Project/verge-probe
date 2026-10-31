@@ -139,7 +139,17 @@ impl Archive {
         decode(&bytes)
     }
     pub fn header(&self) -> Result<Header> {
-        self.meta("header")
+        let mut header: Header = self.meta("header")?;
+        let id: Option<Vec<u8>> = self
+            .db
+            .query_row(
+                "SELECT value FROM metadata WHERE key='capture_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        header.capture_id = id.map(|bytes| decode(&bytes)).transpose()?;
+        Ok(header)
     }
     pub fn extent(&self) -> Result<Interval> {
         let mut extent: Interval = self.meta("extent")?;
@@ -501,6 +511,9 @@ impl CaptureWriter {
                     CaptureError::Rate(header.rate),
                 )?;
                 self.set("header", header)?;
+                if let Some(id) = header.capture_id {
+                    self.set("capture_id", &id)?;
+                }
                 self.period = 1_000_000_000u64.div_ceil(u64::from(header.rate));
                 self.header = Some(header.clone());
                 self.converter = Some(Converter::new(header));
@@ -764,8 +777,73 @@ mod tests {
     };
     use std::sync::atomic::AtomicBool;
 
+    #[test]
+    fn pre_identity_headers_and_archive_decode_without_layout_changes() {
+        let bytes = include_bytes!("../../tests/fixtures/identity/header-f45a4ed.postcard");
+        let message_bytes =
+            include_bytes!("../../tests/fixtures/identity/message-header-f45a4ed.postcard");
+        let mut h: Header = decode(bytes).unwrap();
+        assert_eq!((h.rate, h.first_sequence, h.dio_mask), (1000, 1, 8));
+        assert!(h.capture_id.is_none());
+        assert_eq!(
+            decode::<Message>(message_bytes).unwrap(),
+            Message::Header(h.clone())
+        );
+        let mut token = [0; 24];
+        token[16] = 1;
+        h.capture_id = crate::CaptureId::from_bytes(token);
+        assert_eq!(encode(&h).unwrap(), bytes);
+        assert_eq!(encode(&Message::Header(h)).unwrap(), message_bytes);
+        let archive = Archive::open(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/identity/capture-f45a4ed.vergecapture"),
+        )
+        .unwrap();
+        assert!(archive.header().unwrap().capture_id.is_none());
+        let raw: Vec<u8> = archive
+            .db
+            .query_row("SELECT data FROM messages WHERE n=0", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(&raw, message_bytes);
+        assert!(matches!(
+            decode::<Message>(&raw).unwrap(),
+            Message::Header(_)
+        ));
+        assert_eq!(
+            archive
+                .statistics(archive.extent().unwrap(), &AtomicBool::new(false))
+                .unwrap()
+                .samples,
+            3
+        );
+    }
+
+    #[test]
+    fn archive_identity_is_separate_from_message_header_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identified.vergecapture");
+        let mut h = header(1000);
+        let mut token = [0; 24];
+        token[16] = 9;
+        h.capture_id = crate::CaptureId::from_bytes(token);
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer.ingest(Message::Header(h.clone())).unwrap();
+        writer.finish().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        assert_eq!(archive.header().unwrap(), h);
+        let bytes: Vec<u8> = archive
+            .db
+            .query_row("SELECT data FROM messages WHERE n=0", [], |row| row.get(0))
+            .unwrap();
+        let Message::Header(stored) = decode::<Message>(&bytes).unwrap() else {
+            panic!("header")
+        };
+        assert!(stored.capture_id.is_none());
+    }
+
     fn header(rate: u32) -> Header {
         Header {
+            capture_id: None,
             rate,
             setting_ma: Some(350),
             full_scale_mv: 3300,

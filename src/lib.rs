@@ -10,6 +10,8 @@ pub mod batch;
 pub mod board;
 pub mod bus;
 pub mod cache;
+mod capture_id;
+pub use capture_id::CaptureId;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod dap;
@@ -47,10 +49,11 @@ mod probe;
 pub use probe::{
     AttachError, BoardKind, CalibratedEnergySample, CalibrationPoint, CalibrationRange,
     CodeLabArena, CodegenMeasurement, CodegenMode, CommandError, DapTransport, DioState,
-    EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart, EnergyError,
-    EnergyMonitorError, EnergySample, EnergyTotal, JtagCodegenState, JtagGenerationLogEntry,
-    JtagPacingState, JtagWire, LatencyOutcome, Marked, ProBusError, RawEnergySample, RebootMode,
-    Refused, SamplePosition, SampleRequest, SampleResult, SpiMode, SwdCodegenState,
-    TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo, VergeProbe,
-    VergeSession, VergeTransport, attach, install_cjtag_support, set_cjtag_scan_formats,
+    EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart,
+    EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergySample, EnergyTotal,
+    JtagCodegenState, JtagGenerationLogEntry, JtagPacingState, JtagWire, LatencyOutcome, Marked,
+    ProBusError, RawEnergySample, RebootMode, Refused, SamplePosition, SampleRequest, SampleResult,
+    SpiMode, SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl,
+    VergeInfo, VergeProbe, VergeSession, VergeTransport, attach, install_cjtag_support,
+    set_cjtag_scan_formats,
 };

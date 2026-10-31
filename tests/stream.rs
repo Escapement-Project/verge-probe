@@ -227,7 +227,16 @@ fn messages_parse_as_the_probe_lays_them_out() {
     );
     let mut header = header_bytes(1000, 3000, &[(1, 2), (3, 4)], &[(5, 6), (7, 8)]);
     header[1] = 2;
-    assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(2)));
+    assert_eq!(stream::parse(&header), Err(stream::StreamError::Short(68)));
+    header.extend_from_slice(&[0; 24]);
+    assert_eq!(stream::parse(&header), Err(stream::StreamError::Identity));
+    header[84] = 1;
+    let Message::Header(parsed) = stream::parse(&header).unwrap() else {
+        panic!("header")
+    };
+    assert_eq!(parsed.capture_id.unwrap().as_bytes(), &header[68..]);
+    header[1] = 3;
+    assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(3)));
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
 
     let mut edges = vec![stream::EDGES, 1];

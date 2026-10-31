@@ -120,6 +120,12 @@ impl<L: AuxLink> Aux<L> {
             if stream::is_stream_message(&data) {
                 self.keep(data);
             } else {
+                if request.first() == Some(&0x90)
+                    && matches!(request.get(1), Some(9 | 10))
+                    && data.get(..3) == Some(&[0x90, 0, 0])
+                {
+                    self.messages.clear();
+                }
                 return Ok(data);
             }
         }

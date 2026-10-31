@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::protocol::{
-    self, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN,
-    CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND,
-    CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND,
-    I2C_MAX_CLOCK_HZ, I2C_MAX_READ, I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND, J8_COMMAND,
-    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, MARK_COMMAND, REBOOT_COMMAND,
-    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER,
-    SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND,
-    TARGET_SENSE_COMMAND,
+    self, CAP_CAPTURE_ID, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C,
+    CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE,
+    CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
+    I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MAX_READ, I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND,
+    J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, MARK_COMMAND,
+    REBOOT_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
+    SPI_MAX_TRANSFER, SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE,
+    TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
@@ -112,6 +112,10 @@ impl TargetSenseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum EnergyError {
+    #[error("the capture identity no longer matches; the current capture was left unchanged")]
+    StaleCapture,
+    #[error("the probe could not establish a capture identity")]
+    IdentityUnavailable,
     /// Capture has not started or is stopped.
     #[error("capture is stopped")]
     Stopped,
@@ -149,6 +153,8 @@ impl EnergyError {
             5 => Self::BadArgument,
             6 => Self::AdcError,
             7 => Self::DmaError,
+            8 => Self::StaleCapture,
+            9 => Self::IdentityUnavailable,
             other => Self::Unknown(other),
         })
     }
@@ -270,6 +276,16 @@ pub struct CalibratedEnergySample {
 pub struct EnergyCaptureStart {
     /// Effective voltage/current pairs per second.
     pub actual_rate_pairs_per_second: u32,
+    pub capture_id: Option<crate::CaptureId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnergyCaptureStatus {
+    pub running: bool,
+    pub actual_rate_pairs_per_second: u32,
+    pub capture_id: Option<crate::CaptureId>,
+    pub result: Option<EnergyError>,
 }
 
 /// One complete voltage/current pair with optional calibration.
@@ -754,6 +770,8 @@ impl InfoCache {
 pub struct VergeControl<'a, T: VergeTransport + ?Sized> {
     transport: &'a mut T,
     info: InfoCache,
+    capture_id: Option<crate::CaptureId>,
+    awaiting_header: bool,
 }
 
 /// Verge commands sent through an opened probe, before attaching to its target.
@@ -768,6 +786,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         Self {
             transport,
             info: InfoCache::Unread,
+            capture_id: None,
+            awaiting_header: false,
         }
     }
 
@@ -921,13 +941,181 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
     }
 
+    pub fn start_energy_capture_identified(
+        &mut self,
+        rate: u32,
+    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
+        self.start_identified(rate, None)
+    }
+
+    pub fn start_energy_stream_identified(
+        &mut self,
+        rate: u32,
+        dio_mask: u8,
+    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
+        self.start_identified(rate, Some(dio_mask))
+    }
+
+    fn start_identified(
+        &mut self,
+        rate: u32,
+        dio_mask: Option<u8>,
+    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
+        self.require_capability(
+            CAP_CAPTURE_ID,
+            "conditional capture stop; update the firmware first",
+        )?;
+        self.capture_id = None;
+        self.awaiting_header = false;
+        let mut request = vec![if dio_mask.is_some() { 9 } else { 8 }];
+        request.extend_from_slice(&rate.to_le_bytes());
+        if let Some(mask) = dio_mask {
+            request.push(mask);
+        }
+        let reply = self.send(ENERGY_COMMAND, &request)?;
+        let mut start = parse_energy_capture_start(&reply)?;
+        start.capture_id = Some(parse_capture_id(
+            reply
+                .get(6..30)
+                .ok_or_else(|| malformed("capture identity is missing"))?,
+        )?);
+        self.capture_id = start.capture_id;
+        self.awaiting_header = dio_mask.is_some();
+        Ok(start)
+    }
+
+    pub fn stream_energy_capture_identified(
+        &mut self,
+        dio_mask: u8,
+    ) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(
+            CAP_CAPTURE_ID,
+            "conditional capture stop; update the firmware first",
+        )?;
+        self.capture_id = None;
+        self.awaiting_header = false;
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[10, dio_mask])?)?;
+        self.awaiting_header = true;
+        Ok(())
+    }
+
+    pub fn accept_energy_header(
+        &mut self,
+        header: &crate::stream::Header,
+    ) -> Result<(), CommandError<EnergyError>> {
+        if !self.awaiting_header {
+            return Err(CommandError::InvalidRequest(
+                "no acknowledged stream is awaiting a header",
+            ));
+        }
+        let id = header
+            .capture_id
+            .ok_or_else(|| malformed("the identified stream has no capture identity"))?;
+        if self.capture_id.is_some_and(|expected| expected != id) {
+            return Err(malformed("the stream header names a different capture").into());
+        }
+        self.capture_id = Some(id);
+        self.awaiting_header = false;
+        Ok(())
+    }
+
+    pub fn awaiting_energy_header(&self) -> bool {
+        self.awaiting_header
+    }
+
+    pub fn tracked_capture_id(&self) -> Option<crate::CaptureId> {
+        self.capture_id
+    }
+
+    pub fn stop_tracked_energy_capture(&mut self) -> Result<(), CommandError<EnergyError>> {
+        let id = self.capture_id.ok_or(CommandError::InvalidRequest(
+            "capture identity is not known",
+        ))?;
+        self.stop_energy_capture_if(id)
+    }
+
+    pub fn end_tracked_energy_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
+        let id = self.capture_id.ok_or(CommandError::InvalidRequest(
+            "capture identity is not known",
+        ))?;
+        self.end_energy_stream_if(id)
+    }
+
+    pub fn stop_energy_capture_if(
+        &mut self,
+        id: crate::CaptureId,
+    ) -> Result<(), CommandError<EnergyError>> {
+        self.conditional_energy(11, id)
+    }
+
+    pub fn end_energy_stream_if(
+        &mut self,
+        id: crate::CaptureId,
+    ) -> Result<(), CommandError<EnergyError>> {
+        self.conditional_energy(13, id)
+    }
+
+    fn conditional_energy(
+        &mut self,
+        mode: u8,
+        id: crate::CaptureId,
+    ) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(
+            CAP_CAPTURE_ID,
+            "conditional capture stop; update the firmware first",
+        )?;
+        let mut request = vec![mode];
+        request.extend_from_slice(id.as_bytes());
+        parse_energy_status(&self.send(ENERGY_COMMAND, &request)?)
+    }
+
+    pub fn energy_capture_status(
+        &mut self,
+    ) -> Result<EnergyCaptureStatus, CommandError<EnergyError>> {
+        self.require_capability(
+            CAP_CAPTURE_ID,
+            "conditional capture stop; update the firmware first",
+        )?;
+        let reply = self.send(ENERGY_COMMAND, &[12])?;
+        let mut reader = ResponseReader::new(&reply);
+        energy_mode_known(reader.u8()?)?;
+        let result = EnergyError::check(reader.u8()?).err();
+        let running = match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(malformed("capture running flag is not 0 or 1").into()),
+        };
+        let rate = reader.u32()?;
+        if running != result.is_none() || (!running && rate != 0) {
+            return Err(malformed("inconsistent capture state").into());
+        }
+        let bytes = reply
+            .get(7..31)
+            .ok_or_else(|| malformed("capture identity is missing"))?;
+        let capture_id = if bytes.iter().all(|&b| b == 0) {
+            None
+        } else {
+            Some(parse_capture_id(bytes)?)
+        };
+        if running && capture_id.is_none() {
+            return Err(malformed("a running capture has no identity").into());
+        }
+        Ok(EnergyCaptureStatus {
+            running,
+            actual_rate_pairs_per_second: rate,
+            capture_id,
+            result,
+        })
+    }
+
     /// Polls distinct energy samples until `should_stop` returns true, then stops capture.
     /// Returns the capture's effective rate.
     ///
     /// Capture continues in probe firmware between polls. The poll interval controls host traffic;
     /// samples between polls remain included in the probe's energy accumulator. Between polls,
     /// `should_stop` is checked at least every 10 ms; `Duration::MAX` never polls. Capture is
-    /// stopped on every exit once a start has been sent, including a panic in either callback.
+    /// conditionally stopped after a successful identified start, including a panic in either
+    /// callback. An uncertain start reply grants no identity and cannot be cleaned up automatically.
     pub fn monitor_energy<Stop, Sample>(
         &mut self,
         rate_pairs_per_second: u32,
@@ -944,15 +1132,10 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         }
         self.require_capability::<EnergyError>(CAP_ENERGY_CAPTURE, "energy capture")
             .map_err(EnergyMonitorError::Start)?;
-        let start = match self.start_energy_capture(rate_pairs_per_second) {
+        let start = match self.start_energy_capture_identified(rate_pairs_per_second) {
             Ok(start) => start,
             Err(start) => {
-                // A lost reply can hide a started capture, and a refused start can leave the
-                // previous capture half paused. Stopping is safe in every case.
-                return Err(match self.stop_energy_capture() {
-                    Ok(()) => EnergyMonitorError::Start(start),
-                    Err(stop) => EnergyMonitorError::StartAndStop { start, stop },
-                });
+                return Err(EnergyMonitorError::Start(start));
             }
         };
 
@@ -981,7 +1164,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         };
 
         capture.armed = false;
-        let stop_result = capture.control.stop_energy_capture();
+        let stop_result = capture.control.stop_tracked_energy_capture();
         match (poll_result, stop_result) {
             (Err(poll), Ok(())) => Err(EnergyMonitorError::Poll(poll)),
             (Err(poll), Err(stop)) => Err(EnergyMonitorError::PollAndStop { poll, stop }),
@@ -1372,7 +1555,7 @@ impl<T: VergeTransport + ?Sized> Drop for StopOnDrop<'_, '_, T> {
             // process mid-unwind. The caller's panic is the one to report.
             let control = &mut *self.control;
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                control.stop_energy_capture()
+                control.stop_tracked_energy_capture()
             }));
         }
     }
@@ -1608,7 +1791,17 @@ fn parse_energy_capture_start(
     EnergyError::check(status).map_err(CommandError::Firmware)?;
     Ok(EnergyCaptureStart {
         actual_rate_pairs_per_second,
+        capture_id: None,
     })
+}
+
+fn parse_capture_id(bytes: &[u8]) -> Result<crate::CaptureId, CommandError<EnergyError>> {
+    crate::CaptureId::from_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| malformed("capture identity has the wrong length"))?,
+    )
+    .ok_or_else(|| malformed("capture identity has a zero counter").into())
 }
 
 fn parse_energy_status(response: &[u8]) -> Result<(), CommandError<EnergyError>> {
@@ -2313,6 +2506,25 @@ mod tests {
         assert!(!info.supports_energy_capture());
     }
 
+    fn test_capture_id() -> crate::CaptureId {
+        let mut bytes = [0x42; 24];
+        bytes[16..].copy_from_slice(&7u64.to_le_bytes());
+        crate::CaptureId::from_bytes(bytes).unwrap()
+    }
+
+    fn identified_start_reply(rate: u32) -> Vec<u8> {
+        [
+            vec![0, 0],
+            rate.to_le_bytes().to_vec(),
+            test_capture_id().as_bytes().to_vec(),
+        ]
+        .concat()
+    }
+
+    fn identified_stop_request() -> Vec<u8> {
+        [vec![11], test_capture_id().as_bytes().to_vec()].concat()
+    }
+
     #[test]
     fn energy_monitor_delivers_new_samples_and_stops_capture() {
         let mut latest = vec![0, 0];
@@ -2331,9 +2543,9 @@ mod tests {
                     CAP_TARGET_POWER,
                     1,
                     0,
-                    CAP_ENERGY_CAPTURE | CAP_CALIBRATED_ENERGY,
+                    CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID | CAP_CALIBRATED_ENERGY,
                 ),
-                [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                identified_start_reply(1000),
                 latest.clone(),
                 latest,
                 next,
@@ -2365,18 +2577,21 @@ mod tests {
         assert_eq!(samples[0].raw.sequence, 7);
         assert_eq!(
             transport.commands[1],
-            (ENERGY_COMMAND, vec![0, 0xE8, 3, 0, 0])
+            (ENERGY_COMMAND, vec![8, 0xE8, 3, 0, 0])
         );
         assert_eq!(transport.commands[2], (ENERGY_COMMAND, vec![1]));
-        assert_eq!(transport.commands[5], (ENERGY_COMMAND, vec![2]));
+        assert_eq!(
+            transport.commands[5],
+            (ENERGY_COMMAND, identified_stop_request())
+        );
     }
 
     #[test]
     fn energy_monitor_stops_capture_after_a_malformed_poll_reply() {
         let mut transport = FakeTransport {
             replies: [
-                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                identified_start_reply(1000),
                 vec![0],
                 vec![0, 0],
             ]
@@ -2395,7 +2610,10 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, EnergyMonitorError::Poll(_)));
-        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+        assert_eq!(
+            transport.commands.last(),
+            Some(&(ENERGY_COMMAND, identified_stop_request()))
+        );
     }
 
     #[test]
@@ -2405,8 +2623,8 @@ mod tests {
         sample.extend_from_slice(&1u32.to_le_bytes());
         let mut transport = FakeTransport {
             replies: [
-                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                identified_start_reply(1000),
                 sample,
                 vec![0, 0],
             ]
@@ -2424,14 +2642,17 @@ mod tests {
         }));
 
         assert!(panicked.is_err());
-        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+        assert_eq!(
+            transport.commands.last(),
+            Some(&(ENERGY_COMMAND, identified_stop_request()))
+        );
     }
 
     #[test]
-    fn energy_monitor_stops_capture_after_a_garbled_start_reply() {
+    fn energy_monitor_does_not_stop_after_a_garbled_start_reply() {
         let mut transport = FakeTransport {
             replies: [
-                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
                 vec![0],
                 vec![0, 0],
             ]
@@ -2446,7 +2667,11 @@ mod tests {
             error,
             EnergyMonitorError::Start(CommandError::Malformed(_))
         ));
-        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+        assert_eq!(transport.commands.len(), 2);
+        assert_eq!(
+            transport.commands.last(),
+            Some(&(ENERGY_COMMAND, vec![8, 0xe8, 3, 0, 0]))
+        );
     }
 
     #[test]
@@ -2457,8 +2682,8 @@ mod tests {
         // No stop reply: the fake panics on the stop, during the unwind.
         let mut transport = FakeTransport {
             replies: [
-                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                [vec![0, 0], 1000u32.to_le_bytes().to_vec()].concat(),
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                identified_start_reply(1000),
                 sample,
             ]
             .into(),
@@ -2475,15 +2700,18 @@ mod tests {
         }));
 
         assert!(panicked.is_err());
-        assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+        assert_eq!(
+            transport.commands.last(),
+            Some(&(ENERGY_COMMAND, identified_stop_request()))
+        );
     }
 
     #[test]
     fn energy_monitor_returns_the_effective_rate_and_checks_stop_between_polls() {
         let mut transport = FakeTransport {
             replies: [
-                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                [vec![0, 0], 999u32.to_le_bytes().to_vec()].concat(),
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                identified_start_reply(999),
                 vec![0, 0],
             ]
             .into(),
@@ -2509,33 +2737,23 @@ mod tests {
     }
 
     #[test]
-    fn energy_monitor_stops_after_a_refused_start_and_reports_both_failures() {
-        for (stop_reply, stopped_cleanly) in [(vec![0, 0], true), (vec![0, 7], false)] {
-            let mut transport = FakeTransport {
-                replies: [
-                    info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                    vec![0, 4, 0, 0, 0, 0],
-                    stop_reply,
-                ]
-                .into(),
-                commands: Vec::new(),
-            };
-            let error = VergeControl::new(&mut transport)
-                .monitor_energy(0, Duration::from_millis(1), || true, |_| {})
-                .unwrap_err();
-
-            match error {
-                EnergyMonitorError::Start(CommandError::Firmware(EnergyError::BadRate)) => {
-                    assert!(stopped_cleanly)
-                }
-                EnergyMonitorError::StartAndStop {
-                    start: CommandError::Firmware(EnergyError::BadRate),
-                    stop: CommandError::Firmware(EnergyError::DmaError),
-                } => assert!(!stopped_cleanly),
-                error => panic!("unexpected monitor error: {error}"),
-            }
-            assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
-        }
+    fn energy_monitor_does_not_stop_after_a_refused_start() {
+        let mut transport = FakeTransport {
+            replies: [
+                info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                vec![0, 4, 0, 0, 0, 0],
+            ]
+            .into(),
+            commands: Vec::new(),
+        };
+        let error = VergeControl::new(&mut transport)
+            .monitor_energy(0, Duration::from_millis(1), || true, |_| {})
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EnergyMonitorError::Start(CommandError::Firmware(EnergyError::BadRate))
+        ));
+        assert_eq!(transport.commands.len(), 2);
     }
 
     #[test]
@@ -2546,8 +2764,8 @@ mod tests {
                 sample[1] = status;
                 let mut transport = FakeTransport {
                     replies: [
-                        info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE),
-                        vec![0, 0, 0xe8, 3, 0, 0],
+                        info_reply(6, 0, 1, 0, CAP_ENERGY_CAPTURE | CAP_CAPTURE_ID),
+                        identified_start_reply(1000),
                         sample,
                         stop_reply.clone(),
                     ]
@@ -2583,7 +2801,10 @@ mod tests {
                     }
                     error => panic!("unexpected monitor error: {error}"),
                 }
-                assert_eq!(transport.commands.last(), Some(&(ENERGY_COMMAND, vec![2])));
+                assert_eq!(
+                    transport.commands.last(),
+                    Some(&(ENERGY_COMMAND, identified_stop_request()))
+                );
             }
         }
     }
