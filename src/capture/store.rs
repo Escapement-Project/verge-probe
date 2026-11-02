@@ -100,6 +100,21 @@ pub(super) fn decode<T: for<'a> Deserialize<'a>>(bytes: &[u8]) -> Result<T> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
+/// The stream header as archives before version 5 stored it, without step 5's fields.
+#[derive(Serialize, Deserialize)]
+struct HeaderV4 {
+    rate: u32,
+    setting_ma: Option<u16>,
+    full_scale_mv: u16,
+    first_sequence: u32,
+    previous_low: bool,
+    low: Vec<crate::CalibrationPoint>,
+    high: Vec<crate::CalibrationPoint>,
+    dio_mask: u8,
+    dio_levels: u8,
+    edge_resolution_ns: u16,
+}
+
 /// A block's sample as archives before version 4 stored it, without its range.
 #[derive(Serialize, Deserialize)]
 struct SupportedV3 {
@@ -123,7 +138,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=4).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=5).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -135,7 +150,27 @@ impl Archive {
         decode(&bytes)
     }
     pub fn header(&self) -> Result<Header> {
-        let mut header: Header = self.meta("header")?;
+        let mut header: Header = if self.version >= 5 {
+            self.meta("header")?
+        } else {
+            let old: HeaderV4 = self.meta("header")?;
+            Header {
+                capture_id: None,
+                rate: old.rate,
+                setting_ma: old.setting_ma,
+                full_scale_mv: old.full_scale_mv,
+                first_sequence: old.first_sequence,
+                previous_low: old.previous_low,
+                low: old.low,
+                high: old.high,
+                dio_mask: old.dio_mask,
+                dio_levels: old.dio_levels,
+                edge_resolution_ns: old.edge_resolution_ns,
+                switch_weight_q16: 0,
+                rearm_between_pairs: false,
+                previous_shunt_nanoamps: None,
+            }
+        };
         let id: Option<Vec<u8>> = self
             .db
             .query_row(
@@ -471,7 +506,7 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=4;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=5;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
@@ -795,37 +830,36 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     #[test]
-    fn pre_identity_headers_and_archive_decode_without_layout_changes() {
+    fn pre_identity_headers_and_archive_read_in_the_layout_before_version_5() {
         let bytes = include_bytes!("../../tests/fixtures/identity/header-f45a4ed.postcard");
         let message_bytes =
             include_bytes!("../../tests/fixtures/identity/message-header-f45a4ed.postcard");
-        let mut h: Header = decode(bytes).unwrap();
-        assert_eq!((h.rate, h.first_sequence, h.dio_mask), (1000, 1, 8));
-        assert!(h.capture_id.is_none());
-        assert_eq!(
-            decode::<Message>(message_bytes).unwrap(),
-            Message::Header(h.clone())
-        );
-        let mut token = [0; 24];
-        token[16] = 1;
-        h.capture_id = crate::CaptureId::from_bytes(token);
-        assert_eq!(encode(&h).unwrap(), bytes);
-        assert_eq!(encode(&Message::Header(h)).unwrap(), message_bytes);
+        // The capture identity left the layout as it was; step 5's fields changed it.
+        let old: HeaderV4 = decode(bytes).unwrap();
+        assert_eq!((old.rate, old.first_sequence, old.dio_mask), (1000, 1, 8));
+        assert_eq!(encode(&old).unwrap(), bytes);
+        assert_eq!((message_bytes[0], &message_bytes[1..]), (0, &bytes[..]));
+        assert!(decode::<Header>(bytes).is_err());
         let archive = Archive::open(
             &Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/identity/capture-f45a4ed.vergecapture"),
         )
         .unwrap();
-        assert!(archive.header().unwrap().capture_id.is_none());
+        let header = archive.header().unwrap();
+        assert!(header.capture_id.is_none());
+        assert_eq!(
+            (
+                header.rate,
+                header.switch_weight_q16,
+                header.rearm_between_pairs
+            ),
+            (old.rate, 0, false)
+        );
         let raw: Vec<u8> = archive
             .db
             .query_row("SELECT data FROM messages WHERE n=0", [], |row| row.get(0))
             .unwrap();
         assert_eq!(&raw, message_bytes);
-        assert!(matches!(
-            decode::<Message>(&raw).unwrap(),
-            Message::Header(_)
-        ));
         assert_eq!(
             archive
                 .statistics(archive.extent().unwrap(), &AtomicBool::new(false))
@@ -880,6 +914,9 @@ mod tests {
             dio_mask: 0,
             dio_levels: 0,
             edge_resolution_ns: 0,
+            switch_weight_q16: 0,
+            rearm_between_pairs: false,
+            previous_shunt_nanoamps: None,
         }
     }
     fn raw_writer(path: &Path, rate: u32) -> CaptureWriter {
@@ -1984,8 +2021,36 @@ mod tests {
         assert!(csv.contains("1,1000000,3000,1000000,low\n"));
         assert!(!csv.contains("3,3000000"));
     }
-    /// Rewrites every sample block in the layout archives before version 4 stored.
+    /// Rewrites the header in the layout archives before version 5 stored.
+    fn old_header(db: &Connection) {
+        let data: Vec<u8> = db
+            .query_row("SELECT value FROM metadata WHERE key='header'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let header: Header = decode(&data).unwrap();
+        let old = HeaderV4 {
+            rate: header.rate,
+            setting_ma: header.setting_ma,
+            full_scale_mv: header.full_scale_mv,
+            first_sequence: header.first_sequence,
+            previous_low: header.previous_low,
+            low: header.low,
+            high: header.high,
+            dio_mask: header.dio_mask,
+            dio_levels: header.dio_levels,
+            edge_resolution_ns: header.edge_resolution_ns,
+        };
+        db.execute(
+            "UPDATE metadata SET value=? WHERE key='header'",
+            params![encode(&old).unwrap()],
+        )
+        .unwrap();
+    }
+    /// Rewrites every sample block in the layout archives before version 4 stored, and the header
+    /// in the one before version 5.
     fn old_blocks(db: &Connection) {
+        old_header(db);
         let blocks: Vec<(i64, Vec<u8>)> = db
             .prepare("SELECT n, data FROM blocks")
             .unwrap()
@@ -2013,6 +2078,42 @@ mod tests {
             )
             .unwrap();
         }
+    }
+    #[test]
+    fn version_4_headers_read_without_step_5() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v4.vergecapture");
+        let mut h = header(1000);
+        h.switch_weight_q16 = 9786;
+        h.rearm_between_pairs = true;
+        h.previous_shunt_nanoamps = Some(1_000_000);
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer.ingest(Message::Header(h.clone())).unwrap();
+        writer.append((0..5).map(sample)).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(Archive::open(&path).unwrap().header().unwrap(), h);
+        let db = Connection::open(&path).unwrap();
+        old_header(&db);
+        db.execute_batch("PRAGMA user_version=4;").unwrap();
+        drop(db);
+        let archive = Archive::open(&path).unwrap();
+        let read = archive.header().unwrap();
+        assert_eq!((read.rate, read.low.len(), read.dio_mask), (1000, 2, 0));
+        assert_eq!(
+            (
+                read.switch_weight_q16,
+                read.rearm_between_pairs,
+                read.previous_shunt_nanoamps
+            ),
+            (0, false, None)
+        );
+        let extent = archive.extent().unwrap();
+        let samples = archive
+            .view(extent, 64, &AtomicBool::new(false))
+            .unwrap()
+            .samples
+            .unwrap();
+        assert_eq!(samples.len(), 5);
     }
     #[test]
     fn version_3_blocks_read_without_a_range() {

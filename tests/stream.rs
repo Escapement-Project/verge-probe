@@ -46,6 +46,14 @@ fn converter(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]
     }
 }
 
+/// Step 5's fields after a format 1 header: weight, flags and the current before.
+fn with_step_5(mut header: Vec<u8>, weight: u16, between: bool, before: Option<u32>) -> Vec<u8> {
+    header.extend_from_slice(&weight.to_le_bytes());
+    header.push(u8::from(between) | if before.is_some() { 2 } else { 0 });
+    header.extend_from_slice(&before.unwrap_or(0).to_le_bytes());
+    header
+}
+
 fn fnv(mut hash: u64, value: u32) -> u64 {
     for byte in value.to_le_bytes() {
         hash ^= u64::from(byte);
@@ -127,12 +135,21 @@ fn a_stream_sums_to_the_firmware_total() {
     for case in vectors["sequences"].as_array().unwrap() {
         let rate = case["rate"].as_u64().unwrap() as u32;
         let full_scale = case["full_scale_mv"].as_u64().unwrap() as u16;
-        let mut convert = converter(
-            rate,
-            full_scale,
-            &points(&case["low"]),
-            &points(&case["high"]),
+        let header = with_step_5(
+            header_bytes(
+                rate,
+                full_scale,
+                &points(&case["low"]),
+                &points(&case["high"]),
+            ),
+            case["switch_weight_q16"].as_u64().unwrap() as u16,
+            case["rearm_between_pairs"].as_bool().unwrap(),
+            None,
         );
+        let Message::Header(header) = stream::parse(&header).unwrap() else {
+            panic!("header")
+        };
+        let mut convert = Converter::new(&header);
         let mut paused = false;
         let mut sequence = 0;
         for event in case["events"].as_array().unwrap() {
@@ -235,6 +252,37 @@ fn messages_parse_as_the_probe_lays_them_out() {
         panic!("header")
     };
     assert_eq!(parsed.capture_id.unwrap().as_bytes(), &header[68..]);
+    // Firmware before step 5's fields: weight 0 and no flags, the rule as it was.
+    assert_eq!(
+        (
+            parsed.switch_weight_q16,
+            parsed.rearm_between_pairs,
+            parsed.previous_shunt_nanoamps
+        ),
+        (0, false, None)
+    );
+    // Format 2 carries them after the identity.
+    let mut current = with_step_5(header.clone(), 9786, true, Some(1_234_567));
+    let Message::Header(parsed) = stream::parse(&current).unwrap() else {
+        panic!("header")
+    };
+    assert_eq!(parsed.capture_id.unwrap().as_bytes(), &header[68..]);
+    assert_eq!(
+        (
+            parsed.switch_weight_q16,
+            parsed.rearm_between_pairs,
+            parsed.previous_shunt_nanoamps
+        ),
+        (9786, true, Some(1_234_567))
+    );
+    current[94] = 0;
+    let Message::Header(parsed) = stream::parse(&current).unwrap() else {
+        panic!("header")
+    };
+    assert_eq!(
+        (parsed.rearm_between_pairs, parsed.previous_shunt_nanoamps),
+        (false, None)
+    );
     header[1] = 3;
     assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(3)));
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
@@ -349,4 +397,98 @@ fn a_switching_pair_takes_the_next_pairs_current() {
         (next[1].sequence, next[1].time_ns, next.len()),
         (9, 7_000_000, 2)
     );
+}
+
+#[test]
+fn a_switch_up_weighs_the_pair_before_and_a_clean_switch_down_keeps_its_own() {
+    let low = [(0, 0), (60_000, 60_000)];
+    let high = [(0, 0), (60_000, 6_000_000)];
+    // An attached stream: the pair before the first one sent read 400 nA on the low range.
+    let header = with_step_5(
+        header_bytes(1000, 3300, &low, &high),
+        16384,
+        true,
+        Some(400),
+    );
+    let Message::Header(header) = stream::parse(&header).unwrap() else {
+        panic!("header")
+    };
+    let mut convert = Converter::new(&header);
+    let pair = |current_code, low| Pair {
+        voltage_code: 30_000,
+        current_code,
+        low,
+    };
+    convert.add_message(&Pairs::new(
+        0,
+        1,
+        0,
+        vec![
+            pair(59_000, false),
+            pair(300, false),
+            pair(200, true),
+            pair(250, true),
+        ],
+    ));
+    let samples = convert.take_samples();
+    let shunt = |code, low| convert.reading(&pair(code, low)).shunt_nanoamps;
+    let mv = convert.reading(&pair(0, true)).millivolts;
+    // Three quarters of the next pair's current and a quarter of the one before, rounded.
+    let up = ((u64::from(shunt(300, false)) * 49152 + 400 * 16384 + 32768) >> 16) as u32;
+    assert_eq!(samples[0].nanoamps, stream::target_nanoamps(up, mv));
+    // Down between pairs: its own, at once.
+    assert_eq!(samples.len(), 4);
+    assert_eq!(
+        samples[2].nanoamps,
+        stream::target_nanoamps(shunt(200, true), mv)
+    );
+}
+
+#[test]
+fn a_hold_keeps_the_pair_before_and_a_gap_forgets_it() {
+    let low = [(0, 0), (60_000, 60_000)];
+    let high = [(0, 0), (60_000, 6_000_000)];
+    let header = with_step_5(header_bytes(1000, 3300, &low, &high), 16384, true, None);
+    let Message::Header(header) = stream::parse(&header).unwrap() else {
+        panic!("header")
+    };
+    let pair = |current_code, low| Pair {
+        voltage_code: 30_000,
+        current_code,
+        low,
+    };
+    let up_after = |flags| {
+        let mut convert = Converter::new(&header);
+        convert.add_message(&Pairs::new(0, 1, 0, vec![pair(40_000, true)]));
+        convert.add_message(&Pairs::new(
+            flags,
+            2,
+            5_000_000,
+            vec![pair(59_000, false), pair(300, false)],
+        ));
+        let before = convert.reading(&pair(40_000, true)).shunt_nanoamps;
+        let next = convert.reading(&pair(300, false)).shunt_nanoamps;
+        let samples = convert.take_samples();
+        (samples[1].nanoamps, before, next, convert)
+    };
+    // A hold between the pair before and the switch up: the stand-in still weighs it.
+    let (taken, before, next, convert) = up_after(Pairs::HELD);
+    let mv = convert.reading(&pair(0, true)).millivolts;
+    let weighed = ((u64::from(next) * 49152 + u64::from(before) * 16384 + 32768) >> 16) as u32;
+    assert_eq!(taken, stream::target_nanoamps(weighed, mv));
+    // A pause forgets it: the next pair's current alone.
+    let (taken, _, next, _) = up_after(Pairs::PAUSED);
+    assert_eq!(taken, stream::target_nanoamps(next, mv));
+    // So do lost pairs.
+    let mut convert = Converter::new(&header);
+    convert.add_message(&Pairs::new(0, 1, 0, vec![pair(40_000, true)]));
+    convert.discontinuity(true);
+    convert.add_message(&Pairs::new(
+        0,
+        5,
+        5_000_000,
+        vec![pair(59_000, false), pair(300, false)],
+    ));
+    let samples = convert.take_samples();
+    assert_eq!(samples[1].nanoamps, stream::target_nanoamps(next, mv));
 }

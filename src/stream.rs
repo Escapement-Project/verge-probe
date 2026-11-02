@@ -70,6 +70,18 @@ pub struct Header {
     pub dio_mask: u8,
     pub dio_levels: u8,
     pub edge_resolution_ns: u16,
+    /// Step 5: the previous pair's share, in 1/65536, of the current a pair that switched up takes.
+    /// 0 from firmware older than the field.
+    #[serde(default)]
+    pub switch_weight_q16: u16,
+    /// Step 5: the probe re-arms the low range between pairs, so a pair that switched down keeps
+    /// its own current.
+    #[serde(default)]
+    pub rearm_between_pairs: bool,
+    /// The current through the sense resistor of the pair before the first one sent, where the
+    /// probe had one: a stream attached to a running capture.
+    #[serde(default)]
+    pub previous_shunt_nanoamps: Option<u32>,
 }
 
 /// One voltage and current reading, as the converter left them.
@@ -296,6 +308,12 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
             } else {
                 None
             };
+            // Step 5's fields follow the identity in format 2; firmware before them ends there.
+            let at = if bytes[1] == 2 { 92 } else { HEADER_BYTES };
+            let (switch_weight_q16, flags, previous) = match bytes.get(at..at + 7) {
+                Some(fields) => (u16_at(fields, 0), fields[2], u32_at(fields, 3)),
+                None => (0, 0, 0),
+            };
             Ok(Message::Header(Header {
                 capture_id,
                 rate: u32_at(bytes, 2),
@@ -312,6 +330,9 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                 dio_mask: bytes[64],
                 dio_levels: bytes[65],
                 edge_resolution_ns: u16_at(bytes, 66),
+                switch_weight_q16: switch_weight_q16.min(32768),
+                rearm_between_pairs: flags & 1 != 0,
+                previous_shunt_nanoamps: (flags & 2 != 0).then_some(previous),
             }))
         }
         Some(&PAIRS) => {
@@ -514,8 +535,8 @@ pub struct Sample {
     pub time_ns: u64,
     pub millivolts: u32,
     pub nanoamps: u32,
-    /// The pair's own range. Step 5 can take its current from the next pair, which then shares
-    /// it. None only for a sample from a capture archive older than this field.
+    /// The pair's own range. Step 5 can give it a current from the pairs either side, which then
+    /// share it. None only for a sample from a capture archive older than this field.
     pub range: Option<CurrentRange>,
 }
 
@@ -527,6 +548,16 @@ struct Waiting {
     millivolts: u32,
     shunt_nanoamps: u32,
     low: bool,
+    /// The previous pair's share of the stand-in, and its current: 0 but for a switch up after a pair.
+    weight_q16: u16,
+    before_nanoamps: u32,
+}
+
+/// Step 5's stand-in: the next pair's current less the previous pair's share.
+fn stand_in(next_nanoamps: u32, before_nanoamps: u32, weight_q16: u16) -> u32 {
+    let weight = u64::from(weight_q16);
+    ((u64::from(next_nanoamps) * (65536 - weight) + u64::from(before_nanoamps) * weight + 32768)
+        >> 16) as u32
 }
 
 /// Converts a stream's pairs, and sums them as the probe does (step 5 and the total).
@@ -538,6 +569,10 @@ pub struct Converter {
     high: Table,
     scale_q32: u64,
     previous_low: bool,
+    /// The last pair's own current through the sense resistor; none since a pause or a gap.
+    before: Option<u32>,
+    switch_weight_q16: u16,
+    rearm_between_pairs: bool,
     waiting: Option<Waiting>,
     total: Total,
     samples: Vec<Sample>,
@@ -553,6 +588,9 @@ impl Converter {
             high: Table::new(&header.high),
             scale_q32: (1u64 << 32) / u64::from(header.rate.max(1)),
             previous_low: header.previous_low,
+            before: header.previous_shunt_nanoamps,
+            switch_weight_q16: header.switch_weight_q16.min(32768),
+            rearm_between_pairs: header.rearm_between_pairs,
             waiting: None,
             total: Total::default(),
             samples: Vec::new(),
@@ -591,23 +629,33 @@ impl Converter {
         });
     }
 
-    /// A pause: a waiting pair keeps its own current, and the range before is low again.
+    /// A pause: a waiting pair keeps its own current, the range before is low again, and there is
+    /// no pair before for the stand-in.
     fn pause(&mut self) {
         if let Some(waiting) = self.waiting.take() {
             self.count(waiting, waiting.shunt_nanoamps);
         }
         self.previous_low = true;
+        self.before = None;
     }
 
     /// One pair into the total, step 5 included.
     fn add(&mut self, pair: &Pair, sequence: u32, time_ns: u64) {
         let reading = self.reading(pair);
+        let before = self.before.replace(reading.shunt_nanoamps);
+        let up_after_a_pair = !pair.low && before.is_some();
         let this = Waiting {
             sequence,
             time_ns,
             millivolts: reading.millivolts,
             shunt_nanoamps: reading.shunt_nanoamps,
             low: pair.low,
+            weight_q16: if up_after_a_pair {
+                self.switch_weight_q16
+            } else {
+                0
+            },
+            before_nanoamps: before.unwrap_or(0),
         };
         let switched = pair.low != self.previous_low;
         self.previous_low = pair.low;
@@ -615,11 +663,15 @@ impl Converter {
             let shunt = if switched {
                 waiting.shunt_nanoamps
             } else {
-                reading.shunt_nanoamps
+                stand_in(
+                    reading.shunt_nanoamps,
+                    waiting.before_nanoamps,
+                    waiting.weight_q16,
+                )
             };
             self.count(waiting, shunt);
         }
-        if switched {
+        if switched && !(pair.low && self.rearm_between_pairs) {
             self.waiting = Some(this);
         } else {
             self.count(this, reading.shunt_nanoamps);
@@ -642,6 +694,7 @@ impl Converter {
     pub fn discontinuity(&mut self, next_low: bool) {
         self.end();
         self.previous_low = next_low;
+        self.before = None;
     }
 
     /// The stream ended: a pair still waiting keeps its own current.
@@ -651,8 +704,8 @@ impl Converter {
         }
     }
 
-    /// The pairs the total has counted since the last call, in order. A pair at a range switch
-    /// comes with the pair after it, or at [`Converter::end`].
+    /// The pairs the total has counted since the last call, in order. A pair waiting at a range
+    /// switch comes with the pair after it, or at [`Converter::end`].
     pub fn take_samples(&mut self) -> Vec<Sample> {
         std::mem::take(&mut self.samples)
     }
