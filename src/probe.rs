@@ -134,7 +134,8 @@ pub enum EnergyError {
     /// ADC calibration failed.
     #[error("ADC calibration failed")]
     AdcError,
-    /// Acquisition failed because of a DMA error or ADC FIFO overflow.
+    /// Acquisition failed: a DMA error, an ADC FIFO overflow, or a segment of the ring the probe
+    /// took too late.
     #[error("energy acquisition failed")]
     DmaError,
     /// An unrecognized result code.
@@ -321,8 +322,8 @@ pub struct EnergyAccumulator {
 pub enum EnergyTotal {
     /// The total since the last successful capture start.
     Total(EnergyAccumulator),
-    /// The firmware's acquisition fault is set: a DMA error or ADC FIFO overflow during a
-    /// capture, or a start that could not take over the ADC. The total is what was integrated
+    /// The firmware's acquisition fault is set: a DMA error, an ADC FIFO overflow or a ring
+    /// segment taken too late during a capture, or a start that could not take over the ADC. The total is what was integrated
     /// before the fault, which after a fault mid-capture leaves out the samples lost to it, and is
     /// zero when no capture ever started. A successful start clears the fault and the total.
     Failed(EnergyAccumulator),
