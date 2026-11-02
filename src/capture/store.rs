@@ -1,5 +1,5 @@
 use super::{CaptureError, Interval, Result, Statistics};
-use crate::record::Sink;
+use crate::record::{Sink, temp_beside};
 use crate::stream::{Converter, Header, Message, Sample};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -91,24 +91,6 @@ fn configure(db: &Connection) -> Result<()> {
     db.busy_timeout(std::time::Duration::from_secs(2))?;
     db.execute_batch("PRAGMA cache_size=-4096; PRAGMA mmap_size=0;")?;
     Ok(())
-}
-
-/// A temporary file beside `path`, with the permissions a new file there gets rather than
-/// tempfile's owner-only ones.
-fn temp_beside(path: &Path) -> std::io::Result<tempfile::NamedTempFile> {
-    let mut builder = tempfile::Builder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(fs::Permissions::from_mode(0o666));
-    }
-    builder.tempfile_in(destination_dir(path))
-}
-
-fn destination_dir(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
 }
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -386,8 +368,9 @@ impl Archive {
         self.db.execute_batch("BEGIN")?;
         let result = (|| {
             let header = self.header()?;
-            let temp = temp_beside(path)?;
-            let mut sink = Sink::from_file(temp.reopen()?, csv)?;
+            // Only the sink holds the file open, so a CSV marker merge can rename over it.
+            let (file, temp) = temp_beside(path)?.into_parts();
+            let mut sink = Sink::from_file(file, &temp, csv)?;
             let pins = if self.version >= 2 {
                 header.dio_mask
             } else {
@@ -418,7 +401,8 @@ impl Archive {
             }
             sink.finish_with_cancel(cancel)?;
             cancelled(cancel)?;
-            persist(temp, path)
+            temp.persist_noclobber(path).map_err(|error| error.error)?;
+            Ok(())
         })();
         self.db.execute_batch("ROLLBACK")?;
         result

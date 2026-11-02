@@ -2,6 +2,7 @@ use super::{RecordError, Result};
 use crate::stream::Markers;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::Path;
 
 pub(super) struct Spool {
     rows: csv::Writer<File>,
@@ -37,6 +38,10 @@ impl Spool {
             self.first.get_or_insert(marker.time_ns);
         }
         Ok(())
+    }
+    /// Nothing to merge: no marker and no loss report arrived.
+    pub fn is_empty(&self) -> bool {
+        self.first.is_none() && self.untimed_losses == 0
     }
     pub fn reader(self) -> Result<csv::Reader<File>> {
         Ok(csv::ReaderBuilder::new()
@@ -76,16 +81,31 @@ pub(super) struct CsvMarkers {
     pub spool: Spool,
 }
 impl CsvMarkers {
+    /// Writes the pairs with the markers merged in by time to a file beside `path`, then renames
+    /// it over `path`. Until the rename, `path` keeps the pairs as they were written.
     pub fn finish(
         self,
         mut analog: BufWriter<File>,
+        path: &Path,
         check: &impl Fn() -> Result<()>,
     ) -> Result<()> {
         analog.flush()?;
+        if self.spool.is_empty() {
+            return Ok(());
+        }
         let mut file = analog.into_inner().map_err(|e| e.into_error())?;
         file.seek(SeekFrom::Start(0))?;
+        let target = std::fs::canonicalize(path)?;
+        let merging = |source| RecordError::Merge {
+            path: target.clone(),
+            source,
+        };
+        let merged = super::temp_beside(&target).map_err(merging)?;
+        merged
+            .as_file()
+            .set_permissions(file.metadata()?.permissions())?;
         let mut analog = csv::Reader::from_reader(&mut file);
-        let mut output = csv::Writer::from_writer(tempfile::tempfile()?);
+        let mut output = csv::Writer::from_writer(merged.as_file());
         let mut header = analog.headers()?.clone();
         let columns = header.len();
         header.extend(["marker_number", "marker_label", "marker_lost"]);
@@ -127,24 +147,20 @@ impl CsvMarkers {
             output.write_record(marker_row(row?))?;
         }
         output.flush()?;
+        drop(output);
+        merged.as_file().sync_all()?;
         drop(analog);
-        let mut merged = output.into_inner().map_err(|e| e.into_error())?;
-        merged.seek(SeekFrom::Start(0))?;
         check()?;
-        file.seek(SeekFrom::Start(0))?;
-        let mut bytes = [0; 64 * 1024];
-        loop {
-            use std::io::Read;
-            check()?;
-            let count = merged.read(&mut bytes)?;
-            if count == 0 {
-                break;
-            }
-            file.write_all(&bytes[..count])?;
+        // The name may have moved on during recording, to another file or to none.
+        let written = same_file::Handle::from_file(file)?;
+        if same_file::Handle::from_path(&target).ok().as_ref() != Some(&written) {
+            return Err(RecordError::Replaced { path: target });
         }
-        let length = file.stream_position()?;
-        file.set_len(length)?;
-        file.flush()?;
+        // Windows cannot rename over a file that is still open.
+        drop(written);
+        merged
+            .persist(&target)
+            .map_err(|error| merging(error.error))?;
         Ok(())
     }
 }
@@ -156,14 +172,8 @@ mod tests {
     use crate::stream::{Marker, Sample};
     use std::io::Read;
 
-    #[test]
-    fn interrupted_marker_csv_keeps_received_pairs_and_cancelled_merge_keeps_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("partial.csv");
-        let mut sink = Sink::create(&path, true).unwrap();
-        sink.include_markers().unwrap();
-        sink.begin(1000, 0, 0).unwrap();
-        for sequence in 0..1000 {
+    fn pairs(sink: &mut Sink, count: u32) {
+        for sequence in 0..count {
             sink.samples(&[Sample {
                 sequence,
                 time_ns: u64::from(sequence) * 1_000_000,
@@ -172,6 +182,28 @@ mod tests {
             }])
             .unwrap();
         }
+    }
+
+    fn marker(time_ns: u64) -> Markers {
+        Markers::new(
+            0,
+            vec![Marker {
+                time_ns,
+                number: 1,
+                label: b"m".to_vec(),
+            }],
+        )
+    }
+
+    #[test]
+    fn an_interrupted_marker_merge_leaves_the_pairs_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.csv");
+        let mut sink = Sink::create(&path, true).unwrap();
+        sink.include_markers().unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        pairs(&mut sink, 1000);
+        assert!(sink.markers(&marker(500_000_000)).unwrap());
         let Sink::Csv(mut csv) = sink else {
             unreachable!()
         };
@@ -179,7 +211,7 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         assert_eq!(before.iter().filter(|&&byte| byte == b'\n').count(), 1001);
         let checks = std::cell::Cell::new(0);
-        let result = csv.markers.take().unwrap().finish(csv.file, &|| {
+        let result = csv.markers.take().unwrap().finish(csv.file, &path, &|| {
             checks.set(checks.get() + 1);
             if checks.get() == 100 {
                 Err(RecordError::Cancelled)
@@ -188,8 +220,85 @@ mod tests {
             }
         });
         assert!(matches!(result, Err(RecordError::Cancelled)));
-        assert_eq!(checks.get(), 100);
-        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_destination_replaced_during_recording_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.csv");
+        let moved = dir.path().join("moved.csv");
+        let mut sink = Sink::create(&path, true).unwrap();
+        sink.include_markers().unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        pairs(&mut sink, 10);
+        sink.markers(&marker(5_000_000)).unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"someone else's\n").unwrap();
+        assert!(matches!(sink.finish(), Err(RecordError::Replaced { .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), b"someone else's\n");
+        let kept = std::fs::read_to_string(&moved).unwrap();
+        assert_eq!(kept.lines().count(), 11, "{kept}");
+        assert!(!kept.contains("marker"), "{kept}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_marker_csv_with_no_markers_keeps_its_file_and_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.csv");
+        let mut sink = Sink::create(&path, true).unwrap();
+        sink.include_markers().unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        pairs(&mut sink, 10);
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap());
+        sink.finish().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("marker"), "{text}");
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap()),
+            inode
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_csv_that_is_not_a_file_drops_markers_and_still_records() {
+        let path = std::path::Path::new("/dev/null");
+        let file = File::options().read(true).write(true).open(path).unwrap();
+        let mut sink = Sink::from_file(file, path, true).unwrap();
+        sink.include_markers().unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        pairs(&mut sink, 10);
+        assert!(!sink.markers(&marker(5_000_000)).unwrap());
+        sink.finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_through_a_symlink_replaces_the_file_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.csv");
+        let link = dir.path().join("link.csv");
+        std::fs::write(&real, b"").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut sink = Sink::create(&link, true).unwrap();
+        sink.include_markers().unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        pairs(&mut sink, 10);
+        sink.markers(&marker(5_000_000)).unwrap();
+        sink.finish().unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        let text = std::fs::read_to_string(&real).unwrap();
+        assert!(text.starts_with("sequence,"), "{text}");
+        assert!(
+            text.lines().next().unwrap().ends_with("marker_lost"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 12, "{text}");
     }
 
     #[test]

@@ -5,12 +5,32 @@ use crate::stream::{Edge, Markers, Sample};
 pub use markers::label as marker_label;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use zip::ZipWriter;
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
+
+/// A temporary file beside `path`, named after it (`<name>.<random>.partial`), with the
+/// permissions a new file there gets rather than tempfile's owner-only ones. Only a drop removes
+/// it, so a process that exits while it is open leaves it behind.
+pub(crate) fn temp_beside(path: &Path) -> io::Result<tempfile::NamedTempFile> {
+    let mut prefix = path.file_name().unwrap_or_default().to_owned();
+    prefix.push(".");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(".partial");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    builder.tempfile_in(dir)
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -31,6 +51,14 @@ pub enum RecordError {
     MarkerTime,
     #[error("cancelled")]
     Cancelled,
+    #[error("merging the markers into {}; the file keeps its pairs, without markers", path.display())]
+    Merge {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{} is no longer the file recorded to; that file keeps its pairs, without markers", path.display())]
+    Replaced { path: PathBuf },
 }
 
 type Result<T> = std::result::Result<T, RecordError>;
@@ -113,7 +141,7 @@ impl Sink {
                 path: path.to_owned(),
                 source,
             })?;
-        Self::from_file(file, csv)
+        Self::from_file(file, path, csv)
     }
 
     pub fn create_new(path: &Path, csv: bool) -> Result<Sink> {
@@ -126,14 +154,17 @@ impl Sink {
                 path: path.to_owned(),
                 source,
             })?;
-        Self::from_file(file, csv)
+        Self::from_file(file, path, csv)
     }
 
-    pub fn from_file(file: File, csv: bool) -> Result<Sink> {
+    /// `file` is open for reading and writing at `path`. A CSV whose markers are merged at finish
+    /// is replaced there by a merged copy.
+    pub fn from_file(file: File, path: &Path, csv: bool) -> Result<Sink> {
         let file = BufWriter::new(file);
         Ok(if csv {
             Sink::Csv(Box::new(Csv {
                 file,
+                path: path.to_owned(),
                 dio: Dio::default(),
                 markers: None,
             }))
@@ -142,17 +173,17 @@ impl Sink {
         })
     }
 
-    /// Adds marker columns in CSV and an embedded markers.csv in sigrok sessions.
-    /// Call before begin. CSV files must be readable and seekable for the final merge.
+    /// Records markers: an embedded markers.csv in sigrok sessions, and in CSV, marker columns and
+    /// rows merged in by time at finish. A CSV that is not a regular file, such as a pipe, cannot
+    /// be merged, and [`Sink::markers`] drops its markers. Call before begin.
     pub fn include_markers(&mut self) -> Result<()> {
         match self {
             Self::Csv(csv) if csv.markers.is_none() => {
-                let position = csv.file.stream_position()?;
-                let _ = csv.file.get_mut().read(&mut [0])?;
-                csv.file.seek(std::io::SeekFrom::Start(position))?;
-                csv.markers = Some(markers::CsvMarkers {
-                    spool: markers::Spool::new()?,
-                });
+                if csv.file.get_ref().metadata()?.is_file() {
+                    csv.markers = Some(markers::CsvMarkers {
+                        spool: markers::Spool::new()?,
+                    });
+                }
             }
             Self::Sigrok(sigrok) if sigrok.markers.is_none() => {
                 sigrok.markers = Some(markers::Spool::new()?);
@@ -161,20 +192,18 @@ impl Sink {
         }
         Ok(())
     }
-    pub fn markers(&mut self, message: &Markers) -> Result<()> {
-        match self {
-            Self::Csv(csv) => {
-                if let Some(markers) = &mut csv.markers {
-                    markers.spool.append(message)?;
-                }
-            }
-            Self::Sigrok(sigrok) => {
-                if let Some(markers) = &mut sigrok.markers {
-                    markers.append(message)?;
-                }
-            }
-        }
-        Ok(())
+    /// Whether the markers were recorded: false without [`Sink::include_markers`], or for a CSV
+    /// that cannot take them.
+    pub fn markers(&mut self, message: &Markers) -> Result<bool> {
+        let spool = match self {
+            Self::Csv(csv) => csv.markers.as_mut().map(|markers| &mut markers.spool),
+            Self::Sigrok(sigrok) => sigrok.markers.as_mut(),
+        };
+        let Some(spool) = spool else {
+            return Ok(false);
+        };
+        spool.append(message)?;
+        Ok(true)
     }
 
     /// The stream began at `rate` pairs a second, reporting the edges of `pins`, at `levels`.
@@ -307,6 +336,7 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
 /// sequence, millivolts or nanoamps, and gives the levels after it.
 pub struct Csv {
     file: BufWriter<File>,
+    path: PathBuf,
     dio: Dio,
     markers: Option<markers::CsvMarkers>,
 }
@@ -360,7 +390,7 @@ impl Csv {
             self.edge(edge)?;
         }
         if let Some(markers) = self.markers {
-            markers.finish(self.file, &|| check_cancel(cancel))?;
+            markers.finish(self.file, &self.path, &|| check_cancel(cancel))?;
         } else {
             self.file.flush()?;
         }
