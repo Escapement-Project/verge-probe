@@ -515,8 +515,12 @@ pub enum LatencyOutcome {
     Unresolved,
     /// Nothing read correctly at the host or safe period.
     NoBand,
-    /// No latency agrees with every read.
+    /// No latency agrees with every read, even with each claimed range a cycle uncertain.
     Inconsistent,
+    /// No latency agrees with every read, but some do with each claimed range a cycle uncertain, as
+    /// when the latency sits on a cycle boundary or one read was disturbed. A latency with a cycle
+    /// to spare past those was selected.
+    Boundary,
     /// An outcome added by newer firmware.
     Unknown(u8),
 }
@@ -530,6 +534,7 @@ impl LatencyOutcome {
             3 => Self::Unresolved,
             4 => Self::NoBand,
             5 => Self::Inconsistent,
+            6 => Self::Boundary,
             other => Self::Unknown(other),
         }
     }
@@ -549,7 +554,7 @@ pub struct CodegenMeasurement {
     /// one cycle later than this.
     pub latency: u8,
     /// Generations that ran reads, over every search: the firmware searches again, up to three
-    /// times, while no latency agrees with every read.
+    /// times, while a search ends [`LatencyOutcome::Inconsistent`].
     pub attempts: u8,
     /// Read periods measured at, over every search.
     pub periods: u8,
@@ -3167,6 +3172,7 @@ mod tests {
         let measurement = read_codegen_measurement(&mut reader, false).unwrap();
         assert!(measurement.automatic);
         assert_eq!(measurement.outcome, LatencyOutcome::Unknown(0xFE));
+        assert_eq!(LatencyOutcome::from_byte(6), LatencyOutcome::Boundary);
         assert_eq!(measurement.wire, None);
         assert_eq!(measurement.id_code, 0x1122_3344);
         assert_eq!(measurement.consistent_latencies, 0x0102_0304_0506_0708);
