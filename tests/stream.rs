@@ -342,6 +342,7 @@ fn a_switching_pair_takes_the_next_pairs_current() {
             time_ns: 6_000_000,
             millivolts: taken.millivolts,
             nanoamps: taken.nanoamps,
+            range: Some(stream::CurrentRange::High),
         }
     );
     assert_eq!(

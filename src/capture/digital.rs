@@ -321,8 +321,7 @@ impl Archive {
                     }
                 } else if let Some(row) = rows.next()? {
                     cancelled(cancel)?;
-                    samples =
-                        decode::<Vec<super::Supported>>(&row.get::<_, Vec<u8>>(0)?)?.into_iter();
+                    samples = self.decode_block(&row.get::<_, Vec<u8>>(0)?)?.into_iter();
                 } else {
                     return Ok(None);
                 }
@@ -351,7 +350,7 @@ impl Archive {
                 )
                 .optional()?;
             let previous = data
-                .map(|data| decode::<Vec<super::Supported>>(&data))
+                .map(|data| self.decode_block(&data))
                 .transpose()?
                 .and_then(|samples| {
                     samples
@@ -365,6 +364,7 @@ impl Archive {
                     time_ns: start,
                     millivolts: 0,
                     nanoamps: 0,
+                    range: None,
                 },
                 |s| s.sample,
             );

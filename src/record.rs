@@ -1,7 +1,7 @@
 //! CSV and sigrok session writers shared by frontends.
 
 mod markers;
-use crate::stream::{Edge, Markers, Sample};
+use crate::stream::{CurrentRange, Edge, Markers, Sample};
 pub use markers::label as marker_label;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -231,7 +231,7 @@ impl Sink {
                     columns.push_str(",dio_gap");
                 }
                 csv.row(format_args!(
-                    "sequence,time_ns,millivolts,nanoamps{columns}"
+                    "sequence,time_ns,millivolts,nanoamps,range{columns}"
                 ))?;
                 csv.dio = dio;
             }
@@ -333,7 +333,7 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
 }
 
 /// One line per pair, and one per edge between them, in time order: an edge's line has no
-/// sequence, millivolts or nanoamps, and gives the levels after it.
+/// sequence, millivolts, nanoamps or range, and gives the levels after it.
 pub struct Csv {
     file: BufWriter<File>,
     path: PathBuf,
@@ -365,7 +365,7 @@ impl Csv {
             self.dio.levels = levels;
         }
         let fields = self.fields();
-        self.row(format_args!(",{},,{fields}", edge.time_ns))?;
+        self.row(format_args!(",{},,,{fields}", edge.time_ns))?;
         Ok(())
     }
 
@@ -378,8 +378,13 @@ impl Csv {
     fn sample(&mut self, sample: &Sample) -> Result<()> {
         self.before(sample.time_ns)?;
         let fields = self.fields();
+        let range = match sample.range {
+            Some(CurrentRange::Low) => "low",
+            Some(CurrentRange::High) => "high",
+            None => "",
+        };
         self.row(format_args!(
-            "{},{},{},{}{fields}",
+            "{},{},{},{},{range}{fields}",
             sample.sequence, sample.time_ns, sample.millivolts, sample.nanoamps
         ))?;
         Ok(())

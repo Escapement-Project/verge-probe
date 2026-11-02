@@ -179,6 +179,7 @@ mod tests {
                 time_ns: u64::from(sequence) * 1_000_000,
                 millivolts: 3000,
                 nanoamps: 10,
+                range: None,
             }])
             .unwrap();
         }
@@ -315,6 +316,7 @@ mod tests {
                     time_ns: 40_000_000,
                     millivolts: 3000,
                     nanoamps: 10,
+                    range: None,
                 }])
                 .unwrap();
             }
@@ -364,12 +366,14 @@ mod tests {
                 time_ns: 0,
                 millivolts: 3000,
                 nanoamps: 10,
+                range: None,
             },
             Sample {
                 sequence: 1,
                 time_ns: 1_000_000,
                 millivolts: 3000,
                 nanoamps: 20,
+                range: None,
             },
         ])
         .unwrap();
@@ -398,6 +402,7 @@ mod tests {
                 "time_ns",
                 "millivolts",
                 "nanoamps",
+                "range",
                 "dio3",
                 "marker_number",
                 "marker_label",
@@ -409,10 +414,10 @@ mod tests {
             rows.iter().map(|r| &r[1]).collect::<Vec<_>>(),
             ["0", "500000", "500000", "1000000"]
         );
-        assert_eq!(&rows[1][5], "4294967295");
-        assert_eq!(&rows[1][6], "comma, quote\"\\n\\\\\\xff");
-        assert_eq!(&rows[1][7], "1");
-        assert_eq!(&rows[2][5], "0");
+        assert_eq!(&rows[1][6], "4294967295");
+        assert_eq!(&rows[1][7], "comma, quote\"\\n\\\\\\xff");
+        assert_eq!(&rows[1][8], "1");
+        assert_eq!(&rows[2][6], "0");
         assert_eq!(&rows[3][3], "20");
     }
     #[test]
@@ -427,6 +432,7 @@ mod tests {
             time_ns: 40_000_000,
             millivolts: 3000,
             nanoamps: 10,
+            range: None,
         }])
         .unwrap();
         sink.markers(&Markers::new(

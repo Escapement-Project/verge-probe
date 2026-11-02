@@ -488,6 +488,24 @@ impl Total {
     }
 }
 
+/// The current range a pair was converted on.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRange {
+    Low,
+    High,
+}
+
+impl CurrentRange {
+    #[must_use]
+    pub fn new(low: bool) -> CurrentRange {
+        if low {
+            CurrentRange::Low
+        } else {
+            CurrentRange::High
+        }
+    }
+}
+
 /// One pair as the total counts it: its voltage, and the current step 5 gives it.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sample {
@@ -496,6 +514,9 @@ pub struct Sample {
     pub time_ns: u64,
     pub millivolts: u32,
     pub nanoamps: u32,
+    /// The pair's own range. Step 5 can take its current from the next pair, which then shares
+    /// it. None only for a sample from a capture archive older than this field.
+    pub range: Option<CurrentRange>,
 }
 
 /// A pair whose range differs from the one before, waiting for the next pair's current.
@@ -505,6 +526,7 @@ struct Waiting {
     time_ns: u64,
     millivolts: u32,
     shunt_nanoamps: u32,
+    low: bool,
 }
 
 /// Converts a stream's pairs, and sums them as the probe does (step 5 and the total).
@@ -565,6 +587,7 @@ impl Converter {
             time_ns: pair.time_ns,
             millivolts: pair.millivolts,
             nanoamps,
+            range: Some(CurrentRange::new(pair.low)),
         });
     }
 
@@ -584,6 +607,7 @@ impl Converter {
             time_ns,
             millivolts: reading.millivolts,
             shunt_nanoamps: reading.shunt_nanoamps,
+            low: pair.low,
         };
         let switched = pair.low != self.previous_low;
         self.previous_low = pair.low;

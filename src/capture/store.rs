@@ -100,6 +100,20 @@ pub(super) fn decode<T: for<'a> Deserialize<'a>>(bytes: &[u8]) -> Result<T> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
+/// A block's sample as archives before version 4 stored it, without its range.
+#[derive(Serialize, Deserialize)]
+struct SupportedV3 {
+    sample: SampleV3,
+    end_ns: u64,
+}
+#[derive(Serialize, Deserialize)]
+struct SampleV3 {
+    sequence: u32,
+    time_ns: u64,
+    millivolts: u32,
+    nanoamps: u32,
+}
+
 impl Archive {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -109,7 +123,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=3).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=4).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -166,7 +180,26 @@ impl Archive {
                 .query_row("SELECT data FROM blocks WHERE n=?", [index as i64], |r| {
                     r.get(0)
                 })?;
-        decode(&bytes)
+        self.decode_block(&bytes)
+    }
+    pub(super) fn decode_block(&self, bytes: &[u8]) -> Result<Vec<Supported>> {
+        if self.version >= 4 {
+            return decode(bytes);
+        }
+        let old: Vec<SupportedV3> = decode(bytes)?;
+        Ok(old
+            .into_iter()
+            .map(|s| Supported {
+                sample: Sample {
+                    sequence: s.sample.sequence,
+                    time_ns: s.sample.time_ns,
+                    millivolts: s.sample.millivolts,
+                    nanoamps: s.sample.nanoamps,
+                    range: None,
+                },
+                end_ns: s.end_ns,
+            })
+            .collect())
     }
     fn visit(
         &self,
@@ -334,7 +367,7 @@ impl Archive {
         ])?;
         while let Some(row) = rows.next()? {
             cancelled(cancel)?;
-            let samples: Vec<Supported> = decode(&row.get::<_, Vec<u8>>(0)?)?;
+            let samples = self.decode_block(&row.get::<_, Vec<u8>>(0)?)?;
             each(
                 samples
                     .into_iter()
@@ -438,7 +471,7 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=3;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=4;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
@@ -757,7 +790,7 @@ mod tests {
     use super::*;
     use crate::{
         CalibrationPoint,
-        stream::{End, EndReason, Pair, Pairs},
+        stream::{CurrentRange, End, EndReason, Pair, Pairs},
     };
     use std::sync::atomic::AtomicBool;
 
@@ -864,6 +897,7 @@ mod tests {
             } else {
                 1_000_000
             },
+            range: Some(CurrentRange::new(!i.is_multiple_of(100))),
         }
     }
     #[test]
@@ -950,6 +984,7 @@ mod tests {
         drop(archive);
         writer.finish().unwrap();
         let db = Connection::open(&saved).unwrap();
+        old_blocks(&db);
         db.execute_batch("PRAGMA user_version=2; DROP TABLE markers;")
             .unwrap();
         drop(db);
@@ -1065,7 +1100,7 @@ mod tests {
         let out = dir.path().join("loss.csv");
         archive.export(&out, true, extent, &cancel).unwrap();
         let csv = fs::read_to_string(out).unwrap();
-        assert!(csv.contains(",2000000,,,1,0\n,2000000,,,,1\n"), "{csv}");
+        assert!(csv.contains(",2000000,,,,1,0\n,2000000,,,,,1\n"), "{csv}");
     }
 
     #[test]
@@ -1153,8 +1188,8 @@ mod tests {
             .unwrap();
         let csv = fs::read_to_string(out).unwrap();
         let edges: Vec<_> = csv.lines().filter(|row| row.starts_with(',')).collect();
-        assert_eq!(edges, [",0,,,1,0", ",0,,,0,0"]);
-        assert!(csv.contains("1,1000000,3000,1000000,0,0"), "{csv}");
+        assert_eq!(edges, [",0,,,,1,0", ",0,,,,0,0"]);
+        assert!(csv.contains("1,1000000,3000,1000000,low,0,0"), "{csv}");
     }
 
     #[test]
@@ -1268,12 +1303,15 @@ mod tests {
                 .unwrap();
             if csv {
                 let text = fs::read_to_string(&out).unwrap();
-                assert!(text.contains(",1200000,,,0,0,0,1,0\n"), "{text}");
+                assert!(text.contains(",1200000,,,,0,0,0,1,0\n"), "{text}");
                 assert!(
-                    text.contains(",3000000,,,0,0,0,1,0\n,3000000,,,,,,,1\n"),
+                    text.contains(",3000000,,,,0,0,0,1,0\n,3000000,,,,,,,,1\n"),
                     "{text}"
                 );
-                assert!(text.contains("4,4000000,3000,1000000,,,,,1\n"), "{text}");
+                assert!(
+                    text.contains("4,4000000,3000,1000000,low,,,,,1\n"),
+                    "{text}"
+                );
                 assert!(!text.contains("9,9000000"));
             } else {
                 let mut zip = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
@@ -1291,7 +1329,7 @@ mod tests {
             .export(&out, true, Interval::new(4_500_000, 5_500_000), &cancel)
             .unwrap();
         let text = fs::read_to_string(out).unwrap();
-        assert!(text.contains("4,4000000,3000,1000000,,,,,1"), "{text}");
+        assert!(text.contains("4,4000000,3000,1000000,low,,,,,1"), "{text}");
         assert!(
             archive
                 .digital(Interval::new(0, 10), 3, &AtomicBool::new(true))
@@ -1334,6 +1372,7 @@ mod tests {
         assert!(view.bins.iter().all(|bin| bin.high == 1 && bin.low == 1));
         drop(archive);
         let db = Connection::open(&path).unwrap();
+        old_blocks(&db);
         db.execute_batch("PRAGMA user_version=1; DROP TABLE dio_nodes; DROP TABLE dio_blocks;")
             .unwrap();
         drop(db);
@@ -1419,7 +1458,10 @@ mod tests {
             .export(&csv, true, archive.extent().unwrap(), &cancel)
             .unwrap();
         let text = fs::read_to_string(csv).unwrap();
-        assert!(text.contains(",2700000,,,1,0\n,2700000,,,0,0\n"), "{text}");
+        assert!(
+            text.contains(",2700000,,,,1,0\n,2700000,,,,0,0\n"),
+            "{text}"
+        );
         let sr = dir.path().join("attached.sr");
         archive
             .export(&sr, false, archive.extent().unwrap(), &cancel)
@@ -1477,7 +1519,7 @@ mod tests {
         assert!(
             fs::read_to_string(csv)
                 .unwrap()
-                .contains(",4500000,,,0,0\n")
+                .contains(",4500000,,,,0,0\n")
         );
         for (name, interval, expected) in [
             (
@@ -1939,8 +1981,65 @@ mod tests {
             .unwrap();
         let csv = fs::read_to_string(out).unwrap();
         assert_eq!(csv.lines().count(), 3);
-        assert!(csv.contains("1,1000000,3000,1000000\n"));
+        assert!(csv.contains("1,1000000,3000,1000000,low\n"));
         assert!(!csv.contains("3,3000000"));
+    }
+    /// Rewrites every sample block in the layout archives before version 4 stored.
+    fn old_blocks(db: &Connection) {
+        let blocks: Vec<(i64, Vec<u8>)> = db
+            .prepare("SELECT n, data FROM blocks")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        for (n, data) in blocks {
+            let old: Vec<SupportedV3> = decode::<Vec<Supported>>(&data)
+                .unwrap()
+                .into_iter()
+                .map(|s| SupportedV3 {
+                    sample: SampleV3 {
+                        sequence: s.sample.sequence,
+                        time_ns: s.sample.time_ns,
+                        millivolts: s.sample.millivolts,
+                        nanoamps: s.sample.nanoamps,
+                    },
+                    end_ns: s.end_ns,
+                })
+                .collect();
+            db.execute(
+                "UPDATE blocks SET data=? WHERE n=?",
+                params![encode(&old).unwrap(), n],
+            )
+            .unwrap();
+        }
+    }
+    #[test]
+    fn version_3_blocks_read_without_a_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.vergecapture");
+        let mut writer = raw_writer(&path, 1000);
+        writer.append((0..5).map(sample)).unwrap();
+        writer.finish().unwrap();
+        let db = Connection::open(&path).unwrap();
+        old_blocks(&db);
+        db.execute_batch("PRAGMA user_version=3;").unwrap();
+        drop(db);
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let extent = archive.extent().unwrap();
+        let samples = archive.view(extent, 64, &cancel).unwrap().samples.unwrap();
+        assert_eq!(samples.len(), 5);
+        assert!(
+            samples
+                .iter()
+                .all(|s| s.sample.range.is_none() && s.sample.millivolts == 3000)
+        );
+        let out = dir.path().join("v3.csv");
+        archive.export(&out, true, extent, &cancel).unwrap();
+        let csv = fs::read_to_string(out).unwrap();
+        assert!(csv.contains("1,1000000,3000,1000000,\n"), "{csv}");
+        assert_eq!(csv.lines().count(), 6, "{csv}");
     }
     #[test]
     fn partial_pulse_integrals_have_independent_integer_expectations() {
@@ -1953,6 +2052,7 @@ mod tests {
                 time_ns: u64::from(i) * 1_000_000,
                 millivolts: 3000,
                 nanoamps: if i == 1023 { 10_000_000 } else { 2_000_000 },
+                range: Some(CurrentRange::High),
             }))
             .unwrap();
         writer.flush().unwrap();
@@ -2009,6 +2109,7 @@ mod tests {
                     time_ns: u64::from(i) * 1_000_000_000 / 1500,
                     millivolts: 3000,
                     nanoamps: if i == 3000 { 5000 } else { 1000 },
+                    range: Some(CurrentRange::Low),
                 }))
                 .unwrap();
             if writer.samples.len() >= BLOCK {
@@ -2062,6 +2163,7 @@ mod tests {
                     } else {
                         1_000_000
                     },
+                    range: Some(CurrentRange::High),
                 }))
                 .unwrap();
             writer.flush().unwrap();
