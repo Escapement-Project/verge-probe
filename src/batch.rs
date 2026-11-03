@@ -206,6 +206,15 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
                 "its SWD jumper is fitted, which takes away the interface stock's update request goes through".into(),
             );
         }
+        // It names no board, so no batch's board filter could take it.
+        State::Probe {
+            firmware: Firmware::DaplinkRs { .. },
+            ..
+        } => {
+            return Verdict::Skip(
+                "runs daplink-rs, which names no board, so a batch does not take it".into(),
+            );
+        }
         State::Bootloader | State::Probe { .. } => {}
     }
     if !filter.board.takes(unit) {
@@ -225,7 +234,11 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::MiniBootloader
         | State::Held { .. }
         | State::Unreadable { .. }
-        | State::SwdJumper { .. } => {
+        | State::SwdJumper { .. }
+        | State::Probe {
+            firmware: Firmware::DaplinkRs { .. },
+            ..
+        } => {
             unreachable!("judged above")
         }
         State::Probe {
@@ -943,7 +956,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
             let at = port(device);
             let was_attached = attached.contains(&device.instance);
             let leave_alone = was_attached && !self.filter.attached;
-            let probe = device.role() == Some(Role::Probe);
+            let probe = device.role().is_some_and(Role::is_firmware);
             let since = now.saturating_sub(first_seen(device));
             // A firmware that has just enumerated is given the time the update path gives it.
             if probe && !was_attached && since < self.timing.settle {

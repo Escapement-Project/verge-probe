@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
+use crate::daplink_rs;
 use crate::protocol::{
     CAP_CALIBRATED_ENERGY, CAP_CAPTURE_ID, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
     CAP_MARKS, CAP_TARGET_POWER, ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND,
@@ -100,6 +101,19 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             info.product = format!("MCU-Link CMSIS-DAP V{version}");
             (info, u.stock_serial.clone(), version.to_string())
         }
+        // As dap-rs answers: no vendor, product, serial or firmware version, and the revision in
+        // the protocol version.
+        SimFirmware::DaplinkRs { revision } => (
+            super::RecordedInfo {
+                vendor: String::new(),
+                product: String::new(),
+                protocol: format!("2.1.1.g{revision}"),
+                packet_count: 8,
+                packet_size: 512,
+            },
+            String::new(),
+            String::new(),
+        ),
     };
     match request {
         [dap::DAP_INFO, id] => match *id {
@@ -226,6 +240,25 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
+        [daplink_rs::REBOOT_COMMAND, request @ ..]
+            if matches!(firmware, SimFirmware::DaplinkRs { .. }) =>
+        {
+            match request {
+                [0x00, ..] => b"\x9fdlrs\x01\x03".to_vec(),
+                [0x01, b'B', b'O', b'O', b'T', ..] => {
+                    // It answers, then enters the ROM from its idle loop 50 ms later.
+                    world.schedule(Duration::from_millis(50), unit, Event::Leave);
+                    world.schedule(
+                        Duration::from_millis(550),
+                        unit,
+                        Event::Appear(Mode::Bootloader),
+                    );
+                    vec![daplink_rs::REBOOT_COMMAND, 0x00]
+                }
+                [0x01, ..] => vec![daplink_rs::REBOOT_COMMAND, 0x02],
+                _ => vec![dap::ID_DAP_INVALID],
+            }
+        }
         [dap::DAP_DISCONNECT] => vec![dap::DAP_DISCONNECT, dap::DAP_OK],
         [dap::DAP_HOST_STATUS, 0 | 1, on @ (0 | 1)] => {
             world.units[unit].host_status += 1;

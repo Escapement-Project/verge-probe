@@ -40,7 +40,8 @@ pub struct UsbDevice {
 impl UsbDevice {
     #[must_use]
     pub fn role(&self) -> Option<Role> {
-        ids::role(self.vid, self.pid)
+        let role = ids::role(self.vid, self.pid)?;
+        (role != Role::DaplinkRs || crate::daplink_rs::is_mculink_build(self)).then_some(role)
     }
 }
 

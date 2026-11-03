@@ -12,6 +12,18 @@ pub enum Role {
     Bootloader,
     /// An MCU-Link mini in ISP mode. A different board and image, so the tool refuses it.
     MiniBootloader,
+    /// Running daplink-rs. Its ID is Arm's DAPLink ID, which every DAPLink probe shares, so a
+    /// device has this role only when its strings say daplink-rs on an MCU-Link
+    /// ([`crate::bus::UsbDevice::role`]).
+    DaplinkRs,
+}
+
+impl Role {
+    /// Whether the unit runs a firmware, which the tool may open and ask what it is.
+    #[must_use]
+    pub fn is_firmware(self) -> bool {
+        matches!(self, Role::Probe | Role::DaplinkRs)
+    }
 }
 
 /// One row of [`KNOWN_IDS`].
@@ -41,6 +53,11 @@ pub const KNOWN_IDS: &[KnownId] = &[
         vid: 0x1fc9,
         pid: 0x0022,
         role: Role::MiniBootloader,
+    },
+    KnownId {
+        vid: 0x0d28,
+        pid: 0x0204,
+        role: Role::DaplinkRs,
     },
 ];
 
@@ -73,12 +90,17 @@ mod tests {
         assert_eq!(role(0x1fc9, 0x0021), Some(Role::Bootloader));
         assert_eq!(role(0x1fc9, 0x0022), Some(Role::MiniBootloader));
         assert_eq!(role(0x1fc9, 0x0023), None);
-        assert_eq!(role(0x0d28, 0x0204), None);
+        assert_eq!(role(0x0d28, 0x0204), Some(Role::DaplinkRs));
     }
 
     #[test]
     fn every_role_has_an_id() {
-        for role in [Role::Probe, Role::Bootloader, Role::MiniBootloader] {
+        for role in [
+            Role::Probe,
+            Role::Bootloader,
+            Role::MiniBootloader,
+            Role::DaplinkRs,
+        ] {
             let (vid, pid) = id_for(role);
             assert_eq!(super::role(vid, pid), Some(role));
         }

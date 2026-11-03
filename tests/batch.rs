@@ -1485,3 +1485,20 @@ fn a_batch_skips_a_unit_with_its_swd_jumper() {
     };
     assert!(reason.contains("SWD jumper"), "{reason}");
 }
+
+/// daplink-rs names no board, so no batch takes it, whatever the filters, and it says why.
+#[test]
+fn a_batch_skips_daplink_rs_and_says_why() {
+    let bus = SimBus::default();
+    bus.add_daplink_rs("507437947680");
+    let units = verge_probe::detect::detect(&bus).unwrap();
+    let any = Filter {
+        ours: OursFilter::Any,
+        stock: StockFilter::Any,
+        ..filter()
+    };
+    assert_eq!(
+        judge(&units[0], &any, &ImageVersion::Unknown),
+        Verdict::Skip("runs daplink-rs, which names no board, so a batch does not take it".into())
+    );
+}

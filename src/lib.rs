@@ -15,6 +15,7 @@ pub use capture_id::CaptureId;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod dap;
+pub mod daplink_rs;
 pub mod detect;
 pub mod hid;
 pub mod ids;

@@ -7,6 +7,7 @@ use mboot::McuBoot;
 use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapLink, EntryError, LinkError};
+use crate::daplink_rs;
 use crate::detect::{self, Firmware, Hardware, State, Unit};
 use crate::ids::Role;
 use crate::image::{Image, ImageError};
@@ -48,8 +49,9 @@ pub enum UpdateError {
     Bus(#[from] BusError),
     #[error(transparent)]
     Image(#[from] ImageError),
+    /// Stock or daplink-rs did not take its own request to restart into the bootloader.
     #[error(transparent)]
-    StockEntry(#[from] EntryError),
+    Entry(#[from] EntryError),
     #[error("Verge did not take the bootloader request ({0}). Use the ISP jumper")]
     OursEntry(LinkError),
     #[error(transparent)]
@@ -232,11 +234,12 @@ fn enter<B: Bus>(
             all.clone()
         };
     let offer = paths::offer(unit, &considered);
-    let path = offer
-        .paths
-        .iter()
-        .copied()
-        .find(|path| matches!(path, Path::OursJumperFree | Path::StockJumperFree));
+    let path = offer.paths.iter().copied().find(|path| {
+        matches!(
+            path,
+            Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree
+        )
+    });
     let Some(path) = path else {
         let mut reason = "this unit has no jumper-free path into its bootloader".to_owned();
         for note in &offer.notes {
@@ -271,6 +274,7 @@ fn enter<B: Bus>(
             (Path::OursJumperFree, _) => {
                 dap::request_ours_bootloader(&mut link).map_err(UpdateError::OursEntry)?;
             }
+            (Path::DaplinkRsJumperFree, _) => daplink_rs::request_bootloader(&mut link)?,
             (
                 _,
                 State::Probe {
@@ -567,7 +571,7 @@ pub fn install<B: Bus>(
     let offer = paths::offer(unit, &units);
     match offer.best() {
         Some(Path::FlashNow) => flash_now(bus, payload.image, None, timing, progress, cancel),
-        Some(Path::OursJumperFree | Path::StockJumperFree) => {
+        Some(Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree) => {
             update_unless(bus, unit, payload, timing, progress, cancel, stop)
         }
         Some(Path::Jumper) => Err(UpdateError::Refused(format!(

@@ -258,6 +258,10 @@ pub enum EntryError {
     StockVersionUnknown,
     #[error("stock answered the update request with {0}, not 81 00 01; use the ISP jumper")]
     StockRefused(String),
+    #[error("daplink-rs did not restart into its bootloader: {0}")]
+    DaplinkRsRefused(String),
+    #[error("daplink-rs is flashing a target, and restarts only once that has finished")]
+    DaplinkRsBusy,
     #[error(transparent)]
     Dap(#[from] DapError),
 }

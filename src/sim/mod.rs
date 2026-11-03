@@ -48,6 +48,10 @@ pub enum SimFirmware {
     StockHid {
         version: StockVersion,
     },
+    /// daplink-rs's MCU-Link build at `revision`, its git hash.
+    DaplinkRs {
+        revision: String,
+    },
 }
 
 impl SimFirmware {
@@ -56,6 +60,7 @@ impl SimFirmware {
             SimFirmware::Ours { build } => format!("SIMFW:ours:{build};"),
             SimFirmware::Stock { version } => format!("SIMFW:stock:{version};"),
             SimFirmware::StockHid { version } => format!("SIMFW:stockhid:{version};"),
+            SimFirmware::DaplinkRs { revision } => format!("SIMFW:daplinkrs:{revision};"),
         }
     }
 
@@ -70,6 +75,9 @@ impl SimFirmware {
             }),
             "stockhid" => Some(SimFirmware::StockHid {
                 version: StockVersion::parse(value)?,
+            }),
+            "daplinkrs" => Some(SimFirmware::DaplinkRs {
+                revision: value.to_owned(),
             }),
             _ => None,
         }
@@ -467,6 +475,7 @@ impl World {
         let u = &self.units[unit];
         let instance = u.instance.clone()?;
         let (vid, pid) = match (&u.mode, u.mini) {
+            (Mode::Firmware(SimFirmware::DaplinkRs { .. }), _) => ids::id_for(Role::DaplinkRs),
             (Mode::Firmware(_), _) => ids::id_for(Role::Probe),
             (Mode::Bootloader, false) => ids::id_for(Role::Bootloader),
             (Mode::Bootloader, true) => ids::id_for(Role::MiniBootloader),
@@ -500,6 +509,14 @@ impl World {
                 false,
                 true,
             ),
+            // It reads no straps, so no jumper takes its interfaces away.
+            Mode::Firmware(SimFirmware::DaplinkRs { .. }) => (
+                Some(daplink_rs_serial(u)),
+                Some(crate::daplink_rs::MANUFACTURER.to_owned()),
+                Some(crate::daplink_rs::PRODUCT.to_owned()),
+                true,
+                false,
+            ),
             Mode::Bootloader | Mode::Silent => (
                 None,
                 Some("NXP SEMICONDUCTOR INC".to_owned()),
@@ -518,6 +535,8 @@ impl World {
             product,
             bcd_device: match &u.mode {
                 Mode::Firmware(SimFirmware::Ours { .. }) => ours_bcd_device(u),
+                // As daplink-rs 507437947 reports it.
+                Mode::Firmware(SimFirmware::DaplinkRs { .. }) => 0x0010,
                 // The Pro's with no jumper (mculink-stock-notes); nothing reads stock's.
                 Mode::Firmware(_) => 0x0337,
                 Mode::Bootloader | Mode::Silent => 0x0100,
@@ -548,6 +567,11 @@ fn stock_product(board: Option<u8>, version: StockVersion, swd_jumper: bool) -> 
     };
     let straps = if swd_jumper { straps & !0x080 } else { straps };
     format!("MCU-LINK {name}(r{straps:03X}) CMSIS-DAP V{version}")
+}
+
+/// The serial daplink-rs derives from this unit's unique id: a hash, nothing like ours or stock's.
+pub(crate) fn daplink_rs_serial(u: &SimUnit) -> String {
+    format!("0000AA2B{}", &u.ours_serial[2..])
 }
 
 /// Ours' product string, which names the Pro (`DAP_ProductName` in the firmware).
@@ -618,6 +642,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "one unit running stock V3.108, before the jumper-free update",
     ),
     ("stock-hid", "one unit running stock V2.245, HID only"),
+    (
+        "daplink-rs",
+        "one unit running daplink-rs's MCU-Link build, revision 507437947680",
+    ),
     ("isp", "one unit in ISP mode with the jumper off"),
     (
         "isp-jumper",
@@ -785,6 +813,12 @@ impl SimBus {
     pub fn add_ours(&self, build: &str) -> usize {
         self.add_running(SimFirmware::Ours {
             build: build.to_owned(),
+        })
+    }
+
+    pub fn add_daplink_rs(&self, revision: &str) -> usize {
+        self.add_running(SimFirmware::DaplinkRs {
+            revision: revision.to_owned(),
         })
     }
 
@@ -976,6 +1010,9 @@ impl SimBus {
             }
             "ours" => {
                 bus.add_ours("14d05d4");
+            }
+            "daplink-rs" => {
+                bus.add_daplink_rs("507437947680");
             }
             "ours-pro" => {
                 let unit = bus.add_ours("26ea505");
@@ -1175,7 +1212,11 @@ impl Bus for SimBus {
         if u.swd_jumper
             || !matches!(
                 u.mode,
-                Mode::Firmware(SimFirmware::Ours { .. } | SimFirmware::Stock { .. })
+                Mode::Firmware(
+                    SimFirmware::Ours { .. }
+                        | SimFirmware::Stock { .. }
+                        | SimFirmware::DaplinkRs { .. }
+                )
             )
         {
             return Err(BusError::Open {

@@ -7,7 +7,7 @@ use verge_probe::dap::Ours;
 use verge_probe::detect::{Guess, Hardware, Jumpered, State};
 use verge_probe::sim::{SimBus, SimFirmware};
 use verge_probe::version::StockVersion;
-use verge_probe::{Firmware, Path, detect, offer};
+use verge_probe::{Bus, Firmware, Path, detect, offer};
 
 /// The recorded `DAP_Info` block for `label`, read here rather than through the simulator.
 fn recorded(label: &str) -> Value {
@@ -201,6 +201,7 @@ fn every_scenario_offers_what_its_state_allows() {
         ("ours", &[&[Path::OursJumperFree, Path::Jumper]]),
         ("stock", &[&[Path::StockJumperFree, Path::Jumper]]),
         ("stock-old", &[&[Path::Jumper]]),
+        ("daplink-rs", &[&[Path::DaplinkRsJumperFree, Path::Jumper]]),
         ("isp", &[&[Path::FlashNow]]),
         ("isp-jumper", &[&[Path::FlashNow]]),
         ("two-isp", &[&[], &[]]),
@@ -414,5 +415,68 @@ fn naming_a_unit_leaves_a_unit_another_program_holds_unopened() {
         units
             .iter()
             .any(|u| matches!(u.state, State::Unreadable { .. }))
+    );
+}
+
+#[test]
+fn daplink_rs_is_asked_only_its_own_discovery() {
+    let bus = SimBus::scenario("daplink-rs").unwrap();
+    let units = detect(&bus).unwrap();
+    let [unit] = units.as_slice() else {
+        panic!("{units:?}");
+    };
+    let State::Probe { identity, firmware } = &unit.state else {
+        panic!("{:?}", unit.state);
+    };
+    assert_eq!(
+        *firmware,
+        Firmware::DaplinkRs {
+            reboot: Some(verge_probe::daplink_rs::Reboot {
+                version: 1,
+                kind: verge_probe::daplink_rs::KIND_NXP_ISP
+            })
+        }
+    );
+    // dap-rs leaves the serial out of DAP_Info, so the USB serial names the unit.
+    assert_eq!(identity.serial, None);
+    assert_eq!(unit.serial(), Some("0000AA2B3E7A91C2"));
+    assert_eq!(unit.hardware(), Hardware::Unknown);
+    assert_eq!(unit.state.to_string(), "daplink-rs 2.1.1.g507437947680");
+    // Another DAPLink gives 0x82 a meaning of its own, so detection never sends it.
+    let log = bus.log();
+    assert!(log.iter().any(|l| l == "1-1: DAP 9f00"), "{log:#?}");
+    assert!(
+        !log.iter().any(|l| l.starts_with("1-1: DAP 82")),
+        "{log:#?}"
+    );
+}
+
+#[test]
+fn naming_another_unit_leaves_daplink_rs_unopened() {
+    let bus = SimBus::default();
+    bus.add_ours("v0.3.0");
+    bus.add_daplink_rs("507437947680");
+    let units = verge_probe::detect::detect_named(&bus, Some("CJ3E7A91C2")).unwrap();
+    assert_eq!(units.len(), 1, "{units:?}");
+    assert!(
+        !bus.log().iter().any(|l| l.starts_with("1-2: DAP")),
+        "{:#?}",
+        bus.log()
+    );
+    // Named by its USB serial, it alone is asked.
+    let serial = bus.devices().unwrap()[1].serial.clone().unwrap();
+    let units = verge_probe::detect::detect_named(&bus, Some(&serial)).unwrap();
+    let [unit] = units.as_slice() else {
+        panic!("{units:?}");
+    };
+    assert!(
+        matches!(
+            unit.state,
+            State::Probe {
+                firmware: Firmware::DaplinkRs { .. },
+                ..
+            }
+        ),
+        "{unit:?}"
     );
 }

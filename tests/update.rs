@@ -1204,3 +1204,64 @@ fn a_bootloader_arriving_during_a_flash_by_port_stops_it() {
     assert!(reason.contains("cannot tell which bootloader"), "{reason}");
     assert!(bus.flash(0).is_empty());
 }
+
+#[test]
+fn daplink_rs_restarts_on_its_own_command() {
+    let bus = SimBus::scenario("daplink-rs").unwrap();
+    let unit = the_unit(&bus, "0000AA2B3E7A91C2");
+    let image = firmware_image(&ours("v0.3.0"));
+    let outcome = update::update(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
+
+    // Until it leaves the bus it is sent DAP_Info, its discovery and the reboot with its magic,
+    // and nothing of Verge's.
+    let log = bus.log();
+    let before: Vec<&str> = log
+        .iter()
+        .map(String::as_str)
+        .take_while(|l| !l.ends_with("leaves the bus"))
+        .filter(|l| l.contains(": DAP ") && !l.contains(": DAP 00"))
+        .collect();
+    assert_eq!(*before.last().unwrap(), "1-1: DAP 9f01424f4f54", "{log:#?}");
+    assert!(
+        before.iter().all(|l| l.starts_with("1-1: DAP 9f")),
+        "{before:#?}"
+    );
+    // Nor Verge's reboot request on endpoint 0.
+    assert!(
+        !log.iter()
+            .take_while(|l| !l.ends_with("leaves the bus"))
+            .any(|l| l.contains(": control ")),
+        "{log:#?}"
+    );
+}
+
+#[test]
+fn verge_goes_back_to_daplink_rs_and_is_seen_running_it() {
+    let bus = SimBus::scenario("ours").unwrap();
+    let unit = the_unit(&bus, "CJ3E7A91C2");
+    let image = firmware_image(&SimFirmware::DaplinkRs {
+        revision: "507437947680".into(),
+    });
+    let outcome = update::update(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(
+        matches!(running(&outcome), Firmware::DaplinkRs { reboot: Some(r) } if r.reaches_isp()),
+        "{outcome:?}"
+    );
+}

@@ -10,6 +10,8 @@ pub enum Path {
     OursJumperFree,
     /// Stock V3.122 and later does the same on the request LinkServer sends.
     StockJumperFree,
+    /// daplink-rs does the same on its own reboot command.
+    DaplinkRsJumperFree,
     /// Fit the ISP jumper before plugging the unit in; the ROM samples the pin at reset.
     Jumper,
     /// The unit is in ISP mode already, so the tool can flash it now.
@@ -22,7 +24,10 @@ impl Path {
     pub fn is_jumper_free(self) -> bool {
         matches!(
             self,
-            Path::OursJumperFree | Path::StockJumperFree | Path::FlashNow
+            Path::OursJumperFree
+                | Path::StockJumperFree
+                | Path::DaplinkRsJumperFree
+                | Path::FlashNow
         )
     }
 
@@ -35,6 +40,9 @@ impl Path {
             }
             Path::StockJumperFree => {
                 "The tool sends the request NXP's LinkServer uses, then flashes and restarts the unit."
+            }
+            Path::DaplinkRsJumperFree => {
+                "The tool asks daplink-rs to restart into its bootloader, flashes it, and restarts it."
             }
             Path::Jumper => {
                 "Unplug the unit, fit the ISP jumper, and plug it back in so that its bootloader starts. Flash it, then unplug it and take the jumper off."
@@ -49,6 +57,7 @@ impl fmt::Display for Path {
         f.write_str(match self {
             Path::OursJumperFree => "jumper-free (Verge)",
             Path::StockJumperFree => "jumper-free (stock)",
+            Path::DaplinkRsJumperFree => "jumper-free (daplink-rs)",
             Path::Jumper => "ISP jumper",
             Path::FlashNow => "flash now",
         })
@@ -116,11 +125,29 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 "Stock did not report its version, so the tool will not try the jumper-free update.".into(),
             ),
         },
+        State::Probe {
+            firmware: Firmware::DaplinkRs { reboot },
+            ..
+        } => match reboot {
+            Some(reboot) if reboot.reaches_isp() => {
+                jumper_free(&mut offer, Path::DaplinkRsJumperFree);
+            }
+            Some(reboot) if reboot.kind == crate::daplink_rs::KIND_NONE => offer.notes.push(
+                "This daplink-rs build has no bootloader to restart into.".into(),
+            ),
+            Some(_) => offer.notes.push(
+                "This daplink-rs build restarts into a bootloader other than the LPC55S69's ROM, so the tool does not ask it to.".into(),
+            ),
+            None => offer.notes.push(
+                "This daplink-rs build has no command to restart into its bootloader.".into(),
+            ),
+        },
         State::Unreadable { reason, guess } => {
             offer
                 .notes
                 .push(format!("The tool could not ask this unit what it runs: {reason}."));
-            if *guess == Guess::Ours || matches!(guess, Guess::Stock(Some(v)) if v.has_jumper_free_update())
+            if matches!(guess, Guess::Ours | Guess::DaplinkRs)
+                || matches!(guess, Guess::Stock(Some(v)) if v.has_jumper_free_update())
             {
                 offer.notes.push(
                     "Close whatever has it open and look again for the jumper-free path.".into(),

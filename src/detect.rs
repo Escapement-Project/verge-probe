@@ -6,13 +6,21 @@ use crate::aux::Aux;
 use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapError, Identity, Ours};
+use crate::daplink_rs;
 use crate::ids::Role;
 use crate::version::{Build, StockVersion};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Firmware {
     Ours(Ours),
-    Stock { version: Option<StockVersion> },
+    Stock {
+        version: Option<StockVersion>,
+    },
+    /// daplink-rs's MCU-Link build. `reboot` is what its reboot command says, `None` where it has
+    /// none.
+    DaplinkRs {
+        reboot: Option<daplink_rs::Reboot>,
+    },
 }
 
 /// What USB strings alone suggest about a probe the tool could not query.
@@ -20,6 +28,7 @@ pub enum Firmware {
 pub enum Guess {
     Ours,
     Stock(Option<StockVersion>),
+    DaplinkRs,
     Unknown,
 }
 
@@ -28,7 +37,9 @@ impl Guess {
     pub fn from_strings(device: &UsbDevice) -> Guess {
         let product = device.product.as_deref().unwrap_or_default();
         let serial = device.serial.as_deref().unwrap_or_default();
-        if serial.starts_with("CJ") || product.contains("Verge") {
+        if daplink_rs::is_mculink_build(device) {
+            Guess::DaplinkRs
+        } else if serial.starts_with("CJ") || product.contains("Verge") {
             Guess::Ours
         } else if product.to_ascii_uppercase().contains("MCU-LINK") {
             Guess::Stock(StockVersion::from_product_string(product))
@@ -67,7 +78,7 @@ fn swd_jumper(device: &UsbDevice) -> Option<Jumpered> {
             (known && stock_straps(product)? & STOCK_STRAP_SWD == 0)
                 .then_some(Jumpered::Stock(version))
         }
-        Guess::Unknown => None,
+        Guess::DaplinkRs | Guess::Unknown => None,
     }
 }
 
@@ -247,6 +258,10 @@ impl Unit {
                 .product
                 .as_deref()
                 .map_or(Hardware::Unknown, Hardware::from_ours_product),
+            State::Probe {
+                firmware: Firmware::DaplinkRs { .. },
+                ..
+            } => Hardware::Unknown,
             State::Probe { .. } | State::Unreadable { .. } | State::SwdJumper { .. } => self
                 .device
                 .product
@@ -277,6 +292,14 @@ impl fmt::Display for State {
                 firmware: Firmware::Stock { version: None },
                 ..
             } => write!(f, "stock, version not reported"),
+            State::Probe {
+                firmware: Firmware::DaplinkRs { .. },
+                identity,
+            } => match identity.protocol.as_deref() {
+                // Its DAP_Info protocol version carries its revision: 2.1.1.g507437947680.
+                Some(protocol) if !protocol.is_empty() => write!(f, "daplink-rs {protocol}"),
+                _ => write!(f, "daplink-rs"),
+            },
             State::Held { ours } => write!(
                 f,
                 "Verge, build {}, its CMSIS-DAP held by another program",
@@ -286,6 +309,7 @@ impl fmt::Display for State {
                 Guess::Ours => write!(f, "probably Verge, could not ask"),
                 Guess::Stock(Some(v)) => write!(f, "probably stock V{v}, could not ask"),
                 Guess::Stock(None) => write!(f, "probably stock, could not ask"),
+                Guess::DaplinkRs => write!(f, "probably daplink-rs, could not ask"),
                 Guess::Unknown => write!(f, "a CMSIS-DAP firmware, could not ask"),
             },
             State::SwdJumper { firmware } => match firmware {
@@ -301,9 +325,10 @@ impl fmt::Display for State {
 
 /// Every attached MCU-Link and what it runs.
 ///
-/// A probe is opened, asked `DAP_Info` and vendor command 0x82, and released. Both are read-only.
-/// A Pro whose CMSIS-DAP another program holds is asked 0x82 over Verge Aux. A bootloader is not
-/// opened, nor a probe without a CMSIS-DAP v2 interface.
+/// A probe is opened, asked `DAP_Info` and vendor command 0x82, and released; daplink-rs is asked
+/// its own discovery instead of 0x82. All are read-only. A Pro whose CMSIS-DAP another program
+/// holds is asked 0x82 over Verge Aux. A bootloader is not opened, nor a probe without a CMSIS-DAP
+/// v2 interface.
 pub fn detect<B: Bus>(bus: &B) -> Result<Vec<Unit>, BusError> {
     Ok(bus
         .devices()?
@@ -327,12 +352,12 @@ pub fn detect_named<B: Bus>(bus: &B, serial: Option<&str>) -> Result<Vec<Unit>, 
     let named = |device: &UsbDevice| device.serial.as_deref() == Some(serial);
     let any_named = devices
         .iter()
-        .any(|device| device.role() == Some(Role::Probe) && named(device));
+        .any(|device| device.role().is_some_and(Role::is_firmware) && named(device));
     Ok(devices
         .into_iter()
         .filter_map(|device| {
             let role = device.role()?;
-            if any_named && role == Role::Probe && !named(&device) {
+            if any_named && role.is_firmware() && !named(&device) {
                 return None;
             }
             Some(query(bus, device, role))
@@ -351,22 +376,24 @@ fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
     let state = match role {
         Role::Bootloader => State::Bootloader,
         Role::MiniBootloader => State::MiniBootloader,
-        Role::Probe if !device.dap_v2 => match swd_jumper(&device) {
+        Role::Probe | Role::DaplinkRs if !device.dap_v2 => match swd_jumper(&device) {
             Some(firmware) => State::SwdJumper { firmware },
             None => State::Unreadable {
                 reason: "it has no CMSIS-DAP v2 interface (stock V2.x speaks HID only)".into(),
                 guess: Guess::from_strings(&device),
             },
         },
-        Role::Probe => match bus.open_dap(&device) {
-            Ok(mut link) => match ask(&mut link, &device) {
+        Role::Probe | Role::DaplinkRs => match bus.open_dap(&device) {
+            Ok(mut link) => match ask(&mut link, &device, role) {
                 Ok(state) => state,
                 Err(error) => State::Unreadable {
                     reason: error.to_string(),
                     guess: Guess::from_strings(&device),
                 },
             },
-            Err(BusError::Busy { .. }) => match device.aux.then(|| ask_aux(bus, &device)) {
+            Err(BusError::Busy { .. }) => match (device.aux && role == Role::Probe)
+                .then(|| ask_aux(bus, &device))
+            {
                 Some(Ok(ours)) => State::Held { ours },
                 held => {
                     if let Some(Err(error)) = held {
@@ -399,12 +426,21 @@ fn ask_aux<B: Bus>(bus: &B, device: &UsbDevice) -> Result<Ours, String> {
         .ok_or_else(|| "it answered 0x82 as stock would".to_owned())
 }
 
-fn ask(link: &mut dyn dap::DapLink, device: &UsbDevice) -> Result<State, DapError> {
+/// `DAP_Info`, then what the firmware is: vendor command 0x82 for ours or stock, and only
+/// daplink-rs's own discovery for daplink-rs, which gives 0x82 no meaning of ours.
+fn ask(link: &mut dyn dap::DapLink, device: &UsbDevice, role: Role) -> Result<State, DapError> {
     let drained = link.drain()?;
     if drained > 0 {
         tracing::debug!("{device}: drained {drained} replies an earlier host left unread");
     }
     let identity = dap::read_identity(link)?;
+    if role == Role::DaplinkRs {
+        let reboot = daplink_rs::discover(link)?;
+        return Ok(State::Probe {
+            identity,
+            firmware: Firmware::DaplinkRs { reboot },
+        });
+    }
     let firmware = match dap::identify(link)? {
         Some(ours) => Firmware::Ours(ours),
         None => Firmware::Stock {
