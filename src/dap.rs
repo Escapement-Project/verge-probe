@@ -174,7 +174,8 @@ pub fn scan_format_name(scnfmt: u32) -> String {
 
 /// Reads a reply to [`VENDOR_IDENTIFY`]: `Some` for ours, `None` for anything else.
 ///
-/// Stock answers `ID_DAP_Invalid` or a bare echo; any reply without the magic counts as stock.
+/// Stock echoes the id, alone (V3.172) or with a payload of its own (V3.174), and another firmware
+/// may answer `ID_DAP_Invalid`; any reply without the magic counts as stock.
 pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
     match reply.first() {
         Some(&ID_DAP_INVALID) => return Ok(None),
@@ -455,7 +456,9 @@ mod tests {
     #[test]
     fn identify_stock() {
         assert_eq!(parse_identify(&[0xFF]).unwrap(), None);
+        // V3.172, then V3.174.
         assert_eq!(parse_identify(&[0x82]).unwrap(), None);
+        assert_eq!(parse_identify(&[0x82, 0x00, 0x01]).unwrap(), None);
         assert_eq!(
             parse_identify(&[0x82, b'C', b'J', b'T', b'A', b'X']).unwrap(),
             None
