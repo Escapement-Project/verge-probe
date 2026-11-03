@@ -207,8 +207,8 @@ impl SimRom {
                     .step_by(PAGE as usize)
                     .any(|base| !flash.contains_key(&(base as u32)));
                 if erased {
-                    // The firmware's BENCH.md: "FLASH Driver: ECC Error", and the bootloader
-                    // drops off the bus.
+                    // mculink-stock-notes' updating.md: "FLASH Driver: ECC Error", and the
+                    // bootloader drops off the bus.
                     world.log.push(format!(
                         "{location}: ROM read of an erased page: ECC error, the bootloader drops off the bus"
                     ));

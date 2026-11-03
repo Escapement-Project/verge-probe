@@ -6,9 +6,9 @@
 //! - Stock's entry (`81 01` answered `81 00 01`, off the bus 2.1 s later, the bootloader 0.3 s
 //!   after that) is as measured. Ours' entry and the bootloader's reset are not measured; the
 //!   simulator takes 0.5 s and 1 s for them.
-//! - The bootloader keeps flash's rules as UM11126 and the firmware's BENCH.md state them: erase
-//!   before write, writes start on a page and fill it, 56-byte HID payloads, and a read of an
-//!   erased page fails and drops the bootloader off the bus. Its property values are assumptions,
+//! - The bootloader keeps flash's rules: erase before write, writes start on a page and fill it,
+//!   56-byte HID payloads (UM11126), and a read of an erased page fails and drops the bootloader
+//!   off the bus (mculink-stock-notes' updating.md). Its property values are assumptions,
 //!   listed in `sim/rom.rs`.
 //! - A unit boots whatever its flash holds. Images from [`firmware_srecord`] carry a marker in
 //!   page 0, after the vector table, that says which firmware they are. Every image rewrites

@@ -39,11 +39,12 @@ refused or failed it. A refusal carries the state the firmware reported with it.
 return the received bytes. The latest energy reading is a sample, no sample yet, or stopped. The
 accumulator also keeps its total after an acquisition fault.
 
-On an MCU-Link Pro, the supply and energy commands are also on Verge Aux, a second vendor interface
-that debuggers leave alone. `Bus::open_aux` claims it, and `aux::Aux` sends requests over it. `Aux`
-is a `VergeTransport`, so the same typed calls run on it while a debugger holds CMSIS-DAP. The probe
-also streams every energy pair through it: `stream` parses the messages and converts each pair as
-the firmware does, checked against the vectors the firmware's own converter writes.
+On an MCU-Link Pro, the identify, DIO, supply, energy and marker commands are also on Verge Aux, a
+second vendor interface that debuggers leave alone. `Bus::open_aux` claims it, and `aux::Aux` sends
+requests over it. `Aux` is a `VergeTransport`, so the same typed calls run on it while a debugger
+holds CMSIS-DAP. The probe also streams every energy pair through it: `stream` parses the messages
+and converts each pair as the firmware does, checked against the vectors the firmware's own
+converter writes.
 
 `pro::with_pro` runs a call on a Pro through Aux, or through CMSIS-DAP when another program holds
 Aux; `pro::open_stream` needs Aux, the only way to the stream. Both refuse a unit that is not a Pro

@@ -180,7 +180,7 @@ pub fn check_offered<T: VergeTransport + ?Sized>(
         return Ok(());
     }
     // Firmware that reports extended capabilities (format 6) offers energy capture on every Pro
-    // whose HW_VER_5 strap is low (mculink-verge PRO.md).
+    // whose HW_VER_5 strap is low (mculink-verge BOARDS.md).
     Err(if feature == Feature::Energy && info.version >= 6 {
         ProError::NotFitted {
             name: name.to_owned(),
