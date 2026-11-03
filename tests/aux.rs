@@ -187,6 +187,23 @@ fn opening_drops_what_the_last_program_left() {
     assert_eq!(aux.exchange(&[0x8F, 2]).unwrap()[0], 0x8F);
 }
 
+/// A program that asks while a stream message waits unread, and goes before its reply, leaves the
+/// probe's OUT endpoint shut until a host reads what waits: the opener reads before it writes.
+#[test]
+fn opening_reads_past_a_reply_held_behind_a_stream_message() {
+    use verge_probe::aux::AuxLink;
+    let bus = SimBus::default();
+    let device = pro(&bus);
+    let mut first = bus.open_aux(&device).unwrap();
+    first.write(&rate(1000)).unwrap();
+    assert_eq!(first.read(Duration::from_secs(1)).unwrap()[..2], [0x90, 0]);
+    bus.sleep(Duration::from_millis(50));
+    first.write(&[0x90, 1]).unwrap();
+    drop(first);
+    let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+    assert_eq!(aux.exchange(&[0x90, 1]).unwrap()[..3], [0x90, 0, 0]);
+}
+
 /// The typed stream calls: modes 5 to 7 through `VergeControl`, and the messages through its
 /// transport between them. CMSIS-DAP refuses them.
 #[test]

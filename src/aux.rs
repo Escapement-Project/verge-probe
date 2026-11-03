@@ -73,8 +73,11 @@ impl<L: AuxLink> Aux<L> {
             messages: VecDeque::new(),
             dropped: 0,
         };
-        // A reply the last program left comes first and is taken for this one's; the drain after
-        // drops the real one with the stream's last pairs and its end.
+        // Read before writing. A reply the last program never read waits behind the message ahead
+        // of it, and the probe takes no request until that reply is on its way.
+        aux.drain()?;
+        // A reply the last program left can still come first and be taken for this one's; the
+        // drain after drops the real one with the stream's last pairs and its end.
         aux.exchange(&[0x90, 7])?;
         if aux.drain()? {
             return Err(LinkError::Usb(
