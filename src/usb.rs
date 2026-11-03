@@ -416,6 +416,10 @@ impl DapLink for NusbDap {
     }
 }
 
+/// The longest message Verge Aux sends, a stream message (the firmware's
+/// `ENERGY_STREAM_MESSAGE_MAX`).
+const AUX_MESSAGE_MAX: usize = 512;
+
 /// A claimed Verge Aux interface. Dropping it releases the interface.
 pub struct NusbAux {
     _interface: nusb::Interface,
@@ -425,6 +429,15 @@ pub struct NusbAux {
 
 impl AuxLink for NusbAux {
     fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
+        // The probe takes each packet it receives as a request, so the tail of a longer one would
+        // run as a request of its own (at full speed, past 64 bytes).
+        let packet = self.out.max_packet_size();
+        if request.len() > packet {
+            return Err(LinkError::Usb(format!(
+                "a {}-byte request is longer than Verge Aux's {packet}-byte packet",
+                request.len()
+            )));
+        }
         self.out
             .transfer_blocking(Buffer::from(request), COMMAND_TIMEOUT)
             .into_result()
@@ -434,7 +447,10 @@ impl AuxLink for NusbAux {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
         if self.input.pending() == 0 {
-            self.input.submit(Buffer::new(self.input.max_packet_size()));
+            // At full speed a message spans several packets and the probe ends it with a short
+            // or zero-length one, so one read has to hold the longest message.
+            let len = AUX_MESSAGE_MAX.max(self.input.max_packet_size());
+            self.input.submit(Buffer::new(len));
         }
         self.input
             .wait_next_complete(timeout)
