@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::protocol::{
-    self, CAP_CAPTURE_ID, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE, CAP_I2C,
-    CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER, CAP_TARGET_SENSE,
-    CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
-    I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MAX_READ, I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND,
-    J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, MARK_COMMAND,
-    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER,
-    SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND,
-    TARGET_SENSE_COMMAND,
+    self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
+    CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER,
+    CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND,
+    ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER,
+    INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
+    LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
+    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE,
+    TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
@@ -664,6 +664,12 @@ pub trait VergeTransport {
         false
     }
 
+    /// The CMSIS-DAP packet size, which bounds both a command and its reply, when the transport
+    /// can tell. probe-rs does not say.
+    fn packet_size(&mut self) -> Result<Option<usize>, DebugProbeError> {
+        Ok(None)
+    }
+
     /// Sends one CMSIS-DAP vendor command and returns its reply.
     fn send_vendor_command(
         &mut self,
@@ -698,6 +704,18 @@ impl VergeTransport for Session {
 pub struct DapTransport<'a>(pub &'a mut dyn DapLink);
 
 impl VergeTransport for DapTransport<'_> {
+    fn packet_size(&mut self) -> Result<Option<usize>, DebugProbeError> {
+        match crate::dap::info(self.0, crate::dap::Info::PacketSize) {
+            Ok(size) => Ok(size
+                .get(..2)
+                .map(|size| usize::from(u16::from_le_bytes([size[0], size[1]])))),
+            Err(error) => {
+                self.resynchronise();
+                Err(DebugProbeError::Other(error.to_string()))
+            }
+        }
+    }
+
     fn send_vendor_command(
         &mut self,
         command_id: u8,
@@ -767,6 +785,7 @@ impl InfoCache {
 pub struct VergeControl<'a, T: VergeTransport + ?Sized> {
     transport: &'a mut T,
     info: InfoCache,
+    packet_size: Option<usize>,
     capture_id: Option<crate::CaptureId>,
     awaiting_header: bool,
 }
@@ -783,6 +802,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         Self {
             transport,
             info: InfoCache::Unread,
+            packet_size: None,
             capture_id: None,
             awaiting_header: false,
         }
@@ -888,6 +908,10 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
     }
 
     /// Runs one full-duplex transaction on the Pro SPI bridge.
+    ///
+    /// The request must fit the probe's packet: 504 bytes on bulk at high speed, 56 on HID and at
+    /// full speed. Through probe-rs, which does not report the packet, the limit checked here is
+    /// the high-speed one.
     pub fn spi_transfer(
         &mut self,
         clock_hz: u32,
@@ -896,12 +920,17 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         tx: &[u8],
     ) -> Result<Vec<u8>, CommandError<ProBusError>> {
         self.require_capability(CAP_SPI, "the SPI bridge")?;
-        let request = encode_spi_request(clock_hz, mode, lsb_first, tx)
+        let packet = self.packet_size()?;
+        let request = encode_spi_request(clock_hz, mode, lsb_first, tx, packet)
             .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(SPI_COMMAND, &request)?, tx.len())
     }
 
     /// Runs one Pro I2C write, read, or combined write/read transaction.
+    ///
+    /// The request and the reply must fit the probe's packet: 502 bytes written or 508 read on bulk
+    /// at high speed, 54 or 60 on HID and at full speed. Through probe-rs the limits checked here
+    /// are the high-speed ones.
     pub fn i2c_transfer(
         &mut self,
         address: u8,
@@ -910,7 +939,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         read_len: usize,
     ) -> Result<Vec<u8>, CommandError<ProBusError>> {
         self.require_capability(CAP_I2C, "the I2C bridge")?;
-        let request = encode_i2c_request(address, clock_hz, write, read_len)
+        let packet = self.packet_size()?;
+        let request = encode_i2c_request(address, clock_hz, write, read_len, packet)
             .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(I2C_COMMAND, &request)?, read_len)
     }
@@ -1513,6 +1543,18 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         )
     }
 
+    /// The transport's packet, read once it has been read without error. A transport that cannot
+    /// tell gets the largest: probe-rs then refuses a request longer than its packet, and the
+    /// firmware a reply.
+    fn packet_size<E: std::error::Error + 'static>(&mut self) -> Result<usize, CommandError<E>> {
+        if let Some(size) = self.packet_size {
+            return Ok(size);
+        }
+        let size = self.transport.packet_size()?.unwrap_or(LARGEST_PACKET);
+        self.packet_size = Some(size);
+        Ok(size)
+    }
+
     fn send(&mut self, command_id: u8, payload: &[u8]) -> Result<Vec<u8>, SendError> {
         self.transport
             .send_vendor_command(command_id, payload)
@@ -1887,12 +1929,16 @@ fn encode_spi_request(
     mode: SpiMode,
     lsb_first: bool,
     tx: &[u8],
+    packet: usize,
 ) -> Result<Vec<u8>, &'static str> {
     if !(SPI_MIN_CLOCK_HZ..=SPI_MAX_CLOCK_HZ).contains(&clock_hz) {
         return Err("SPI clock is outside the supported range");
     }
-    if tx.is_empty() || tx.len() > SPI_MAX_TRANSFER {
-        return Err("SPI transfer length is outside the supported range");
+    if tx.is_empty() {
+        return Err("SPI transfer is empty");
+    }
+    if tx.len() > packet.saturating_sub(SPI_REQUEST_HEADER) {
+        return Err("SPI transfer is longer than this probe's packet holds");
     }
     let count = u16::try_from(tx.len()).map_err(|_| "SPI transfer is too long")?;
     let mut request = Vec::with_capacity(7 + tx.len());
@@ -1928,6 +1974,7 @@ fn encode_i2c_request(
     clock_hz: u32,
     write: &[u8],
     read_len: usize,
+    packet: usize,
 ) -> Result<Vec<u8>, &'static str> {
     if address > 0x7f {
         return Err("I2C address is not 7-bit");
@@ -1938,8 +1985,11 @@ fn encode_i2c_request(
     if write.is_empty() && read_len == 0 {
         return Err("I2C transfer is empty");
     }
-    if write.len() > I2C_MAX_WRITE || read_len > I2C_MAX_READ {
-        return Err("I2C transfer is longer than the supported packet size");
+    if write.len() > packet.saturating_sub(I2C_REQUEST_HEADER) {
+        return Err("I2C write is longer than this probe's packet holds");
+    }
+    if read_len > packet.saturating_sub(BUS_REPLY_HEADER) {
+        return Err("I2C read is longer than this probe's packet holds");
     }
     let write_count = u16::try_from(write.len()).map_err(|_| "I2C write is too long")?;
     let read_count = u16::try_from(read_len).map_err(|_| "I2C read is too long")?;
@@ -2430,23 +2480,19 @@ mod tests {
 
     #[test]
     fn spi_request_and_reply_enforce_encoding_and_counts() {
-        let request = encode_spi_request(100_000, SpiMode::Mode3, true, &[0x12, 0x34]).unwrap();
+        let request =
+            encode_spi_request(100_000, SpiMode::Mode3, true, &[0x12, 0x34], 512).unwrap();
         assert_eq!(&request[..7], &[7, 0xA0, 0x86, 1, 0, 2, 0]);
         assert_eq!(&request[7..], &[0x12, 0x34]);
-        assert!(encode_spi_request(1, SpiMode::Mode0, false, &[0]).is_err());
-        assert!(encode_spi_request(100_000, SpiMode::Mode0, false, &[]).is_err());
-        assert!(
-            encode_spi_request(100_000, SpiMode::Mode0, false, &vec![0; SPI_MAX_TRANSFER]).is_ok()
-        );
-        assert!(
-            encode_spi_request(
-                100_000,
-                SpiMode::Mode0,
-                false,
-                &vec![0; SPI_MAX_TRANSFER + 1]
-            )
-            .is_err()
-        );
+        assert!(encode_spi_request(1, SpiMode::Mode0, false, &[0], 512).is_err());
+        assert!(encode_spi_request(100_000, SpiMode::Mode0, false, &[], 512).is_err());
+        // HOST-INTERFACE.md: 504 bytes on bulk at high speed, 56 on HID and at full speed.
+        for (packet, longest) in [(512, 504), (64, 56)] {
+            let spi =
+                |len| encode_spi_request(100_000, SpiMode::Mode0, false, &vec![0; len], packet);
+            assert!(spi(longest).is_ok());
+            assert!(spi(longest + 1).is_err());
+        }
 
         let parsed = parse_bus_response(&[0, 2, 0, 0xA5, 0x5A], 2).unwrap();
         assert_eq!(parsed, [0xA5, 0x5A]);
@@ -2457,15 +2503,149 @@ mod tests {
         );
     }
 
+    /// A Pro on bulk at full speed, answering the bridges with zeros. `DAP_Info` times out while
+    /// `info_fails` counts down.
+    struct FullSpeedLink {
+        sent: Vec<Vec<u8>>,
+        info_fails: usize,
+    }
+
+    impl DapLink for FullSpeedLink {
+        fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, crate::dap::LinkError> {
+            self.sent.push(request.to_vec());
+            if request.first() == Some(&crate::dap::DAP_INFO) && self.info_fails > 0 {
+                self.info_fails -= 1;
+                return Err(crate::dap::LinkError::Timeout);
+            }
+            Ok(match request {
+                [crate::dap::DAP_INFO, 0xFF] => vec![crate::dap::DAP_INFO, 2, 64, 0],
+                [INFO_COMMAND] => {
+                    let info = info_reply(6, 0, 2, 0, CAP_SPI | CAP_I2C);
+                    [&[INFO_COMMAND][..], &info].concat()
+                }
+                [SPI_COMMAND, _, _, _, _, _, lo, hi, ..] | [I2C_COMMAND, .., lo, hi] => {
+                    let count = u16::from_le_bytes([*lo, *hi]);
+                    let mut reply = vec![request[0], 0, *lo, *hi];
+                    reply.resize(BUS_REPLY_HEADER + usize::from(count), 0);
+                    reply
+                }
+                _ => vec![ID_DAP_INVALID],
+            })
+        }
+
+        fn drain(&mut self) -> Result<usize, crate::dap::LinkError> {
+            Ok(0)
+        }
+
+        fn control_out(
+            &mut self,
+            _: u8,
+            _: u8,
+            _: u16,
+            _: u16,
+        ) -> Result<(), crate::dap::LinkError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bridges_are_sized_from_the_links_packet() {
+        let mut link = FullSpeedLink {
+            sent: Vec::new(),
+            info_fails: 0,
+        };
+        let mut transport = DapTransport(&mut link);
+        let mut verge = VergeControl::new(&mut transport);
+        assert!(matches!(
+            verge.spi_transfer(100_000, SpiMode::Mode0, false, &[0; 57]),
+            Err(CommandError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            verge.i2c_transfer(0x50, 100_000, &[], 61),
+            Err(CommandError::InvalidRequest(_))
+        ));
+        assert_eq!(
+            verge
+                .spi_transfer(100_000, SpiMode::Mode0, false, &[0; 56])
+                .unwrap(),
+            [0; 56]
+        );
+        assert_eq!(verge.i2c_transfer(0x50, 100_000, &[], 60).unwrap(), [0; 60]);
+        let commands: Vec<Vec<u8>> = link
+            .sent
+            .iter()
+            .map(|request| request.iter().take(2).copied().collect())
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                vec![INFO_COMMAND],
+                vec![crate::dap::DAP_INFO, 0xFF],
+                vec![SPI_COMMAND, 0],
+                vec![I2C_COMMAND, 0x50],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_packet_size_that_could_not_be_read_is_asked_again() {
+        let mut link = FullSpeedLink {
+            sent: Vec::new(),
+            info_fails: 1,
+        };
+        let mut transport = DapTransport(&mut link);
+        let mut verge = VergeControl::new(&mut transport);
+        assert!(verge.info().unwrap().is_some());
+        assert!(matches!(
+            verge.spi_transfer(100_000, SpiMode::Mode0, false, &[0; 100]),
+            Err(CommandError::Probe(_))
+        ));
+        assert!(matches!(
+            verge.spi_transfer(100_000, SpiMode::Mode0, false, &[0; 100]),
+            Err(CommandError::InvalidRequest(_))
+        ));
+        assert!(!link.sent.iter().any(|request| request[0] == SPI_COMMAND));
+    }
+
+    #[test]
+    fn a_transport_that_cannot_tell_gets_the_largest_packet() {
+        let mut transport = FakeTransport {
+            replies: [info_reply(6, 0, 2, 0, CAP_SPI)].into(),
+            commands: Vec::new(),
+        };
+        let mut verge = VergeControl::new(&mut transport);
+        assert!(matches!(
+            verge.spi_transfer(100_000, SpiMode::Mode0, false, &[0; 505]),
+            Err(CommandError::InvalidRequest(_))
+        ));
+        verge
+            .transport
+            .replies
+            .push_back([&[0, 0xF8, 1][..], &[0; 504]].concat());
+        assert!(
+            verge
+                .spi_transfer(100_000, SpiMode::Mode0, false, &[0; 504])
+                .is_ok()
+        );
+    }
+
     #[test]
     fn i2c_request_and_reply_enforce_ranges_and_counts() {
-        let request = encode_i2c_request(0x50, 400_000, &[0x10], 2).unwrap();
+        let request = encode_i2c_request(0x50, 400_000, &[0x10], 2, 512).unwrap();
         assert_eq!(request, [0x50, 0x80, 0x1A, 0x06, 0, 1, 0, 2, 0, 0x10]);
-        assert!(encode_i2c_request(0x80, 100_000, &[], 1).is_err());
-        assert!(encode_i2c_request(0x50, 1_000, &[], 1).is_err());
-        assert!(encode_i2c_request(0x50, 100_000, &[], 0).is_err());
-        assert!(encode_i2c_request(0x50, 100_000, &vec![0; I2C_MAX_WRITE + 1], 0).is_err());
-        assert!(encode_i2c_request(0x50, 100_000, &[], I2C_MAX_READ + 1).is_err());
+        assert!(encode_i2c_request(0x80, 100_000, &[], 1, 512).is_err());
+        assert!(encode_i2c_request(0x50, 1_000, &[], 1, 512).is_err());
+        assert!(encode_i2c_request(0x50, 100_000, &[], 0, 512).is_err());
+        // HOST-INTERFACE.md: 502 written or 508 read at high speed, 54 or 60 on HID and at full
+        // speed.
+        for (packet, write, read) in [(512, 502, 508), (64, 54, 60)] {
+            let i2c =
+                |write, read| encode_i2c_request(0x50, 100_000, &vec![0; write], read, packet);
+            assert!(i2c(write, read).is_ok());
+            assert!(i2c(write + 1, 0).is_err());
+            assert!(i2c(0, read + 1).is_err());
+        }
+        assert!(encode_i2c_request(0x50, 100_000, &[], usize::MAX, 512).is_err());
 
         let parsed = parse_bus_response(&[0, 2, 0, 0xAA, 0xBB], 2).unwrap();
         assert_eq!(parsed, [0xAA, 0xBB]);

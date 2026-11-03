@@ -42,9 +42,13 @@ pub(crate) const SPI_MIN_CLOCK_HZ: u32 = SPI_SOURCE_HZ / 4096;
 pub(crate) const SPI_MAX_CLOCK_HZ: u32 = SPI_SOURCE_HZ / 2;
 pub(crate) const I2C_MIN_CLOCK_HZ: u32 = 10_000;
 pub(crate) const I2C_MAX_CLOCK_HZ: u32 = 1_000_000;
-pub(crate) const SPI_MAX_TRANSFER: usize = 504;
-pub(crate) const I2C_MAX_WRITE: usize = 502;
-pub(crate) const I2C_MAX_READ: usize = 508;
+/// The firmware refuses a bridge request or reply longer than its transport's packet. These are the
+/// bytes ahead of the data: the command, then its fields.
+pub(crate) const SPI_REQUEST_HEADER: usize = 8;
+pub(crate) const I2C_REQUEST_HEADER: usize = 10;
+pub(crate) const BUS_REPLY_HEADER: usize = 4;
+/// The largest packet any Verge transport has: bulk at high speed.
+pub(crate) const LARGEST_PACKET: usize = 512;
 pub(crate) const TAP_RUN_TEST_IDLE: u8 = 1;
 pub(crate) const SAMPLE_FILL_MAX: u8 = 32;
 
