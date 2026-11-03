@@ -381,6 +381,16 @@ fn to_device(_usb: &nusb::Device, _control: ControlOut<'_>) -> Result<(), LinkEr
 
 impl DapLink for NusbDap {
     fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, LinkError> {
+        // Verge takes each packet it receives as a command, so the tail of a longer request would
+        // run as a command of its own (at full speed, past 64 bytes). A reply is read as one packet
+        // too.
+        let packet = self.out.max_packet_size();
+        if request.len() > packet {
+            return Err(LinkError::Usb(format!(
+                "a {}-byte request is longer than the probe's {packet}-byte packet",
+                request.len()
+            )));
+        }
         self.out
             .transfer_blocking(Buffer::from(request), COMMAND_TIMEOUT)
             .into_result()
