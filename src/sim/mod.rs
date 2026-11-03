@@ -167,6 +167,9 @@ pub struct SimUnit {
     /// Verge Aux's IN endpoint: replies and stream messages no host has read yet, oldest first.
     /// They outlast the program that asked, as the probe's do.
     pub aux_in: VecDeque<Vec<u8>>,
+    /// Verge Aux's OUT endpoint is shut: a request came while a message waited unread on IN, and
+    /// its reply waits behind that message. The probe arms OUT again once a host reads it.
+    pub aux_out_shut: bool,
     /// In a USB port. An unplugged unit stays off the bus whatever is scheduled for it.
     pub plugged: bool,
     /// Its bootloader refuses every write, as a failing flash would.
@@ -317,6 +320,7 @@ impl World {
         u.instance = Some(instance);
         u.generation = generation;
         u.aux_in.clear();
+        u.aux_out_shut = false;
         self.log
             .push(format!("{}: enumerates as {:?}", u.location, u.mode));
         let bootloaders = self
@@ -747,6 +751,7 @@ impl SimBus {
             mini: false,
             stale_replies: Vec::new(),
             aux_in: VecDeque::new(),
+            aux_out_shut: false,
             plugged: true,
             fail_writes: false,
             ignores_reset: false,

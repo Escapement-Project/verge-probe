@@ -13,6 +13,8 @@ use crate::protocol::{
 
 /// Each command costs this much simulated time.
 const COMMAND_TIME: Duration = Duration::from_micros(250);
+/// How long a write waits for an OUT endpoint the probe keeps shut: usb.rs's command timeout.
+const AUX_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The Pro's DIO pins and the groups that change direction together, as the firmware reports them.
 const DIO_PINS: u8 = 0x0F;
@@ -331,6 +333,10 @@ impl crate::aux::AuxLink for SimAux {
     fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
         let mut world = self.world.lock().expect("the bench lock is not poisoned");
         self.live(&mut world)?;
+        if world.units[self.unit].aux_out_shut {
+            world.advance(AUX_WRITE_TIMEOUT);
+            return Err(LinkError::Timeout);
+        }
         world.advance(COMMAND_TIME);
         let location = world.units[self.unit].location.clone();
         world
@@ -374,6 +380,14 @@ impl crate::aux::AuxLink for SimAux {
         {
             world.units[self.unit].aux_in.clear();
         }
+        // The probe takes the next request only once this reply is on its way, and the reply waits
+        // for whatever is ahead of it on IN to be read.
+        let ahead = world.units[self.unit].aux_in.len()
+            + messages
+                .iter()
+                .take_while(|message| crate::stream::is_stream_message(message))
+                .count();
+        world.units[self.unit].aux_out_shut = ahead > 0;
         queue(&mut world.units[self.unit].aux_in, messages);
         Ok(())
     }
@@ -389,6 +403,7 @@ impl crate::aux::AuxLink for SimAux {
                 let due = unit.energy.stream_messages(now);
                 queue(&mut unit.aux_in, due);
                 if let Some(message) = unit.aux_in.pop_front() {
+                    unit.aux_out_shut = false;
                     return Ok(message);
                 }
                 // Without a stream nothing will come, and waiting for it would move every
