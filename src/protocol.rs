@@ -9,7 +9,6 @@ pub(crate) const TARGET_SENSE_COMMAND: u8 = 0x86;
 pub(crate) const TARGET_POWER_COMMAND: u8 = 0x8F;
 pub(crate) const DIO_COMMAND: u8 = 0x8E;
 pub(crate) const MARK_COMMAND: u8 = 0x94;
-pub(crate) const REBOOT_COMMAND: u8 = 0x85;
 pub(crate) const J8_COMMAND: u8 = 0x84;
 pub(crate) const SAMPLE_COMMAND: u8 = 0x87;
 pub(crate) const CODE_LAB_COMMAND: u8 = 0x88;

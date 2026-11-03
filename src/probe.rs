@@ -19,9 +19,9 @@ use crate::protocol::{
     CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
     I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MAX_READ, I2C_MAX_WRITE, I2C_MIN_CLOCK_HZ, INFO_COMMAND,
     J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, MARK_COMMAND,
-    REBOOT_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
-    SPI_MAX_TRANSFER, SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE,
-    TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MAX_TRANSFER,
+    SPI_MIN_CLOCK_HZ, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE, TARGET_POWER_COMMAND,
+    TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
 
@@ -371,15 +371,6 @@ pub struct TargetSenseReading {
     pub millivolts: u16,
     /// Whether the target-detect line is grounded.
     pub detected: bool,
-}
-
-/// Verge firmware reboot destination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RebootMode {
-    /// Restart the Verge firmware.
-    Firmware,
-    /// Enter the probe's ROM bootloader for reflashing.
-    Bootloader,
 }
 
 /// Code-generation behavior used by vendor commands `0x89` and `0x8A`.
@@ -922,19 +913,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         let request = encode_i2c_request(address, clock_hz, write, read_len)
             .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(I2C_COMMAND, &request)?, read_len)
-    }
-
-    /// Reboots the probe into its firmware or ROM bootloader.
-    pub fn reboot(&mut self, mode: RebootMode) -> Result<(), CommandError<Refused>> {
-        self.require_verge()?;
-        let response = self.send(
-            REBOOT_COMMAND,
-            &[match mode {
-                RebootMode::Firmware => 0,
-                RebootMode::Bootloader => 1,
-            }],
-        )?;
-        expect_accepted(&response)
     }
 
     /// Starts voltage/current capture at the requested pair rate.
@@ -2184,7 +2162,6 @@ impl<E: std::error::Error + 'static> From<SendError> for CommandError<E> {
 fn command_name(command_id: u8) -> &'static str {
     match command_id {
         J8_COMMAND => "the J8 marker pins",
-        REBOOT_COMMAND => "reboot",
         TARGET_SENSE_COMMAND => "target sensing",
         SAMPLE_COMMAND => "the SWD sample instrument",
         CODE_LAB_COMMAND => "the code lab",
@@ -2417,7 +2394,7 @@ mod tests {
             commands: Vec::new(),
         };
         assert!(matches!(
-            VergeControl::new(&mut transport).reboot(RebootMode::Bootloader),
+            VergeControl::new(&mut transport).set_j8_pins(0, 0),
             Err(CommandError::Unsupported("Verge commands"))
         ));
         assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);

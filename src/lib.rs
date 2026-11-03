@@ -53,8 +53,8 @@ pub use probe::{
     EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart,
     EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergySample, EnergyTotal,
     JtagCodegenState, JtagGenerationLogEntry, JtagPacingState, JtagWire, LatencyOutcome, Marked,
-    ProBusError, RawEnergySample, RebootMode, Refused, SamplePosition, SampleRequest, SampleResult,
-    SpiMode, SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl,
-    VergeInfo, VergeProbe, VergeSession, VergeTransport, attach, install_cjtag_support,
+    ProBusError, RawEnergySample, Refused, SamplePosition, SampleRequest, SampleResult, SpiMode,
+    SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo,
+    VergeProbe, VergeSession, VergeTransport, attach, install_cjtag_support,
     set_cjtag_scan_formats,
 };
