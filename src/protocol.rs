@@ -275,7 +275,7 @@ impl VergeInfo {
         .collect()
     }
 
-    /// The two-pin scan formats offered, by name, or `None` before format 4.
+    /// The cJTAG scan formats offered, by name, or `None` before format 4.
     #[must_use]
     pub fn scan_format_names(&self) -> Option<Vec<String>> {
         (self.version >= 4).then(|| {

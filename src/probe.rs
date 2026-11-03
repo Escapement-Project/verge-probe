@@ -418,9 +418,9 @@ pub struct SwdCodegenState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JtagCodegenState {
-    /// Two-pin latency used by generated paths.
+    /// cJTAG latency used by generated paths.
     pub two_pin_latency: u8,
-    /// Four-wire latency used by generated paths.
+    /// JTAG latency used by generated paths.
     pub four_wire_latency: u8,
     /// Whether the generated path uses masked timing.
     pub masked: bool,
@@ -465,15 +465,15 @@ impl JtagCodegenState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JtagWire {
-    /// Four-wire JTAG.
+    /// JTAG.
     FourWire,
-    /// Two-pin OScan1.
+    /// cJTAG OScan1.
     OScan1,
-    /// Two-pin OScan2.
+    /// cJTAG OScan2.
     OScan2,
-    /// Two-pin OScan5.
+    /// cJTAG OScan5.
     OScan5,
-    /// Two-pin OScan6.
+    /// cJTAG OScan6.
     OScan6,
     /// A wire added by newer firmware.
     Unknown(u8),
@@ -541,7 +541,7 @@ pub struct CodegenMeasurement {
     pub outcome: LatencyOutcome,
     /// Wire measured by JTAG codegen. SWD measurements do not set this field.
     pub wire: Option<JtagWire>,
-    /// Latency the measurement found, or 0 when it kept the one in use. Two-pin builds sample
+    /// Latency the measurement found, or 0 when it kept the one in use. cJTAG builds sample
     /// one cycle later than this.
     pub latency: u8,
     /// Generations that ran reads, over every search: the firmware searches again, up to three
@@ -815,7 +815,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
 
     /// Reads the firmware identity and capabilities, once.
     ///
-    /// The result is cached. Its OScan1-active flag changes when a two-pin session starts or ends;
+    /// The result is cached. Its OScan1-active flag changes when a cJTAG session starts or ends;
     /// [`Self::refresh_info`] reads it again.
     pub fn info(&mut self) -> Result<Option<&VergeInfo>, CommandError<Infallible>> {
         if matches!(self.info, InfoCache::Unread) {
@@ -1649,7 +1649,7 @@ pub enum AttachError {
 /// Opens the probe with `serial`, or the only one attached, and attaches to `chip` over
 /// `protocol`.
 ///
-/// Verge's two-pin support is installed before cJTAG is selected. Without `speed_khz` the probe
+/// Verge's cJTAG support is installed before cJTAG is selected. Without `speed_khz` the probe
 /// keeps its default clock.
 pub fn attach(
     serial: Option<&str>,
@@ -1735,7 +1735,7 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
             Ok(())
         } else {
             Err(DebugProbeError::Other(
-                "the firmware refused the two-pin framing".to_owned(),
+                "the firmware refused the cJTAG framing".to_owned(),
             ))
         }
     }

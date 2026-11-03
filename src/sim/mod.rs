@@ -197,7 +197,7 @@ pub struct SimUnit {
     pub stock_product: Option<String>,
     /// The SWD jumper is fitted, so a running firmware offers no CMSIS-DAP interface.
     pub swd_jumper: bool,
-    /// The two-pin scan formats ours offers, bit n for SCNFMT n, which a restart sets back.
+    /// The cJTAG scan formats ours offers, bit n for SCNFMT n, which a restart sets back.
     pub scan_formats: u32,
     /// The DIO pins a Pro running ours drives, bit n for DIOn. A restart makes them inputs again.
     pub dio_outputs: u8,

@@ -13,7 +13,7 @@ pub const DAP_OK: u8 = 0x00;
 
 /// Ours answers this with its identity; stock does not know it.
 pub const VENDOR_IDENTIFY: u8 = crate::protocol::INFO_COMMAND;
-/// Ours' two-pin (cJTAG) control. Mode 4 sets the scan formats the unit offers a host until it
+/// Ours' cJTAG control. Mode 4 sets the scan formats the unit offers a host until it
 /// restarts: a little-endian mask after the mode, bit n for SCNFMT n.
 pub const VENDOR_CJTAG_CONTROL: u8 = crate::protocol::CJTAG_CONTROL_COMMAND;
 pub const CJTAG_SET_FORMATS: u8 = 4;
@@ -193,7 +193,7 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
     })
 }
 
-/// Limits the two-pin scan formats ours offers a host to `mask` (bit n for SCNFMT n) until the
+/// Limits the cJTAG scan formats ours offers a host to `mask` (bit n for SCNFMT n) until the
 /// unit restarts. The unit keeps OScan1 whatever the mask, and drops formats its image does not
 /// frame; `u32::MAX` offers every one it does.
 pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapError> {
