@@ -107,3 +107,7 @@ cargo test --locked --all-targets --all-features
 ```
 
 `Cargo.toml` pins the probe-rs Git revision that provides CMSIS-DAP vendor commands and cJTAG.
+
+## Licence
+
+Apache-2.0, in `LICENSE`.
