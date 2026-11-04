@@ -75,6 +75,7 @@ fn each_pair_converts_as_the_firmware_converts_it() {
                 voltage_code: field(0) as u16,
                 current_code: field(1) as u16,
                 low: field(2) == 1,
+                under_range: false,
             };
             let reading = convert.reading(&pair);
             assert_eq!(
@@ -99,6 +100,7 @@ fn each_pair_converts_as_the_firmware_converts_it() {
                         voltage_code: 0,
                         current_code: code,
                         low,
+                        under_range: false,
                     })
                     .shunt_nanoamps
             };
@@ -166,6 +168,7 @@ fn a_stream_sums_to_the_firmware_total() {
                     voltage_code: event[0].as_u64().unwrap() as u16,
                     current_code: event[1].as_u64().unwrap() as u16,
                     low: event[2] == 1,
+                    under_range: false,
                 }],
             );
             convert.add_message(&message);
@@ -217,12 +220,14 @@ fn messages_parse_as_the_probe_lays_them_out() {
             Pair {
                 voltage_code: 0x1234,
                 current_code: 0x5678,
-                low: true
+                low: true,
+                under_range: false,
             },
             Pair {
                 voltage_code: 0xABCD,
                 current_code: 0xEF01,
-                low: false
+                low: false,
+                under_range: false,
             },
         ]
     );
@@ -370,6 +375,7 @@ fn a_switching_pair_takes_the_next_pairs_current() {
         voltage_code,
         current_code,
         low,
+        under_range: false,
     };
     // The header says the range before was low.
     convert.add_message(&Pairs::new(
@@ -391,12 +397,45 @@ fn a_switching_pair_takes_the_next_pairs_current() {
             millivolts: taken.millivolts,
             nanoamps: taken.nanoamps,
             range: Some(stream::CurrentRange::High),
+            under_range: false,
         }
     );
     assert_eq!(
         (next[1].sequence, next[1].time_ns, next.len()),
         (9, 7_000_000, 2)
     );
+}
+
+/// A capture that holds the high range (flag bit 2) has nothing to switch: its first pair after a
+/// pause keeps its own current, where an automatic capture's would wait as a switch up.
+#[test]
+fn a_held_high_range_stays_high_across_a_pause() {
+    let low = [(0, 0), (60_000, 60_000)];
+    let high = [(0, 0), (60_000, 6_000_000)];
+    let mut header = with_step_5(header_bytes(1000, 3300, &low, &high), 0, false, None);
+    header[13] = 0;
+    header[70] |= 4;
+    let Message::Header(header) = stream::parse(&header).unwrap() else {
+        panic!("not a header");
+    };
+    assert!(header.high_range_only && !header.previous_low);
+    let mut convert = Converter::new(&header);
+    let pair = |current_code| Pair {
+        voltage_code: 30_000,
+        current_code,
+        low: false,
+        under_range: false,
+    };
+    convert.add_message(&Pairs::new(0, 1, 0, vec![pair(100)]));
+    convert.add_message(&Pairs::new(
+        Pairs::PAUSED,
+        2,
+        5_000_000,
+        vec![pair(200), pair(300)],
+    ));
+    let samples = convert.take_samples();
+    assert_eq!(samples.len(), 3, "a pair waited: {samples:?}");
+    assert_eq!(samples[1].nanoamps, convert.reading(&pair(200)).nanoamps);
 }
 
 #[test]
@@ -418,6 +457,7 @@ fn a_switch_up_weighs_the_pair_before_and_a_clean_switch_down_keeps_its_own() {
         voltage_code: 30_000,
         current_code,
         low,
+        under_range: false,
     };
     convert.add_message(&Pairs::new(
         0,
@@ -456,6 +496,7 @@ fn a_hold_keeps_the_pair_before_and_a_gap_forgets_it() {
         voltage_code: 30_000,
         current_code,
         low,
+        under_range: false,
     };
     let up_after = |flags| {
         let mut convert = Converter::new(&header);

@@ -35,6 +35,7 @@ pub(crate) const CAP_ENERGY_ACCUMULATOR: u32 = 1 << 2;
 pub(crate) const CAP_DIO_AUX: u32 = 1 << 6;
 pub(crate) const CAP_MARKS: u32 = 1 << 7;
 pub(crate) const CAP_CAPTURE_ID: u32 = 1 << 8;
+pub(crate) const CAP_ENERGY_RANGES: u32 = 1 << 9;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;
 pub(crate) const SPI_SOURCE_HZ: u32 = 96_000_000;
@@ -154,6 +155,12 @@ impl VergeInfo {
         self.extended_capabilities & CAP_CAPTURE_ID != 0
     }
 
+    /// Whether a capture can hold the high range (`0x90` mode 14). Without it, every capture
+    /// switches automatically.
+    pub fn supports_energy_ranges(&self) -> bool {
+        self.extended_capabilities & CAP_ENERGY_RANGES != 0
+    }
+
     /// Whether the firmware can switch the target supply.
     pub fn supports_target_power(&self) -> bool {
         self.capabilities & CAP_TARGET_POWER != 0
@@ -267,6 +274,7 @@ impl VergeInfo {
                 (CAP_DIO_AUX, "DIO on Aux"),
                 (CAP_MARKS, "markers"),
                 (CAP_CAPTURE_ID, "capture identity"),
+                (CAP_ENERGY_RANGES, "energy range setting"),
             ]
             .into_iter()
             .filter(|(bit, _)| self.extended_capabilities & bit != 0)
@@ -374,4 +382,27 @@ pub(crate) fn decode_dio(reply: &[u8]) -> Result<DioState, &'static str> {
         pins: fixed[4],
         groups: groups.to_vec(),
     })
+}
+
+/// Which current ranges a capture uses (`0x90` mode 14). The two trade differently: see
+/// HOST-INTERFACE.md, "Pro energy capture".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EnergyRanges {
+    /// The probe switches between the low and high ranges as the current moves. It reads small
+    /// currents finely, and each switch disturbs the reading for about a millisecond.
+    #[default]
+    Auto,
+    /// The high range for the whole capture. Nothing switches, but currents under about 0.36 mA
+    /// in the 350 mA setting read unreliably and come marked under range (about 46 µA in the 50 mA
+    /// setting, scaled from that and not measured).
+    High,
+}
+
+impl EnergyRanges {
+    pub(crate) fn wire(self) -> u8 {
+        match self {
+            EnergyRanges::Auto => 0,
+            EnergyRanges::High => 1,
+        }
+    }
 }

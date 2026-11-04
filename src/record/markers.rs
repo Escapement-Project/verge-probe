@@ -180,6 +180,7 @@ mod tests {
                 millivolts: 3000,
                 nanoamps: 10,
                 range: None,
+                under_range: false,
             }])
             .unwrap();
         }
@@ -317,6 +318,7 @@ mod tests {
                     millivolts: 3000,
                     nanoamps: 10,
                     range: None,
+                    under_range: false,
                 }])
                 .unwrap();
             }
@@ -367,6 +369,7 @@ mod tests {
                 millivolts: 3000,
                 nanoamps: 10,
                 range: None,
+                under_range: false,
             },
             Sample {
                 sequence: 1,
@@ -374,6 +377,7 @@ mod tests {
                 millivolts: 3000,
                 nanoamps: 20,
                 range: None,
+                under_range: false,
             },
         ])
         .unwrap();
@@ -433,6 +437,7 @@ mod tests {
             millivolts: 3000,
             nanoamps: 10,
             range: None,
+            under_range: false,
         }])
         .unwrap();
         sink.markers(&Markers::new(

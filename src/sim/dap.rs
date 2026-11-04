@@ -9,7 +9,8 @@ use crate::dap::{self, DapLink, LinkError};
 use crate::daplink_rs;
 use crate::protocol::{
     CAP_CALIBRATED_ENERGY, CAP_CAPTURE_ID, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
-    CAP_MARKS, CAP_TARGET_POWER, ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND,
+    CAP_ENERGY_RANGES, CAP_MARKS, CAP_TARGET_POWER, ENERGY_COMMAND, MARK_COMMAND,
+    TARGET_POWER_COMMAND,
 };
 
 /// Each command costs this much simulated time.
@@ -170,7 +171,7 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                                 0
                             }
                             | if world.units[unit].marks {
-                                CAP_MARKS | CAP_CAPTURE_ID
+                                CAP_MARKS | CAP_CAPTURE_ID | CAP_ENERGY_RANGES
                             } else {
                                 0
                             }

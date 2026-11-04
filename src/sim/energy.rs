@@ -32,6 +32,9 @@ const PERIOD_MICROS: u64 = 100_000;
 const AWAKE_MICROS: u64 = 10_000;
 /// The 350 mA setting's low range ends at 2 mA (100 mV across 50 Ω).
 const LOW_RANGE_NANOAMPS: u32 = 2_000_000;
+/// A high-range code under this is marked under range: the table's zero-current code, the
+/// amplifier's floor here, plus calibration's 64-code margin.
+const UNDER_RANGE_CODE: u16 = 390 + 64;
 
 /// The points a calibration of each range leaves, lowest first.
 const CALIBRATION: [&[(u16, u32)]; 2] = [
@@ -55,6 +58,8 @@ pub struct SimEnergy {
     pub dio_held: u8,
     /// Verge Aux's stream of the capture.
     pub stream: Option<Stream>,
+    /// `0x90` mode 14: the next start holds the high range, and clears this.
+    pub high_range_next: bool,
     /// Stream messages an event produced ahead of the next read: the last pairs of a capture a
     /// start replaced.
     outbox: Vec<Vec<u8>>,
@@ -89,15 +94,18 @@ pub struct Capture {
     pub stopped_at: Option<Duration>,
     /// When the supply last switched, in µs into the capture, and the energy integrated by then.
     pub banked: (u64, u64),
+    /// The capture holds the high range (`0x90` mode 14).
+    pub high_range_only: bool,
 }
 
 impl Capture {
-    fn new(since: Duration, rate: u32) -> Self {
+    fn new(since: Duration, rate: u32, high_range_only: bool) -> Self {
         Self {
             since,
             rate,
             stopped_at: None,
             banked: (0, 0),
+            high_range_only,
         }
     }
 
@@ -290,7 +298,8 @@ impl SimEnergy {
                     // says it restarted.
                     let tail = self.stream_messages(now);
                     self.outbox.extend(tail);
-                    self.capture = Some(Capture::new(now, rate));
+                    let high_range_only = std::mem::take(&mut self.high_range_next);
+                    self.capture = Some(Capture::new(now, rate, high_range_only));
                     if self.boot == 0 {
                         static BOOT: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(1);
@@ -384,6 +393,14 @@ impl SimEnergy {
                     reply.extend_from_slice(&nanoamps.to_le_bytes());
                 }
             }
+            [14, ranges] => reply.push(if !pro {
+                UNAVAILABLE
+            } else if *ranges > 1 {
+                BAD_ARGUMENT
+            } else {
+                self.high_range_next = *ranges == 1;
+                OK
+            }),
             _ => reply[1] = DAP_ERROR,
         }
         reply
@@ -394,7 +411,7 @@ impl SimEnergy {
     fn pair(&self, capture: &Capture, n: u64) -> ([u8; 5], bool) {
         let millivolts = self.millivolts();
         let shunt = self.nanoamps_at(capture.micros(n)) + ((millivolts * 99_297) >> 16);
-        let low = shunt <= LOW_RANGE_NANOAMPS;
+        let low = !capture.high_range_only && shunt <= LOW_RANGE_NANOAMPS;
         let table = CALIBRATION[usize::from(!low)];
         let segment = (0..table.len() - 1)
             .rev()
@@ -408,7 +425,8 @@ impl SimEnergy {
         let voltage_code = ((u64::from(millivolts) << 16) / u64::from(2 * FULL_SCALE_MV)) as u16;
         let [v0, v1] = voltage_code.to_le_bytes();
         let [c0, c1] = current_code.to_le_bytes();
-        ([v0, v1, c0, c1, u8::from(low)], low)
+        let under = !low && current_code < UNDER_RANGE_CODE;
+        ([v0, v1, c0, c1, u8::from(low) | u8::from(under) << 1], low)
     }
 
     /// The marker's level `micros` into the capture.
@@ -496,6 +514,10 @@ impl SimEnergy {
         header.extend_from_slice(&[pins, levels & pins]);
         let resolution = if pins == 0 { 0 } else { EDGE_RESOLUTION_NS };
         header.extend_from_slice(&resolution.to_le_bytes());
+        if capture.high_range_only {
+            // Step 5's fields: no weight, the high range held (flag bit 2), no current before.
+            header.extend_from_slice(&[0, 0, 4, 0, 0, 0, 0]);
+        }
         header
     }
 
@@ -571,7 +593,13 @@ impl SimEnergy {
                 pins,
                 edges_after: 0,
             });
-            messages.push(Self::header(&capture, 1, true, pins, self.marker(0)));
+            messages.push(Self::header(
+                &capture,
+                1,
+                !capture.high_range_only,
+                pins,
+                self.marker(0),
+            ));
         }
         messages
     }
@@ -652,7 +680,8 @@ impl SimEnergy {
             .find(|message| message.first() == Some(&0xa1))
             .expect("successful stream has a header");
         header[1] = 2;
-        header.extend_from_slice(id.as_bytes());
+        // The identity goes before step 5's fields, where format 2 puts it.
+        header.splice(68..68, id.as_bytes().iter().copied());
         vec![reply, header]
     }
 

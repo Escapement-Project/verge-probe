@@ -380,6 +380,7 @@ impl Csv {
         let fields = self.fields();
         let range = match sample.range {
             Some(CurrentRange::Low) => "low",
+            Some(CurrentRange::High) if sample.under_range => "under",
             Some(CurrentRange::High) => "high",
             None => "",
         };
@@ -405,8 +406,9 @@ impl Csv {
 
 /// A sigrok session file (srzip, format 2), as libsigrok's own srzip output writes it: the
 /// voltage in V and the current in mA as analog channels; a logic channel GAP that is high where
-/// the probe measured nothing, across which the last pair is repeated; and a logic channel for each
-/// DIO pin reported, its level at each sample, with a pulse between two samples stretched to one.
+/// the probe measured nothing, across which the last pair is repeated; a logic channel for each
+/// DIO pin reported, its level at each sample, with a pulse between two samples stretched to one;
+/// and last, UNDER, high where the pair was read on the high range too near its floor to trust.
 pub struct Sigrok {
     zip: ZipWriter<BufWriter<File>>,
     rate: u32,
@@ -460,11 +462,13 @@ impl Sigrok {
                 logic | (levels >> pin & 1) << (channel + 1)
             });
         let dio_gap = if unknown && self.dio.pins != 0 && self.dio.gaps {
-            1 << (self.logic_channels() - 1)
+            1 << (self.logic_channels() - 2)
         } else {
             0
         };
-        self.logic.push(if gap { GAP } else { 0 } | dio | dio_gap);
+        let under = u8::from(sample.under_range) << (self.logic_channels() - 1);
+        self.logic
+            .push(if gap { GAP } else { 0 } | dio | dio_gap | under);
         if self.logic.len() == CHUNK {
             self.flush()?;
         }
@@ -517,9 +521,9 @@ impl Sigrok {
         Ok(())
     }
 
-    /// GAP and the pins.
+    /// GAP, the pins, DIO_GAP where there is one, and UNDER.
     fn logic_channels(&self) -> usize {
-        1 + self.dio.names().count() + usize::from(self.dio.pins != 0 && self.dio.gaps)
+        1 + self.dio.names().count() + usize::from(self.dio.pins != 0 && self.dio.gaps) + 1
     }
 
     fn finish(mut self, cancel: &AtomicBool) -> Result<()> {
@@ -533,7 +537,8 @@ impl Sigrok {
         );
         let names = std::iter::once("GAP".to_owned())
             .chain(self.dio.names().map(|pin| format!("DIO{pin}")))
-            .chain((self.dio.pins != 0 && self.dio.gaps).then(|| "DIO_GAP".to_owned()));
+            .chain((self.dio.pins != 0 && self.dio.gaps).then(|| "DIO_GAP".to_owned()))
+            .chain(std::iter::once("UNDER".to_owned()));
         for (index, name) in names.enumerate() {
             metadata.push_str(&format!("probe{}={name}\n", index + 1));
         }

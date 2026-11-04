@@ -365,6 +365,7 @@ impl Archive {
                     millivolts: 0,
                     nanoamps: 0,
                     range: None,
+                    under_range: false,
                 },
                 |s| s.sample,
             );

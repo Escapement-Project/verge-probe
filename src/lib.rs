@@ -51,7 +51,7 @@ pub use probe::{
     AttachError, BoardKind, CalibratedEnergySample, CalibrationPoint, CalibrationRange,
     CodeLabArena, CodegenMeasurement, CodegenMode, CommandError, DapTransport, DioState,
     EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart,
-    EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergySample, EnergyTotal,
+    EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergyRanges, EnergySample, EnergyTotal,
     JtagCodegenState, JtagGenerationLogEntry, JtagPacingState, JtagWire, LatencyOutcome, Marked,
     ProBusError, RawEnergySample, Refused, SamplePosition, SampleRequest, SampleResult, SpiMode,
     SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo,

@@ -37,7 +37,10 @@ Typed commands fail with `CommandError`, which says whether the connection faile
 lacks the command, the request was out of range, the reply broke the protocol, or the firmware
 refused or failed it. A refusal carries the state the firmware reported with it. SPI and I2C calls
 return the received bytes. The latest energy reading is a sample, no sample yet, or stopped. The
-accumulator also keeps its total after an acquisition fault.
+accumulator also keeps its total after an acquisition fault. `set_energy_ranges` picks the current
+ranges for the next capture alone: automatic switching, the default, or the high range held. In
+either, a pair read on the high range too near the amplifier's floor comes marked under range (the
+firmware's HOST-INTERFACE.md, `0x90` mode 14).
 
 On an MCU-Link Pro, the identify, DIO, supply, energy and marker commands are also on Verge Aux, a
 second vendor interface that debuggers leave alone. `Bus::open_aux` claims it, and `aux::Aux` sends

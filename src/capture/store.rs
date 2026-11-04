@@ -115,6 +115,39 @@ struct HeaderV4 {
     edge_resolution_ns: u16,
 }
 
+/// The stream header as archives of version 5 stored it, without the high range's flag.
+#[derive(Serialize, Deserialize)]
+struct HeaderV5 {
+    rate: u32,
+    setting_ma: Option<u16>,
+    full_scale_mv: u16,
+    first_sequence: u32,
+    previous_low: bool,
+    low: Vec<crate::CalibrationPoint>,
+    high: Vec<crate::CalibrationPoint>,
+    dio_mask: u8,
+    dio_levels: u8,
+    edge_resolution_ns: u16,
+    switch_weight_q16: u16,
+    rearm_between_pairs: bool,
+    previous_shunt_nanoamps: Option<u32>,
+}
+
+/// A block's sample as archives of versions 4 and 5 stored it, without the under-range mark.
+#[derive(Serialize, Deserialize)]
+struct SupportedV5 {
+    sample: SampleV5,
+    end_ns: u64,
+}
+#[derive(Serialize, Deserialize)]
+struct SampleV5 {
+    sequence: u32,
+    time_ns: u64,
+    millivolts: u32,
+    nanoamps: u32,
+    range: Option<crate::stream::CurrentRange>,
+}
+
 /// A block's sample as archives before version 4 stored it, without its range.
 #[derive(Serialize, Deserialize)]
 struct SupportedV3 {
@@ -138,7 +171,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=5).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=6).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -150,8 +183,27 @@ impl Archive {
         decode(&bytes)
     }
     pub fn header(&self) -> Result<Header> {
-        let mut header: Header = if self.version >= 5 {
+        let mut header: Header = if self.version >= 6 {
             self.meta("header")?
+        } else if self.version == 5 {
+            let old: HeaderV5 = self.meta("header")?;
+            Header {
+                capture_id: None,
+                rate: old.rate,
+                setting_ma: old.setting_ma,
+                full_scale_mv: old.full_scale_mv,
+                first_sequence: old.first_sequence,
+                previous_low: old.previous_low,
+                low: old.low,
+                high: old.high,
+                dio_mask: old.dio_mask,
+                dio_levels: old.dio_levels,
+                edge_resolution_ns: old.edge_resolution_ns,
+                switch_weight_q16: old.switch_weight_q16,
+                rearm_between_pairs: old.rearm_between_pairs,
+                previous_shunt_nanoamps: old.previous_shunt_nanoamps,
+                high_range_only: false,
+            }
         } else {
             let old: HeaderV4 = self.meta("header")?;
             Header {
@@ -169,6 +221,7 @@ impl Archive {
                 switch_weight_q16: 0,
                 rearm_between_pairs: false,
                 previous_shunt_nanoamps: None,
+                high_range_only: false,
             }
         };
         let id: Option<Vec<u8>> = self
@@ -218,8 +271,25 @@ impl Archive {
         self.decode_block(&bytes)
     }
     pub(super) fn decode_block(&self, bytes: &[u8]) -> Result<Vec<Supported>> {
-        if self.version >= 4 {
+        if self.version >= 6 {
             return decode(bytes);
+        }
+        if self.version >= 4 {
+            let old: Vec<SupportedV5> = decode(bytes)?;
+            return Ok(old
+                .into_iter()
+                .map(|s| Supported {
+                    sample: Sample {
+                        sequence: s.sample.sequence,
+                        time_ns: s.sample.time_ns,
+                        millivolts: s.sample.millivolts,
+                        nanoamps: s.sample.nanoamps,
+                        range: s.sample.range,
+                        under_range: false,
+                    },
+                    end_ns: s.end_ns,
+                })
+                .collect());
         }
         let old: Vec<SupportedV3> = decode(bytes)?;
         Ok(old
@@ -231,6 +301,7 @@ impl Archive {
                     millivolts: s.sample.millivolts,
                     nanoamps: s.sample.nanoamps,
                     range: None,
+                    under_range: false,
                 },
                 end_ns: s.end_ns,
             })
@@ -506,7 +577,7 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=5;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=6;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
@@ -917,6 +988,7 @@ mod tests {
             switch_weight_q16: 0,
             rearm_between_pairs: false,
             previous_shunt_nanoamps: None,
+            high_range_only: false,
         }
     }
     fn raw_writer(path: &Path, rate: u32) -> CaptureWriter {
@@ -935,6 +1007,7 @@ mod tests {
                 1_000_000
             },
             range: Some(CurrentRange::new(!i.is_multiple_of(100))),
+            under_range: false,
         }
     }
     #[test]
@@ -1449,7 +1522,8 @@ mod tests {
                     Pair {
                         voltage_code: 32768,
                         current_code: 1000,
-                        low: true
+                        low: true,
+                        under_range: false,
                     };
                     4
                 ],
@@ -1767,7 +1841,8 @@ mod tests {
                     Pair {
                         voltage_code: 32768,
                         current_code: 1000,
-                        low: true
+                        low: true,
+                        under_range: false,
                     };
                     3
                 ],
@@ -1782,7 +1857,8 @@ mod tests {
                     Pair {
                         voltage_code: 32768,
                         current_code: 2000,
-                        low: true
+                        low: true,
+                        under_range: false,
                     };
                     2
                 ],
@@ -1919,7 +1995,8 @@ mod tests {
                 Pair {
                     voltage_code: 32768,
                     current_code: 1000,
-                    low: true
+                    low: true,
+                    under_range: false,
                 };
                 50
             ],
@@ -2079,6 +2156,105 @@ mod tests {
             .unwrap();
         }
     }
+    /// Rewrites the header and every sample block in the layouts version 5 stored.
+    fn version_5_layout(db: &Connection) {
+        version_5_header(db);
+        version_5_blocks(db);
+    }
+    fn version_5_header(db: &Connection) {
+        let data: Vec<u8> = db
+            .query_row("SELECT value FROM metadata WHERE key='header'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let header: Header = decode(&data).unwrap();
+        let old = HeaderV5 {
+            rate: header.rate,
+            setting_ma: header.setting_ma,
+            full_scale_mv: header.full_scale_mv,
+            first_sequence: header.first_sequence,
+            previous_low: header.previous_low,
+            low: header.low,
+            high: header.high,
+            dio_mask: header.dio_mask,
+            dio_levels: header.dio_levels,
+            edge_resolution_ns: header.edge_resolution_ns,
+            switch_weight_q16: header.switch_weight_q16,
+            rearm_between_pairs: header.rearm_between_pairs,
+            previous_shunt_nanoamps: header.previous_shunt_nanoamps,
+        };
+        db.execute(
+            "UPDATE metadata SET value=? WHERE key='header'",
+            params![encode(&old).unwrap()],
+        )
+        .unwrap();
+    }
+    /// Rewrites every sample block in the layout versions 4 and 5 stored.
+    fn version_5_blocks(db: &Connection) {
+        let blocks: Vec<(i64, Vec<u8>)> = db
+            .prepare("SELECT n, data FROM blocks")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        for (n, data) in blocks {
+            let old: Vec<SupportedV5> = decode::<Vec<Supported>>(&data)
+                .unwrap()
+                .into_iter()
+                .map(|s| SupportedV5 {
+                    sample: SampleV5 {
+                        sequence: s.sample.sequence,
+                        time_ns: s.sample.time_ns,
+                        millivolts: s.sample.millivolts,
+                        nanoamps: s.sample.nanoamps,
+                        range: s.sample.range,
+                    },
+                    end_ns: s.end_ns,
+                })
+                .collect();
+            db.execute(
+                "UPDATE blocks SET data=? WHERE n=?",
+                params![encode(&old).unwrap(), n],
+            )
+            .unwrap();
+        }
+    }
+    #[test]
+    fn version_5_archives_read_without_the_high_range_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.vergecapture");
+        let mut h = header(1000);
+        h.high_range_only = true;
+        h.switch_weight_q16 = 9786;
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer.ingest(Message::Header(h.clone())).unwrap();
+        writer.append((0..5).map(sample)).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(Archive::open(&path).unwrap().header().unwrap(), h);
+        let db = Connection::open(&path).unwrap();
+        version_5_layout(&db);
+        db.execute_batch("PRAGMA user_version=5;").unwrap();
+        drop(db);
+        let archive = Archive::open(&path).unwrap();
+        let read = archive.header().unwrap();
+        assert_eq!(
+            (read.switch_weight_q16, read.high_range_only),
+            (9786, false)
+        );
+        let extent = archive.extent().unwrap();
+        let samples = archive
+            .view(extent, 64, &AtomicBool::new(false))
+            .unwrap()
+            .samples
+            .unwrap();
+        assert_eq!(samples.len(), 5);
+        assert!(
+            samples
+                .iter()
+                .all(|s| !s.sample.under_range && s.sample.range.is_some())
+        );
+    }
     #[test]
     fn version_4_headers_read_without_step_5() {
         let dir = tempfile::tempdir().unwrap();
@@ -2093,6 +2269,7 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(Archive::open(&path).unwrap().header().unwrap(), h);
         let db = Connection::open(&path).unwrap();
+        version_5_blocks(&db);
         old_header(&db);
         db.execute_batch("PRAGMA user_version=4;").unwrap();
         drop(db);
@@ -2154,6 +2331,7 @@ mod tests {
                 millivolts: 3000,
                 nanoamps: if i == 1023 { 10_000_000 } else { 2_000_000 },
                 range: Some(CurrentRange::High),
+                under_range: false,
             }))
             .unwrap();
         writer.flush().unwrap();
@@ -2211,6 +2389,7 @@ mod tests {
                     millivolts: 3000,
                     nanoamps: if i == 3000 { 5000 } else { 1000 },
                     range: Some(CurrentRange::Low),
+                    under_range: false,
                 }))
                 .unwrap();
             if writer.samples.len() >= BLOCK {
@@ -2265,6 +2444,7 @@ mod tests {
                         1_000_000
                     },
                     range: Some(CurrentRange::High),
+                    under_range: false,
                 }))
                 .unwrap();
             writer.flush().unwrap();

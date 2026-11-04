@@ -82,6 +82,10 @@ pub struct Header {
     /// probe had one: a stream attached to a running capture.
     #[serde(default)]
     pub previous_shunt_nanoamps: Option<u32>,
+    /// The capture holds the high range (`0x90` mode 14): nothing switches, and the range before
+    /// stays high across a pause.
+    #[serde(default)]
+    pub high_range_only: bool,
 }
 
 /// One voltage and current reading, as the converter left them.
@@ -90,6 +94,10 @@ pub struct Pair {
     pub voltage_code: u16,
     pub current_code: u16,
     pub low: bool,
+    /// Read on the high range too near the amplifier's floor to trust, in either range setting
+    /// (HOST-INTERFACE.md, "Pairs: `0xa0`").
+    #[serde(default)]
+    pub under_range: bool,
 }
 
 /// Up to 99 evenly spaced pairs.
@@ -333,6 +341,7 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                 switch_weight_q16: switch_weight_q16.min(32768),
                 rearm_between_pairs: flags & 1 != 0,
                 previous_shunt_nanoamps: (flags & 2 != 0).then_some(previous),
+                high_range_only: flags & 4 != 0,
             }))
         }
         Some(&PAIRS) => {
@@ -355,6 +364,7 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                         voltage_code: u16_at(pair, 0),
                         current_code: u16_at(pair, 2),
                         low: pair[4] & 1 != 0,
+                        under_range: pair[4] & 2 != 0,
                     })
                     .collect(),
             }))
@@ -538,6 +548,9 @@ pub struct Sample {
     /// The pair's own range. Step 5 can give it a current from the pairs either side, which then
     /// share it. None only for a sample from a capture archive older than this field.
     pub range: Option<CurrentRange>,
+    /// The pair's own reading was under range (Pair::under_range).
+    #[serde(default)]
+    pub under_range: bool,
 }
 
 /// A pair whose range differs from the one before, waiting for the next pair's current.
@@ -548,6 +561,7 @@ struct Waiting {
     millivolts: u32,
     shunt_nanoamps: u32,
     low: bool,
+    under_range: bool,
     /// The previous pair's share of the stand-in, and its current: 0 but for a switch up after a pair.
     weight_q16: u16,
     before_nanoamps: u32,
@@ -573,6 +587,7 @@ pub struct Converter {
     before: Option<u32>,
     switch_weight_q16: u16,
     rearm_between_pairs: bool,
+    high_range_only: bool,
     waiting: Option<Waiting>,
     total: Total,
     samples: Vec<Sample>,
@@ -591,6 +606,7 @@ impl Converter {
             before: header.previous_shunt_nanoamps,
             switch_weight_q16: header.switch_weight_q16.min(32768),
             rearm_between_pairs: header.rearm_between_pairs,
+            high_range_only: header.high_range_only,
             waiting: None,
             total: Total::default(),
             samples: Vec::new(),
@@ -626,16 +642,17 @@ impl Converter {
             millivolts: pair.millivolts,
             nanoamps,
             range: Some(CurrentRange::new(pair.low)),
+            under_range: pair.under_range,
         });
     }
 
-    /// A pause: a waiting pair keeps its own current, the range before is low again, and there is
-    /// no pair before for the stand-in.
+    /// A pause: a waiting pair keeps its own current, the range before is low again unless the
+    /// capture holds the high range, and there is no pair before for the stand-in.
     fn pause(&mut self) {
         if let Some(waiting) = self.waiting.take() {
             self.count(waiting, waiting.shunt_nanoamps);
         }
-        self.previous_low = true;
+        self.previous_low = !self.high_range_only;
         self.before = None;
     }
 
@@ -650,6 +667,7 @@ impl Converter {
             millivolts: reading.millivolts,
             shunt_nanoamps: reading.shunt_nanoamps,
             low: pair.low,
+            under_range: pair.under_range,
             weight_q16: if up_after_a_pair {
                 self.switch_weight_q16
             } else {

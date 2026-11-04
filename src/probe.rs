@@ -24,7 +24,7 @@ use crate::protocol::{
     SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE,
     TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
-pub use crate::protocol::{BoardKind, DioState, VendorStatus, VergeInfo};
+pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
 use crate::dap::{DapLink, ID_DAP_INVALID};
 
@@ -974,6 +974,30 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         let request = encode_i2c_request(address, clock_hz, write, read_len, packet)
             .map_err(CommandError::InvalidRequest)?;
         parse_bus_response(&self.send(I2C_COMMAND, &request)?, read_len)
+    }
+
+    /// Sets the current ranges the next capture's start uses (`0x90` mode 14). That start takes
+    /// the setting and later ones switch automatically again, so a capture that should hold the
+    /// high range sets it before its own start. A running capture keeps its own. Firmware without
+    /// the setting switches automatically, so asking it for automatic succeeds and asking it for
+    /// the high range does not.
+    pub fn set_energy_ranges(
+        &mut self,
+        ranges: EnergyRanges,
+    ) -> Result<(), CommandError<EnergyError>> {
+        let info = self
+            .info()
+            .map_err(CommandError::widen)?
+            .ok_or(CommandError::Unsupported("Verge commands"))?;
+        if !info.supports_energy_ranges() {
+            return match ranges {
+                EnergyRanges::Auto => Ok(()),
+                EnergyRanges::High => Err(CommandError::Unsupported(
+                    "holding the high range; update the firmware first",
+                )),
+            };
+        }
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[14, ranges.wire()])?)
     }
 
     /// Starts voltage/current capture at the requested pair rate.
@@ -2447,6 +2471,45 @@ mod tests {
                 detected: true,
             }
         );
+    }
+
+    /// Firmware before the range setting always switches automatically: asking it for that is
+    /// no request at all, and asking it to hold the high range is refused before anything is sent.
+    #[test]
+    fn the_range_setting_asks_only_firmware_that_has_it() {
+        struct Ranges(Vec<Vec<u8>>, u32);
+        impl VergeTransport for Ranges {
+            fn send_vendor_command(
+                &mut self,
+                command_id: u8,
+                payload: &[u8],
+            ) -> Result<Vec<u8>, DebugProbeError> {
+                self.0.push([&[command_id][..], payload].concat());
+                match command_id {
+                    INFO_COMMAND => Ok(info_reply(6, 0, 1, 0, self.1)),
+                    ENERGY_COMMAND => Ok(vec![0, 0]),
+                    _ => Err(DebugProbeError::CommandNotSupportedByProbe {
+                        command_name: "vendor command",
+                    }),
+                }
+            }
+        }
+        let mut old = Ranges(Vec::new(), 1);
+        VergeControl::new(&mut old)
+            .set_energy_ranges(EnergyRanges::Auto)
+            .unwrap();
+        assert!(matches!(
+            VergeControl::new(&mut old).set_energy_ranges(EnergyRanges::High),
+            Err(CommandError::Unsupported(_))
+        ));
+        assert!(old.0.iter().all(|sent| sent[0] == INFO_COMMAND));
+        let mut new = Ranges(Vec::new(), 1 | 1 << 9);
+        for (ranges, wire) in [(EnergyRanges::High, 1), (EnergyRanges::Auto, 0)] {
+            VergeControl::new(&mut new)
+                .set_energy_ranges(ranges)
+                .unwrap();
+            assert_eq!(new.0.last().unwrap(), &vec![ENERGY_COMMAND, 14, wire]);
+        }
     }
 
     #[test]
