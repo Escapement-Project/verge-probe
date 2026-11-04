@@ -666,7 +666,7 @@ pub trait VergeTransport {
     }
 
     /// The CMSIS-DAP packet size, which bounds both a command and its reply, when the transport
-    /// can tell. probe-rs does not say.
+    /// can tell.
     fn packet_size(&mut self) -> Result<Option<usize>, DebugProbeError> {
         Ok(None)
     }
@@ -680,6 +680,10 @@ pub trait VergeTransport {
 }
 
 impl VergeTransport for Probe {
+    fn packet_size(&mut self) -> Result<Option<usize>, DebugProbeError> {
+        Ok(cmsis_dap(Some(self.driver_mut())).map(|dap| dap.packet_size()))
+    }
+
     fn send_vendor_command(
         &mut self,
         command_id: u8,
@@ -693,6 +697,10 @@ impl VergeTransport for Probe {
 
 /// Commands reach the probe after everything the session did before them.
 impl VergeTransport for Session {
+    fn packet_size(&mut self) -> Result<Option<usize>, DebugProbeError> {
+        Ok(cmsis_dap(self.driver_mut()).map(|dap| dap.packet_size()))
+    }
+
     fn send_vendor_command(
         &mut self,
         command_id: u8,
@@ -934,8 +942,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
     /// Runs one full-duplex transaction on the Pro SPI bridge.
     ///
     /// The request must fit the probe's packet: 504 bytes on bulk at high speed, 56 on HID and at
-    /// full speed. Through probe-rs, which does not report the packet, the limit checked here is
-    /// the high-speed one.
+    /// full speed. A transport that cannot tell the packet is held to the high-speed limit.
     pub fn spi_transfer(
         &mut self,
         clock_hz: u32,
@@ -953,8 +960,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
     /// Runs one Pro I2C write, read, or combined write/read transaction.
     ///
     /// The request and the reply must fit the probe's packet: 502 bytes written or 508 read on bulk
-    /// at high speed, 54 or 60 on HID and at full speed. Through probe-rs the limits checked here
-    /// are the high-speed ones.
+    /// at high speed, 54 or 60 on HID and at full speed. A transport that cannot tell the packet is
+    /// held to the high-speed limits.
     pub fn i2c_transfer(
         &mut self,
         address: u8,
