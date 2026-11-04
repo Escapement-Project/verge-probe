@@ -3,11 +3,12 @@
 use probe_rs::{
     Permissions, Session,
     probe::{
-        DebugProbeError, Probe, ScanFormat, WireProtocol,
-        cmsisdap::{CmsisDap, CmsisDapCjtagExtension},
+        DebugProbe, DebugProbeError, Probe, ScanFormat, WireProtocol,
+        cmsisdap::{CmsisDap, CmsisDapCjtagExtension, SendVendorCommand, VendorCommandId},
         list::Lister,
     },
 };
+use std::any::Any;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
@@ -684,18 +685,41 @@ impl VergeTransport for Probe {
         command_id: u8,
         payload: &[u8],
     ) -> Result<Vec<u8>, DebugProbeError> {
-        Probe::send_vendor_command(self, command_id, payload)
+        cmsis_dap(Some(self.driver_mut()))
+            .ok_or(NOT_CMSIS_DAP)?
+            .send_vendor_command(vendor_id(command_id)?, payload)
     }
 }
 
+/// Commands reach the probe after everything the session did before them.
 impl VergeTransport for Session {
     fn send_vendor_command(
         &mut self,
         command_id: u8,
         payload: &[u8],
     ) -> Result<Vec<u8>, DebugProbeError> {
-        Session::send_vendor_command(self, command_id, payload)
+        cmsis_dap(self.driver_mut())
+            .ok_or(NOT_CMSIS_DAP)?
+            .send_vendor_command(vendor_id(command_id)?, payload)
     }
+}
+
+/// The probe's CMSIS-DAP driver, where it has one: no other driver carries vendor commands.
+fn cmsis_dap(driver: Option<&mut dyn DebugProbe>) -> Option<&mut CmsisDap> {
+    (driver? as &mut dyn Any).downcast_mut::<CmsisDap>()
+}
+
+const NOT_CMSIS_DAP: DebugProbeError = DebugProbeError::CommandNotSupportedByProbe {
+    command_name: "CMSIS-DAP vendor commands",
+};
+
+/// probe-rs's form of a vendor command ID. Every one of Verge's is in the vendor range.
+fn vendor_id(command_id: u8) -> Result<VendorCommandId, DebugProbeError> {
+    VendorCommandId::new(command_id).ok_or_else(|| {
+        DebugProbeError::Other(format!(
+            "{command_id:#04x} is not a CMSIS-DAP vendor command"
+        ))
+    })
 }
 
 /// Vendor commands over a [`DapLink`], the link verge's own commands open. Replies come back as
@@ -1615,11 +1639,9 @@ impl VergeControl<'_, Session> {
 /// Installs Verge's cJTAG vendor-command adapter on an opened CMSIS-DAP probe.
 pub fn install_cjtag_support(probe: &mut Probe) -> Result<(), DebugProbeError> {
     let cmsisdap =
-        probe
-            .try_into::<CmsisDap>()
-            .ok_or(DebugProbeError::CommandNotSupportedByProbe {
-                command_name: "CMSIS-DAP cJTAG extension",
-            })?;
+        cmsis_dap(Some(probe.driver_mut())).ok_or(DebugProbeError::CommandNotSupportedByProbe {
+            command_name: "CMSIS-DAP cJTAG extension",
+        })?;
     cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension));
     Ok(())
 }
@@ -1696,7 +1718,11 @@ pub fn set_cjtag_scan_formats(
     formats: u32,
 ) -> Result<(), CommandError<Refused>> {
     let request = protocol::encode_scan_formats(formats);
-    expect_accepted(&probe.send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?)
+    expect_accepted(&VergeTransport::send_vendor_command(
+        probe,
+        CJTAG_CONTROL_COMMAND,
+        &request,
+    )?)
 }
 
 struct VergeCjtagExtension;
@@ -1704,9 +1730,11 @@ struct VergeCjtagExtension;
 impl CmsisDapCjtagExtension for VergeCjtagExtension {
     fn scan_formats(
         &mut self,
-        send_vendor_command: &mut dyn FnMut(u8, &[u8]) -> Result<Vec<u8>, DebugProbeError>,
+        send_vendor_command: &mut SendVendorCommand<'_>,
     ) -> Result<Vec<ScanFormat>, DebugProbeError> {
-        let Some(info) = read_info(send_vendor_command).map_err(into_probe_error)? else {
+        let mut send =
+            |command_id, payload: &[u8]| send_vendor_command(vendor_id(command_id)?, payload);
+        let Some(info) = read_info(&mut send).map_err(into_probe_error)? else {
             return Ok(Vec::new());
         };
         Ok([
@@ -1723,14 +1751,14 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
     fn set_framing(
         &mut self,
         format: Option<ScanFormat>,
-        send_vendor_command: &mut dyn FnMut(u8, &[u8]) -> Result<Vec<u8>, DebugProbeError>,
+        send_vendor_command: &mut SendVendorCommand<'_>,
     ) -> Result<(), DebugProbeError> {
         let request = match format {
             None => vec![0],
             Some(ScanFormat::OScan1) => vec![2],
             Some(format) => vec![3, format.number(), TAP_RUN_TEST_IDLE],
         };
-        let response = send_vendor_command(CJTAG_CONTROL_COMMAND, &request)?;
+        let response = send_vendor_command(vendor_id(CJTAG_CONTROL_COMMAND)?, &request)?;
         if vendor_status(response_byte(&response, 0)?)? {
             Ok(())
         } else {
