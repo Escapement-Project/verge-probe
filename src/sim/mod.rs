@@ -52,6 +52,11 @@ pub enum SimFirmware {
     DaplinkRs {
         revision: String,
     },
+    /// Ours built with a USB ID the tool does not know, as for pid.codes' test ID.
+    OtherId {
+        vid: u16,
+        pid: u16,
+    },
 }
 
 impl SimFirmware {
@@ -61,6 +66,7 @@ impl SimFirmware {
             SimFirmware::Stock { version } => format!("SIMFW:stock:{version};"),
             SimFirmware::StockHid { version } => format!("SIMFW:stockhid:{version};"),
             SimFirmware::DaplinkRs { revision } => format!("SIMFW:daplinkrs:{revision};"),
+            SimFirmware::OtherId { vid, pid } => format!("SIMFW:otherid:{vid:04x}{pid:04x};"),
         }
     }
 
@@ -79,6 +85,13 @@ impl SimFirmware {
             "daplinkrs" => Some(SimFirmware::DaplinkRs {
                 revision: value.to_owned(),
             }),
+            "otherid" => {
+                let id = u32::from_str_radix(value, 16).ok()?;
+                Some(SimFirmware::OtherId {
+                    vid: (id >> 16) as u16,
+                    pid: id as u16,
+                })
+            }
             _ => None,
         }
     }
@@ -476,6 +489,7 @@ impl World {
         let instance = u.instance.clone()?;
         let (vid, pid) = match (&u.mode, u.mini) {
             (Mode::Firmware(SimFirmware::DaplinkRs { .. }), _) => ids::id_for(Role::DaplinkRs),
+            (Mode::Firmware(SimFirmware::OtherId { vid, pid }), _) => (*vid, *pid),
             (Mode::Firmware(_), _) => ids::id_for(Role::Probe),
             (Mode::Bootloader, false) => ids::id_for(Role::Bootloader),
             (Mode::Bootloader, true) => ids::id_for(Role::MiniBootloader),
@@ -483,7 +497,7 @@ impl World {
         };
         let debug = !u.swd_jumper;
         let (serial, manufacturer, product, dap_v2, hid) = match &u.mode {
-            Mode::Firmware(SimFirmware::Ours { .. }) => (
+            Mode::Firmware(SimFirmware::Ours { .. } | SimFirmware::OtherId { .. }) => (
                 Some(u.ours_serial.clone()),
                 Some(self.ours.0.vendor.clone()),
                 Some(ours_product(&self.ours.0.product, u.board)),
@@ -1190,6 +1204,15 @@ impl Bus for SimBus {
     type Aux = SimAux;
 
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
+        let mut world = self.world();
+        world.settle();
+        Ok((0..world.units.len())
+            .filter_map(|unit| world.device(unit))
+            .filter(|device| device.role().is_some())
+            .collect())
+    }
+
+    fn every_device(&self) -> Result<Vec<UsbDevice>, BusError> {
         let mut world = self.world();
         world.settle();
         Ok((0..world.units.len())

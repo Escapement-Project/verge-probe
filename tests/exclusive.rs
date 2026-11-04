@@ -58,6 +58,9 @@ impl Bus for Exclusive<'_> {
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
         self.bus.devices()
     }
+    fn every_device(&self) -> Result<Vec<UsbDevice>, BusError> {
+        self.bus.every_device()
+    }
     fn open_dap(&self, device: &UsbDevice) -> Result<Held, BusError> {
         if !self.open.lock().unwrap().insert(device.instance.clone()) {
             self.busy.fetch_add(1, Ordering::Relaxed);

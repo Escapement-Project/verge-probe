@@ -67,6 +67,11 @@ pub enum UpdateError {
     )]
     NoReturn(Duration),
     #[error(
+        "the unit came back as {id}{}, an ID the tool does not look for, so it cannot reach the unit. The image it was given uses that ID",
+        product.as_ref().map(|p| format!(" ({p})")).unwrap_or_default()
+    )]
+    OtherId { id: String, product: Option<String> },
+    #[error(
         "{count} units appeared while the tool waited for this one, and they report no USB port to tell them apart"
     )]
     Ambiguous { count: usize },
@@ -433,6 +438,8 @@ pub struct Flashed {
     pub rom: UsbDevice,
     /// Every instance on the bus just before the reset.
     before: Vec<String>,
+    /// The unit's serial from before it entered ISP mode, where the tool knew the unit.
+    serial: Option<String>,
 }
 
 /// Flashes the unit in ISP mode, at `port` or the only one ([`flash_target`]), verifies it, and
@@ -454,7 +461,11 @@ pub fn flash_bootloader<B: Bus>(
     progress.start(Step::Reset, 0);
     let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
     isp::reset(&mut boot);
-    Ok(Flashed { rom, before })
+    Ok(Flashed {
+        rom,
+        before,
+        serial: None,
+    })
 }
 
 /// Waits for a reset unit to come back, and says what it came back as.
@@ -492,7 +503,25 @@ pub fn wait_for_return<B: Bus>(
                 maybe_jumper: bus.keeps_instances(),
             });
         }
-        None => return Err(UpdateError::NoReturn(timing.firmware_returns)),
+        None => {
+            // An image built for another ID boots where `devices` does not look. Its serial is
+            // the unit's only if the unit ran ours before, so the port says more where there is one.
+            let elsewhere = bus.every_device()?.into_iter().find(|d| {
+                d.role().is_none()
+                    && match (&rom.location, &flashed.serial) {
+                        (Some(_), _) => on_port_of(d, rom),
+                        (None, Some(serial)) => d.serial.as_ref() == Some(serial),
+                        (None, None) => false,
+                    }
+            });
+            return Err(match elsewhere {
+                Some(device) => UpdateError::OtherId {
+                    id: format!("{:04x}:{:04x}", device.vid, device.pid),
+                    product: device.product,
+                },
+                None => UpdateError::NoReturn(timing.firmware_returns),
+            });
+        }
     };
     match device.role() {
         Some(Role::Bootloader) => Ok(Outcome::JumperStillFitted),
@@ -545,7 +574,10 @@ fn update_unless<B: Bus>(
         Step::WaitForFirmware,
     ]);
     enter(bus, unit, false, timing, progress, cancel, stop)?;
-    let flashed = flash_bootloader(bus, image, None, timing, progress, cancel)?;
+    let flashed = Flashed {
+        serial: unit.device.serial.clone(),
+        ..flash_bootloader(bus, image, None, timing, progress, cancel)?
+    };
     wait_for_return(bus, &flashed, timing, progress, cancel)
 }
 
@@ -627,7 +659,12 @@ pub fn reset_now<B: Bus>(
     progress.start(Step::Reset, 0);
     let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
     isp::reset(&mut boot);
-    wait_for_return(bus, &Flashed { rom, before }, timing, progress, cancel)
+    let flashed = Flashed {
+        rom,
+        before,
+        serial: None,
+    };
+    wait_for_return(bus, &flashed, timing, progress, cancel)
 }
 
 /// What the bootloader of the unit in ISP mode says about itself, and the unit: the one at

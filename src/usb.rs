@@ -214,6 +214,14 @@ impl Bus for UsbBus {
             .collect())
     }
 
+    fn every_device(&self) -> Result<Vec<UsbDevice>, BusError> {
+        Ok(nusb::list_devices()
+            .wait()
+            .map_err(|error| BusError::Enumerate(error.to_string()))?
+            .map(|info| describe(&info))
+            .collect())
+    }
+
     fn open_dap(&self, device: &UsbDevice) -> Result<NusbDap, BusError> {
         let product = device.product.clone();
         let (interface, out, input) = self.claim_bulk_pair(

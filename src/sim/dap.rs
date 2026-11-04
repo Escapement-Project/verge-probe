@@ -114,6 +114,8 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             String::new(),
             String::new(),
         ),
+        // The bus lists no device on an ID the tool does not know, so nothing opens one.
+        SimFirmware::OtherId { .. } => return vec![dap::ID_DAP_INVALID],
     };
     match request {
         [dap::DAP_INFO, id] => match *id {

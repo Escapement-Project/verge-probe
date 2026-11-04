@@ -78,6 +78,9 @@ pub trait Bus {
 
     /// Every device with an ID in [`ids::KNOWN_IDS`].
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError>;
+    /// Every device, whatever its ID. How the tool finds a unit whose new image enumerates under
+    /// an ID [`Bus::devices`] leaves out.
+    fn every_device(&self) -> Result<Vec<UsbDevice>, BusError>;
     /// Claims a probe's CMSIS-DAP v2 interface.
     fn open_dap(&self, device: &UsbDevice) -> Result<Self::Dap, BusError>;
     /// Claims a Pro's Verge Aux interface.

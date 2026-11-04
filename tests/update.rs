@@ -13,7 +13,7 @@ use verge_probe::progress::{Cancel, Progress, Step};
 use verge_probe::sim::{Mode, SimBus, SimFirmware, firmware_image};
 use verge_probe::source::{ImageVersion, Payload};
 use verge_probe::update::{self, Outcome, Timing, UpdateError};
-use verge_probe::{Firmware, State, Unit, detect};
+use verge_probe::{Bus, Firmware, State, Unit, detect};
 
 /// What an image of ours from a file is.
 static FILE: ImageVersion = ImageVersion::Unknown;
@@ -140,6 +140,62 @@ fn ours_updates_itself_without_the_jumper() {
             bus.flash(0).get(&address),
             Some(&page),
             "page 0x{address:x}"
+        );
+    }
+}
+
+/// An image built for another USB ID boots, and the tool, which lists only the IDs it knows, sees
+/// no unit come back. It says where the unit went rather than advising the jumper for a unit
+/// that may simply be gone: by its port, or where the bus reports none, by its serial, which is
+/// the unit's only if it ran ours before.
+#[test]
+fn a_unit_back_on_another_id_is_named() {
+    let other = SimFirmware::OtherId {
+        vid: 0x1209,
+        pid: 0x0001,
+    };
+    for (scenario, serial, ports, named) in [
+        ("bench", "CJ3E7A91C2", true, true),
+        ("stock", "QK7RM2VTX8D41", true, true),
+        ("bench", "CJ3E7A91C2", false, true),
+        ("stock", "QK7RM2VTX8D41", false, false),
+    ] {
+        let bus = SimBus::scenario(scenario).unwrap();
+        bus.set_locations(ports);
+        let unit = the_unit(&bus, serial);
+        let image = firmware_image(&other);
+        let result = update::update(
+            &bus,
+            &unit,
+            Payload::new(&image, &FILE),
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+        );
+        let case = format!("{scenario}, ports {ports}");
+        if !named {
+            assert!(
+                matches!(result, Err(UpdateError::NoReturn(_))),
+                "{case}: {result:?}"
+            );
+            continue;
+        }
+        let Err(error @ UpdateError::OtherId { .. }) = &result else {
+            panic!("{case}: {result:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("came back as 1209:0001 ("),
+            "{case}: {message}"
+        );
+        assert!(!message.contains("ISP jumper"), "{case}: {message}");
+        // The tool's own listing does not show it.
+        assert!(
+            bus.devices()
+                .unwrap()
+                .iter()
+                .all(|d| (d.vid, d.pid) != (0x1209, 0x0001)),
+            "{case}"
         );
     }
 }

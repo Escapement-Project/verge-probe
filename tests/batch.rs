@@ -76,6 +76,10 @@ impl Bus for Hooked<'_> {
         self.bus.devices()
     }
 
+    fn every_device(&self) -> Result<Vec<UsbDevice>, BusError> {
+        self.bus.every_device()
+    }
+
     fn open_dap(&self, device: &UsbDevice) -> Result<SimDap, BusError> {
         self.opened
             .lock()
