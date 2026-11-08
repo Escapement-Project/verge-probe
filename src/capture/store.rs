@@ -26,6 +26,8 @@ pub struct Envelope {
     pub statistics: Statistics,
     /// Some part of this bin was not measured. Render it without joining its neighbours.
     pub gap: bool,
+    /// Some part of this bin's time is pairs the capture lost, rather than a pause.
+    pub lost: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +37,9 @@ pub struct View {
     pub statistics: Statistics,
     pub envelopes: Vec<Envelope>,
     pub lost_pairs: u64,
+    /// The time of lost pairs that overlaps the interval, as [`Archive::lost_spans`] gives it;
+    /// empty when the interval has no unmeasured time inside the capture's extent.
+    pub lost: Vec<Interval>,
     pub ended: bool,
     /// Every sample the interval overlaps, when there are no more of them than bins.
     pub samples: Option<Vec<Supported>>,
@@ -171,7 +176,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=6).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=7).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -354,6 +359,129 @@ impl Archive {
         self.db.execute_batch("ROLLBACK")?;
         result
     }
+    /// The time of lost pairs that overlaps `interval`, in order: each span runs from one period
+    /// after the last pair before a sequence gap to the first pair after it, or for as long as the
+    /// lost pairs' own periods if the capture also paused there. A pause leaves time unmeasured too,
+    /// but no span; so does a loss before the first pair or after the last.
+    pub fn lost_spans(&self, interval: Interval, cancel: &AtomicBool) -> Result<Vec<Interval>> {
+        self.db.execute_batch("BEGIN")?;
+        let result = self.lost_spans_inner(interval, cancel);
+        self.db.execute_batch("ROLLBACK")?;
+        result
+    }
+    fn lost_spans_inner(&self, interval: Interval, cancel: &AtomicBool) -> Result<Vec<Interval>> {
+        if self.version < 7 {
+            return self.recomputed_lost_spans(interval, cancel);
+        }
+        let mut statement = self.db.prepare(
+            "SELECT start_ns,end_ns FROM lost WHERE end_ns>? AND start_ns<? ORDER BY start_ns",
+        )?;
+        let rows = statement.query_map(
+            params![
+                interval.start_ns.min(i64::MAX as u64) as i64,
+                interval.end_ns.min(i64::MAX as u64) as i64
+            ],
+            |r| {
+                Ok(Interval::new(
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, i64>(1)? as u64,
+                ))
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+    /// An archive before version 7 kept no lost spans, but its samples keep their sequence
+    /// numbers, and a gap in them is a span, ended as the writer ends one. Only a node whose measured
+    /// time falls short of its interval holds a gap, inside one of its blocks or between two, so
+    /// only those blocks are read.
+    fn recomputed_lost_spans(
+        &self,
+        interval: Interval,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<Interval>> {
+        let blocks: u64 = self.meta("blocks")?;
+        if blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let period = 1_000_000_000u64.div_ceil(u64::from(self.header()?.rate.max(1)));
+        let mut level = 0;
+        let mut covered = 1u64;
+        while covered < blocks {
+            covered = covered.saturating_mul(FAN);
+            level += 1;
+        }
+        let mut wanted = std::collections::BTreeSet::new();
+        self.gap_blocks(level, 0, interval, blocks, &mut wanted, cancel)?;
+        let mut spans = Vec::new();
+        let mut previous: Option<(u64, Supported)> = None;
+        for n in wanted {
+            cancelled(cancel)?;
+            for supported in self.block(n)? {
+                if let Some((block, before)) = previous
+                    && block + 1 >= n
+                {
+                    let missing = skipped(
+                        before.sample.sequence.wrapping_add(1),
+                        supported.sample.sequence,
+                    );
+                    let end = lost_end(before.end_ns, supported.sample.time_ns, missing, period);
+                    if missing > 0
+                        && end > before.end_ns
+                        && end > interval.start_ns
+                        && before.end_ns < interval.end_ns
+                    {
+                        spans.push(Interval::new(before.end_ns, end));
+                    }
+                }
+                previous = Some((n, supported));
+            }
+        }
+        Ok(spans)
+    }
+    /// The blocks under node (`level`, `index`) that hold a gap overlapping `interval`, and the
+    /// blocks either side of a gap between two of its children.
+    fn gap_blocks(
+        &self,
+        level: u32,
+        index: u64,
+        interval: Interval,
+        blocks: u64,
+        wanted: &mut std::collections::BTreeSet<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        cancelled(cancel)?;
+        let Some(node) = self.node(level, index)? else {
+            return Ok(());
+        };
+        if node.interval.end_ns <= interval.start_ns
+            || node.interval.start_ns >= interval.end_ns
+            || node.stats.measured_ns >= node.interval.duration_ns()
+        {
+            return Ok(());
+        }
+        if level == 0 {
+            wanted.insert(index);
+            return Ok(());
+        }
+        let per_child = FAN.pow(level - 1);
+        let mut previous: Option<(u64, Interval)> = None;
+        for child in index * FAN..(index + 1) * FAN {
+            let Some(node) = self.node(level - 1, child)? else {
+                break;
+            };
+            if let Some((before, gap_from)) = previous.map(|(c, i)| (c, i.end_ns))
+                && gap_from < node.interval.start_ns
+                && gap_from < interval.end_ns
+                && node.interval.start_ns > interval.start_ns
+            {
+                wanted.insert(((before + 1) * per_child - 1).min(blocks - 1));
+                wanted.insert(child * per_child);
+            }
+            self.gap_blocks(level - 1, child, interval, blocks, wanted, cancel)?;
+            previous = Some((child, node.interval));
+        }
+        Ok(())
+    }
     /// A stable snapshot, with at most `pixels` extrema bins regardless of capture length, and
     /// the samples themselves once they are no more than the bins.
     pub fn view(&self, interval: Interval, pixels: usize, cancel: &AtomicBool) -> Result<View> {
@@ -377,7 +505,7 @@ impl Archive {
                 cancel,
             };
             self.envelopes(level, 0, &mut query)?;
-            let envelopes = query
+            let mut envelopes: Vec<Envelope> = query
                 .values
                 .into_iter()
                 .enumerate()
@@ -389,10 +517,24 @@ impl Archive {
                     Some(Envelope {
                         interval: bin,
                         gap: statistics.measured_ns < bin.duration_ns(),
+                        lost: false,
                         statistics,
                     })
                 })
                 .collect();
+            // Only unmeasured time can be lost, and an older archive reads its blocks to find it.
+            let inside = Interval::new(
+                interval.start_ns.max(extent.start_ns),
+                interval.end_ns.min(extent.end_ns),
+            );
+            let lost = if statistics.measured_ns < inside.duration_ns() {
+                self.lost_spans_inner(interval, cancel)?
+            } else {
+                Vec::new()
+            };
+            for bin in &mut envelopes {
+                bin.lost = bin.gap && overlaps(&lost, bin.interval);
+            }
             let samples = if statistics.samples <= pixels as u64 {
                 let mut samples = Vec::new();
                 self.overlapping(interval, cancel, |block| {
@@ -409,6 +551,7 @@ impl Archive {
                 statistics,
                 envelopes,
                 lost_pairs: self.meta("lost")?,
+                lost,
                 ended: self.meta("ended")?,
                 samples,
             })
@@ -560,6 +703,14 @@ pub struct CaptureWriter {
     messages: Vec<Message>,
     blocks: u64,
     lost: u64,
+    /// The time between the last pair before a sequence gap and the first after it, waiting for
+    /// the next flush.
+    lost_spans: Vec<Interval>,
+    /// The last pair's time, where a lost span starts one period on.
+    last_pair_ns: Option<u64>,
+    /// A sequence gap waiting for its first pair after: where its lost time starts, if a pair came
+    /// before it, and how many pairs it lost.
+    gap: Option<(Option<u64>, u64)>,
     next: Option<u32>,
     extent: Interval,
     ended: bool,
@@ -577,7 +728,7 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=6;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=7;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
@@ -588,7 +739,9 @@ impl CaptureWriter {
             CREATE INDEX markers_time ON markers(time_ns,n);
             CREATE TABLE dio_blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
             CREATE INDEX dio_time ON dio_blocks(end_ns,start_ns);
-            CREATE TABLE dio_nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;"))?;
+            CREATE TABLE dio_nodes(level INTEGER,n INTEGER,data BLOB NOT NULL,PRIMARY KEY(level,n)) WITHOUT ROWID;
+            CREATE TABLE lost(start_ns INTEGER PRIMARY KEY,end_ns INTEGER NOT NULL);
+            CREATE INDEX lost_end ON lost(end_ns);"))?;
         let writer = Self {
             db,
             header: None,
@@ -599,6 +752,9 @@ impl CaptureWriter {
             messages: Vec::new(),
             blocks: 0,
             lost: 0,
+            lost_spans: Vec::new(),
+            last_pair_ns: None,
+            gap: None,
             next: None,
             extent: Interval::default(),
             ended: false,
@@ -650,13 +806,29 @@ impl CaptureWriter {
                 if let Some(next) = self.next {
                     let missing = skipped(next, pairs.first_sequence);
                     self.lost += missing;
-                    if missing > 0
-                        && let Some(pair) = pairs.pairs.first()
-                    {
-                        converter.discontinuity(pair.low);
+                    if missing > 0 {
+                        let start = self
+                            .last_pair_ns
+                            .map(|last| last.saturating_add(self.period));
+                        let (start, before) = self.gap.unwrap_or((start, 0));
+                        self.gap = Some((start, before + missing));
+                    }
+                }
+                if let (Some(pair), Some((start, missing))) = (pairs.pairs.first(), self.gap) {
+                    self.gap = None;
+                    converter.discontinuity(pair.low);
+                    if let Some(start) = start {
+                        let end = lost_end(start, pairs.time_ns, missing, self.period);
+                        if end > start {
+                            self.lost_spans.push(Interval::new(start, end));
+                        }
                     }
                 }
                 self.next = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
+                if let Some(last) = pairs.pairs.len().checked_sub(1) {
+                    self.last_pair_ns =
+                        Some(pairs.time_of(last, self.header.as_ref().map_or(1, |h| h.rate)));
+                }
                 converter.add_message(pairs);
                 let samples = converter.take_samples();
                 self.append(samples)?;
@@ -728,6 +900,7 @@ impl CaptureWriter {
                 }
                 self.message_n += self.messages.len() as u64;
                 self.messages.clear();
+                self.lost_spans.clear();
                 if !self.samples.is_empty() {
                     if self.blocks == 0 {
                         self.extent.start_ns = self.samples[0].sample.time_ns;
@@ -754,6 +927,15 @@ impl CaptureWriter {
             self.db.execute(
                 "INSERT INTO messages VALUES(?,?)",
                 params![(self.message_n + offset as u64) as i64, encode(message)?],
+            )?;
+        }
+        for span in &self.lost_spans {
+            self.db.execute(
+                "INSERT INTO lost VALUES(?,?)",
+                params![
+                    i64::try_from(span.start_ns).map_err(|_| CaptureError::Time)?,
+                    i64::try_from(span.end_ns).map_err(|_| CaptureError::Time)?
+                ],
             )?;
         }
         if !self.samples.is_empty() {
@@ -851,6 +1033,20 @@ impl CaptureWriter {
             .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get::<_, String>(0));
         Ok(())
     }
+}
+
+/// Where the time of `missing` lost pairs ends: at the next pair, or after their own periods if the
+/// capture also paused in the same gap, so that the pause does not count as lost.
+fn lost_end(start: u64, next_ns: u64, missing: u64, period: u64) -> u64 {
+    next_ns.min(start.saturating_add(missing.saturating_mul(period)))
+}
+
+/// Whether any of `spans`, in order and apart, overlaps `interval`.
+fn overlaps(spans: &[Interval], interval: Interval) -> bool {
+    let after = spans.partition_point(|span| span.end_ns <= interval.start_ns);
+    spans
+        .get(after)
+        .is_some_and(|span| span.start_ns < interval.end_ns)
 }
 
 pub fn skipped(next: u32, first: u32) -> u64 {
@@ -1826,6 +2022,258 @@ mod tests {
             .unwrap();
         let sequences: Vec<_> = samples.iter().map(|s| s.sample.sequence).collect();
         assert_eq!(sequences, (1000..1048).collect::<Vec<_>>());
+    }
+    /// One pair at 1000 pairs/s, alone in its message.
+    fn one_pair(flags: u8, sequence: u32, time_ms: u64) -> Message {
+        Message::Pairs(Pairs::new(
+            flags,
+            sequence,
+            time_ms * 1_000_000,
+            vec![Pair {
+                voltage_code: 32768,
+                current_code: 1000,
+                low: true,
+                under_range: false,
+            }],
+        ))
+    }
+    #[test]
+    fn lost_pairs_leave_a_span_and_a_pause_leaves_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lost.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer
+            .ingest(Message::Header(Header {
+                first_sequence: 0,
+                ..header(1000)
+            }))
+            .unwrap();
+        // The 128th message, the header's included, comes after the first loss. It flushes the
+        // pairs before the loss as a block of their own, so that span falls between two blocks.
+        for i in 0..=125 {
+            writer.ingest(one_pair(0, i, u64::from(i))).unwrap();
+        }
+        writer.ingest(one_pair(0, 130, 130)).unwrap();
+        for i in 131..=199 {
+            writer.ingest(one_pair(0, i, u64::from(i))).unwrap();
+        }
+        writer.ingest(one_pair(Pairs::HELD, 200, 225)).unwrap();
+        for i in 201..=299 {
+            writer.ingest(one_pair(0, i, u64::from(i) + 25)).unwrap();
+        }
+        for i in 305..=399 {
+            writer.ingest(one_pair(0, i, u64::from(i) + 25)).unwrap();
+        }
+        writer
+            .ingest(Message::End(End {
+                reason: EndReason::Stopped,
+                last_sequence: 399,
+            }))
+            .unwrap();
+        writer.finish().unwrap();
+        let ms = |a: u64, b: u64| Interval::new(a * 1_000_000, b * 1_000_000);
+        let cancel = AtomicBool::new(false);
+        let check = |archive: &Archive| {
+            assert_eq!(
+                archive.lost_spans(ms(0, 430), &cancel).unwrap(),
+                [ms(126, 130), ms(325, 330)]
+            );
+            assert_eq!(
+                archive.lost_spans(ms(128, 129), &cancel).unwrap(),
+                [ms(126, 130)]
+            );
+            assert!(
+                archive
+                    .lost_spans(ms(130, 325), &cancel)
+                    .unwrap()
+                    .is_empty()
+            );
+            let view = archive.view(ms(0, 430), 43, &cancel).unwrap();
+            assert_eq!(view.lost, [ms(126, 130), ms(325, 330)]);
+            // Wholly inside a loss, with no sample to make a bin.
+            let inside = archive.view(ms(327, 329), 43, &cancel).unwrap();
+            assert!(inside.envelopes.is_empty());
+            assert_eq!(inside.lost, [ms(325, 330)]);
+            let starts = |lost: bool| -> Vec<u64> {
+                view.envelopes
+                    .iter()
+                    .filter(|bin| bin.gap && bin.lost == lost)
+                    .map(|bin| bin.interval.start_ns / 1_000_000)
+                    .collect()
+            };
+            // The pause from 200 ms and the time past the capture's end are unmeasured, not lost.
+            assert_eq!(
+                (starts(true), starts(false)),
+                (vec![120, 320], vec![220, 420])
+            );
+        };
+        let archive = Archive::open(&path).unwrap();
+        let between: (i64, i64) = archive
+            .db
+            .query_row(
+                "SELECT (SELECT end_ns FROM blocks WHERE n=0),(SELECT start_ns FROM blocks WHERE n=1)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(between, (126_000_000, 130_000_000));
+        check(&archive);
+        drop(archive);
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("DROP TABLE lost; PRAGMA user_version=6;")
+            .unwrap();
+        drop(db);
+        check(&Archive::open(&path).unwrap());
+    }
+    /// Every span `archive` holds, as written and as an archive before version 7 finds them again
+    /// from its samples.
+    fn spans_both_ways(path: &Path) -> (Vec<Interval>, Vec<Interval>) {
+        let everything = Interval::new(0, i64::MAX as u64);
+        let cancel = AtomicBool::new(false);
+        let written = Archive::open(path)
+            .unwrap()
+            .lost_spans(everything, &cancel)
+            .unwrap();
+        let db = Connection::open(path).unwrap();
+        db.execute_batch("DROP TABLE lost; PRAGMA user_version=6;")
+            .unwrap();
+        drop(db);
+        let found = Archive::open(path)
+            .unwrap()
+            .lost_spans(everything, &cancel)
+            .unwrap();
+        (written, found)
+    }
+    fn switching(rate: u32, first_sequence: u32) -> Header {
+        Header {
+            first_sequence,
+            high: vec![
+                CalibrationPoint {
+                    code: 0,
+                    current_nanoamps: 0,
+                },
+                CalibrationPoint {
+                    code: 65535,
+                    current_nanoamps: 350_000_000,
+                },
+            ],
+            ..header(rate)
+        }
+    }
+    fn pairs_of(low: impl Fn(u32) -> bool, range: std::ops::Range<u32>) -> Vec<Pair> {
+        range
+            .map(|k| Pair {
+                voltage_code: 32768,
+                current_code: 1000,
+                low: low(k),
+                under_range: false,
+            })
+            .collect()
+    }
+    #[test]
+    fn spans_agree_across_the_wrap_at_a_rate_that_does_not_divide_a_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrap.vergecapture");
+        let rate = 3000;
+        let first = u32::MAX - 450;
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer
+            .ingest(Message::Header(switching(rate, first)))
+            .unwrap();
+        // Pair k has sequence first + k. The second loss crosses the wrap, and the range switches
+        // every seven pairs, so a pair waits at some gaps.
+        let lost = |k: u32| (302..320).contains(&k) || (442..470).contains(&k) || k == 701;
+        let low = |k: u32| (k / 7).is_multiple_of(2);
+        let time = |k: u32| u64::from(k) * 1_000_000_000 / u64::from(rate);
+        let mut k = 0;
+        while k < 1000 {
+            if lost(k) {
+                k += 1;
+                continue;
+            }
+            let mut end = k;
+            while end < 1000 && end - k < 99 && !lost(end) {
+                end += 1;
+            }
+            writer
+                .ingest(Message::Pairs(Pairs::new(
+                    0,
+                    first.wrapping_add(k),
+                    time(k),
+                    pairs_of(low, k..end),
+                )))
+                .unwrap();
+            k = end;
+        }
+        writer
+            .ingest(Message::End(End {
+                reason: EndReason::Stopped,
+                last_sequence: first.wrapping_add(999),
+            }))
+            .unwrap();
+        writer.finish().unwrap();
+        // Each span runs from the stored end of the pair before its gap to the pair after it.
+        let mut samples = Vec::new();
+        Archive::open(&path)
+            .unwrap()
+            .overlapping(
+                Interval::new(0, i64::MAX as u64),
+                &AtomicBool::new(false),
+                |block| {
+                    samples.extend(block);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let expected: Vec<_> = samples
+            .windows(2)
+            .filter(|w| skipped(w[0].sample.sequence.wrapping_add(1), w[1].sample.sequence) > 0)
+            .map(|w| Interval::new(w[0].end_ns, w[1].sample.time_ns))
+            .collect();
+        assert_eq!(expected.len(), 3);
+        let (written, found) = spans_both_ways(&path);
+        assert_eq!((written, found), (expected.clone(), expected));
+    }
+    #[test]
+    fn a_pause_in_the_same_gap_as_a_loss_is_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.vergecapture");
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer.ingest(Message::Header(switching(1000, 0))).unwrap();
+        writer
+            .ingest(Message::Pairs(Pairs::new(
+                0,
+                0,
+                0,
+                pairs_of(|_| true, 0..10),
+            )))
+            .unwrap();
+        // Pairs 10 and 11 lost, then held until 52 ms: 2 ms lost from 10 ms, and a pause.
+        writer
+            .ingest(Message::Pairs(Pairs::new(
+                Pairs::HELD,
+                12,
+                52_000_000,
+                pairs_of(|_| true, 12..22),
+            )))
+            .unwrap();
+        // An empty message carrying a gap: the span closes at the next pair.
+        writer
+            .ingest(Message::Pairs(Pairs::new(0, 25, 65_000_000, Vec::new())))
+            .unwrap();
+        writer
+            .ingest(Message::Pairs(Pairs::new(
+                0,
+                25,
+                65_000_000,
+                pairs_of(|_| true, 25..30),
+            )))
+            .unwrap();
+        writer.finish().unwrap();
+        let ms = |a: u64, b: u64| Interval::new(a * 1_000_000, b * 1_000_000);
+        let (written, found) = spans_both_ways(&path);
+        assert_eq!(written, [ms(10, 12), ms(62, 65)]);
+        assert_eq!(found, written);
     }
     #[test]
     fn raw_metadata_wrap_loss_end_and_recovery_survive_reopen() {
