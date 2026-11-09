@@ -1259,9 +1259,9 @@ mod tests {
         );
     }
 
-    /// The names the README gives for the record's `result`.
+    /// The names verge's docs/updating.md gives for the record's `result`.
     #[test]
-    fn a_result_is_written_as_the_readme_names_it() {
+    fn a_result_is_written_as_the_docs_name_it() {
         for (result, name) in [
             (Settled::Updated, "updated"),
             (Settled::JumperFitted, "jumper-fitted"),
