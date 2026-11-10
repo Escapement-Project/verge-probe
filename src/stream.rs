@@ -1,5 +1,6 @@
-//! Verge Aux's energy stream (mculink-verge HOST-INTERFACE.md, "The energy stream"): its messages,
-//! each pair's conversion to millivolts and nanoamps, and a stream's total as the probe keeps it.
+//! Verge Aux's energy stream (mculink-verge docs/host-interface.md, "The energy stream"): its
+//! messages, each pair's conversion to millivolts and nanoamps, and a stream's total as the probe
+//! keeps it.
 //!
 //! The conversion is the firmware's, step for step and on integers, so a stream started with the
 //! capture sums to the total the probe reports. The firmware writes vectors for it
@@ -95,7 +96,7 @@ pub struct Pair {
     pub current_code: u16,
     pub low: bool,
     /// Read on the high range too near the amplifier's floor to trust, in either range setting
-    /// (HOST-INTERFACE.md, "Pairs: `0xa0`").
+    /// (docs/host-interface.md, "Pairs: `0xa0`").
     #[serde(default)]
     pub under_range: bool,
 }

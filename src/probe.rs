@@ -66,7 +66,7 @@ impl<E: std::error::Error + 'static> CommandError<E> {
 #[error("the firmware refused the request")]
 pub struct Refused<S: Debug = ()>(pub S);
 
-/// Where a marker went (mculink-verge HOST-INTERFACE.md, "Markers: 0x94").
+/// Where a marker went (mculink-verge docs/host-interface.md, "Markers: 0x94").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Marked {
@@ -2584,7 +2584,7 @@ mod tests {
         assert_eq!(&request[7..], &[0x12, 0x34]);
         assert!(encode_spi_request(1, SpiMode::Mode0, false, &[0], 512).is_err());
         assert!(encode_spi_request(100_000, SpiMode::Mode0, false, &[], 512).is_err());
-        // HOST-INTERFACE.md: 504 bytes on bulk at high speed, 56 on HID and at full speed.
+        // docs/host-interface.md: 504 bytes on bulk at high speed, 56 on HID and at full speed.
         for (packet, longest) in [(512, 504), (64, 56)] {
             let spi =
                 |len| encode_spi_request(100_000, SpiMode::Mode0, false, &vec![0; len], packet);
@@ -2734,8 +2734,8 @@ mod tests {
         assert!(encode_i2c_request(0x80, 100_000, &[], 1, 512).is_err());
         assert!(encode_i2c_request(0x50, 1_000, &[], 1, 512).is_err());
         assert!(encode_i2c_request(0x50, 100_000, &[], 0, 512).is_err());
-        // HOST-INTERFACE.md: 502 written or 508 read at high speed, 54 or 60 on HID and at full
-        // speed.
+        // docs/host-interface.md: 502 written or 508 read at high speed, 54 or 60 on HID and at
+        // full speed.
         for (packet, write, read) in [(512, 502, 508), (64, 54, 60)] {
             let i2c =
                 |write, read| encode_i2c_request(0x50, 100_000, &vec![0; write], read, packet);

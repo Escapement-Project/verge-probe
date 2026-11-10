@@ -1,4 +1,4 @@
-//! A simulated Pro's target supply (`0x8F`) and energy capture (`0x90`), as HOST-INTERFACE.md
+//! A simulated Pro's target supply (`0x8F`) and energy capture (`0x90`), as docs/host-interface.md
 //! describes them.
 //!
 //! The target is a sleeping microcontroller that wakes for 10 ms every 100 ms: 20 µA asleep and

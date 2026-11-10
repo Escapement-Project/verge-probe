@@ -329,9 +329,9 @@ pub struct SimAux {
 /// While the host waits on IN, simulated time passes in steps of this, and the stream with it.
 const WAIT_STEP: Duration = Duration::from_millis(10);
 
-/// The pairs messages the probe keeps for a host that has not read them: 16 places, two kept for
-/// a header and an end. It drops new pairs messages while they are full (HOST-INTERFACE.md, "When
-/// the host falls behind").
+/// The pairs messages the probe keeps for a host that has not read them: 16 places, two kept for a
+/// header and an end. It drops new pairs messages while they are full (docs/host-interface.md,
+/// "When the host falls behind").
 const KEPT_PAIRS_MESSAGES: usize = 14;
 
 /// Puts replies and stream messages on a unit's IN endpoint, dropping pairs messages the probe

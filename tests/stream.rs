@@ -180,7 +180,7 @@ fn a_stream_sums_to_the_firmware_total() {
         let samples = convert.take_samples();
         assert_eq!(samples.len() as u64, total.pairs);
         assert!(samples.iter().zip(1..).all(|(s, n)| s.sequence == n));
-        // HOST-INTERFACE.md's rule: mv × nA per pair, scaled by floor(2^32 / rate).
+        // docs/host-interface.md's rule: mv × nA per pair, scaled by floor(2^32 / rate).
         let scale = (1u128 << 32) / u128::from(rate);
         let q32 = samples.iter().fold(0u128, |sum, s| {
             sum + u128::from(s.millivolts) * u128::from(s.nanoamps) * scale

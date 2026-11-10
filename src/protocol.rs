@@ -385,7 +385,7 @@ pub(crate) fn decode_dio(reply: &[u8]) -> Result<DioState, &'static str> {
 }
 
 /// Which current ranges a capture uses (`0x90` mode 14). The two trade differently: see
-/// HOST-INTERFACE.md, "Pro energy capture".
+/// docs/host-interface.md, "Current ranges".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EnergyRanges {
     /// The probe switches between the low and high ranges as the current moves. It reads small

@@ -1,6 +1,6 @@
-//! Verge Aux, the MCU-Link Pro's second vendor interface (mculink-verge HOST-INTERFACE.md, "The
-//! auxiliary interface: Verge Aux"): the supply and energy commands beside a debugger that holds
-//! CMSIS-DAP, and the energy stream.
+//! Verge Aux, the MCU-Link Pro's second vendor interface (mculink-verge docs/host-interface.md,
+//! "The auxiliary interface: Verge Aux"): the supply and energy commands beside a debugger that
+//! holds CMSIS-DAP, and the energy stream.
 //!
 //! One request at a time, each answered by one reply in its command's CMSIS-DAP format. Stream
 //! messages come between replies, told apart by their first byte, and wait here for
