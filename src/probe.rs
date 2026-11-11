@@ -1729,9 +1729,9 @@ fn mcu_link_id(vid: u16, pid: u16) -> bool {
     crate::ids::role(vid, pid) == Some(crate::ids::Role::Probe)
 }
 
-/// Readies an opened probe for probe-rs to select `protocol`, as [`attach`] does. On an MCU-Link
-/// it clears a scan format a session left selected. For cJTAG it installs Verge's adapter, and
-/// refuses a probe that is not an MCU-Link running Verge with cJTAG.
+/// Readies an opened probe for probe-rs to select `protocol`, as [`attach`] does. For cJTAG it
+/// installs Verge's adapter, and refuses a probe that is not an MCU-Link running Verge with cJTAG.
+/// For SWD and JTAG it sends nothing.
 ///
 /// `usb_id` is the probe's VID and PID, from its listing or the selector that opened it. With
 /// `cjtag_format`, the adapter offers OScan1 and that format alone, so a host switches the target to
@@ -1742,64 +1742,35 @@ pub fn prepare_probe(
     protocol: WireProtocol,
     cjtag_format: Option<ScanFormat>,
 ) -> Result<(), AttachError> {
+    if protocol != WireProtocol::CJtag {
+        return Ok(());
+    }
     let (vid, pid) = usb_id;
-    let mcu_link = mcu_link_id(vid, pid);
-    if protocol == WireProtocol::CJtag && !mcu_link {
+    if !mcu_link_id(vid, pid) {
         return Err(AttachError::NotMcuLink(format!(
             "the probe with USB ID {vid:04x}:{pid:04x}"
         )));
     }
-    if mcu_link {
-        prepare_mcu_link(probe, protocol)?;
-    }
-    if protocol == WireProtocol::CJtag {
-        let cmsisdap =
-            cmsis_dap(Some(probe.driver_mut())).ok_or(AttachError::Configure(NOT_CMSIS_DAP))?;
-        cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: cjtag_format }));
-    }
+    require_cjtag(probe)?;
+    let cmsisdap =
+        cmsis_dap(Some(probe.driver_mut())).ok_or(AttachError::Configure(NOT_CMSIS_DAP))?;
+    cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: cjtag_format }));
     Ok(())
 }
 
-/// On an MCU-Link, before probe-rs selects `protocol`: clears a scan format a session left
-/// selected, and refuses cJTAG where the firmware has none.
-///
-/// A session that ends without `DAP_Disconnect` leaves its selection in place, and the next
-/// `DAP_Connect(2)` would then frame plain JTAG. probe-rs sends no `DAP_Disconnect` when it opens a
-/// probe, so this sends `DAP_JTAG_Format` 0, which clears the selection the same way.
-fn prepare_mcu_link<T: VergeTransport + ?Sized>(
-    transport: &mut T,
-    protocol: WireProtocol,
-) -> Result<(), AttachError> {
-    let mut verge = VergeControl::new(transport);
-    let info = verge
+/// On an MCU-Link, before probe-rs selects cJTAG: refuses one whose firmware has none. Nothing a
+/// session selects outlives its JTAG connection, so there is no format to clear first.
+fn require_cjtag<T: VergeTransport + ?Sized>(transport: &mut T) -> Result<(), AttachError> {
+    let info = VergeControl::new(transport)
         .info()
         .map_err(|error| AttachError::Configure(into_probe_error(error)))?
         .cloned();
-    if let Some(info) = &info
-        && info.scan_formats != 0
-    {
-        let reply = verge
-            .send_vendor_command(JTAG_FORMAT_COMMAND, &[0])
-            .map_err(AttachError::Configure)?;
-        if !vendor_status(response_byte(&reply, 0).map_err(configure)?).map_err(configure)? {
-            return Err(AttachError::Configure(DebugProbeError::Other(
-                "the firmware refused to clear its cJTAG scan format".to_owned(),
-            )));
-        }
-    }
-    if protocol != WireProtocol::CJtag {
-        return Ok(());
-    }
     match info {
         None => Err(AttachError::NotVerge),
         Some(info) if info.version < 7 => Err(AttachError::VergeTooOld(info.firmware)),
         Some(info) if info.scan_formats == 0 => Err(AttachError::NoCjtag),
         Some(_) => Ok(()),
     }
-}
-
-fn configure(error: MalformedReply) -> AttachError {
-    AttachError::Configure(error.into())
 }
 
 /// Opens the probe with `serial`, or the only one attached, and attaches to `chip` over
@@ -3367,55 +3338,29 @@ mod tests {
     }
 
     #[test]
-    fn attach_clears_a_left_selection_and_refuses_cjtag_without_it() {
-        let prepare = |reply: Vec<u8>, protocol| {
+    fn cjtag_needs_verge_with_cjtag_and_nothing_is_cleared() {
+        let prepare = |reply: Vec<u8>| {
             let mut transport = FakeTransport {
-                replies: [reply, vec![0]].into(),
+                replies: [reply].into(),
                 commands: Vec::new(),
             };
-            let result = prepare_mcu_link(&mut transport, protocol);
+            let result = require_cjtag(&mut transport);
             (result, transport.commands)
         };
         let identify = (INFO_COMMAND, vec![]);
-        let clear = (0x95, vec![0]);
-        for protocol in [WireProtocol::Jtag, WireProtocol::CJtag, WireProtocol::Swd] {
-            let (result, sent) = prepare(info_reply(7, 0, BoardKind::Pro.number(), 0, 0), protocol);
-            assert!(result.is_ok());
-            assert_eq!(sent, [identify.clone(), clear.clone()]);
-        }
-        let (result, sent) = prepare(
-            info_reply(7, 0, BoardKind::OnBoard.number(), 0, 0),
-            WireProtocol::CJtag,
-        );
+        let (result, sent) = prepare(info_reply(7, 0, BoardKind::Pro.number(), 0, 0));
+        assert!(result.is_ok());
+        assert_eq!(sent, std::slice::from_ref(&identify));
+        let (result, sent) = prepare(info_reply(7, 0, BoardKind::OnBoard.number(), 0, 0));
         assert!(matches!(result, Err(AttachError::NoCjtag)));
         assert_eq!(sent, std::slice::from_ref(&identify));
-        let (result, sent) = prepare(
-            info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0),
-            WireProtocol::CJtag,
-        );
+        let (result, sent) = prepare(info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0));
         assert!(matches!(result, Err(AttachError::VergeTooOld(build)) if build == "test-build"));
         assert_eq!(sent, std::slice::from_ref(&identify));
-        assert!(
-            prepare(
-                info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0),
-                WireProtocol::Jtag
-            )
-            .0
-            .is_ok()
-        );
         // NXP's firmware: 0x82 without CJTAG.
-        let (result, sent) = prepare(vec![], WireProtocol::CJtag);
+        let (result, sent) = prepare(vec![]);
         assert!(matches!(result, Err(AttachError::NotVerge)));
         assert_eq!(sent, std::slice::from_ref(&identify));
-        assert!(prepare(vec![], WireProtocol::Swd).0.is_ok());
-        let mut refusing = FakeTransport {
-            replies: [info_reply(7, 0, BoardKind::Pro.number(), 0, 0), vec![0xFF]].into(),
-            commands: Vec::new(),
-        };
-        assert!(matches!(
-            prepare_mcu_link(&mut refusing, WireProtocol::Jtag),
-            Err(AttachError::Configure(_))
-        ));
     }
 
     #[test]
