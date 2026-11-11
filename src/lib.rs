@@ -56,4 +56,5 @@ pub use probe::{
     ProBusError, RawEnergySample, Refused, SamplePosition, SampleRequest, SampleResult, SpiMode,
     SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo,
     VergeProbe, VergeSession, VergeTransport, attach, install_cjtag_support, is_mcu_link,
+    prepare_probe,
 };

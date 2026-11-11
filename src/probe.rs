@@ -1682,7 +1682,7 @@ pub fn install_cjtag_support(probe: &mut Probe) -> Result<(), DebugProbeError> {
         cmsis_dap(Some(probe.driver_mut())).ok_or(DebugProbeError::CommandNotSupportedByProbe {
             command_name: "CMSIS-DAP cJTAG extension",
         })?;
-    cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension));
+    cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: None }));
     Ok(())
 }
 
@@ -1722,7 +1722,42 @@ pub enum AttachError {
 /// `0x82` without acting on it, so Verge's vendor commands are safe to send it.
 #[must_use]
 pub fn is_mcu_link(info: &DebugProbeInfo) -> bool {
-    crate::ids::role(info.vendor_id, info.product_id) == Some(crate::ids::Role::Probe)
+    mcu_link_id(info.vendor_id, info.product_id)
+}
+
+fn mcu_link_id(vid: u16, pid: u16) -> bool {
+    crate::ids::role(vid, pid) == Some(crate::ids::Role::Probe)
+}
+
+/// Readies an opened probe for probe-rs to select `protocol`, as [`attach`] does. On an MCU-Link
+/// it clears a scan format a session left selected. For cJTAG it installs Verge's adapter, and
+/// refuses a probe that is not an MCU-Link running Verge with cJTAG.
+///
+/// `usb_id` is the probe's VID and PID, from its listing or the selector that opened it. With
+/// `cjtag_format`, the adapter offers OScan1 and that format alone, so a host switches the target to
+/// it where the target has it and stays in OScan1 where not.
+pub fn prepare_probe(
+    probe: &mut Probe,
+    usb_id: (u16, u16),
+    protocol: WireProtocol,
+    cjtag_format: Option<ScanFormat>,
+) -> Result<(), AttachError> {
+    let (vid, pid) = usb_id;
+    let mcu_link = mcu_link_id(vid, pid);
+    if protocol == WireProtocol::CJtag && !mcu_link {
+        return Err(AttachError::NotMcuLink(format!(
+            "the probe with USB ID {vid:04x}:{pid:04x}"
+        )));
+    }
+    if mcu_link {
+        prepare_mcu_link(probe, protocol)?;
+    }
+    if protocol == WireProtocol::CJtag {
+        let cmsisdap =
+            cmsis_dap(Some(probe.driver_mut())).ok_or(AttachError::Configure(NOT_CMSIS_DAP))?;
+        cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: cjtag_format }));
+    }
+    Ok(())
 }
 
 /// On an MCU-Link, before probe-rs selects `protocol`: clears a scan format a session left
@@ -1770,13 +1805,14 @@ fn configure(error: MalformedReply) -> AttachError {
 /// Opens the probe with `serial`, or the only one attached, and attaches to `chip` over
 /// `protocol`.
 ///
-/// Verge's cJTAG support is installed before cJTAG is selected. Without `speed_khz` the probe
-/// keeps its default clock.
+/// [`prepare_probe`] readies it first, holding cJTAG to `cjtag_format` when one is given. Without
+/// `speed_khz` the probe keeps its default clock.
 pub fn attach(
     serial: Option<&str>,
     chip: &str,
     protocol: WireProtocol,
     speed_khz: Option<u32>,
+    cjtag_format: Option<ScanFormat>,
 ) -> Result<Session, AttachError> {
     let mut probes = Lister::new().list_all();
     let info = match serial {
@@ -1794,12 +1830,12 @@ pub fn attach(
         return Err(AttachError::NotMcuLink(info.identifier));
     }
     let mut probe = info.open().map_err(AttachError::Open)?;
-    if is_mcu_link(&info) {
-        prepare_mcu_link(&mut probe, protocol)?;
-    }
-    if protocol == WireProtocol::CJtag {
-        install_cjtag_support(&mut probe).map_err(AttachError::Configure)?;
-    }
+    prepare_probe(
+        &mut probe,
+        (info.vendor_id, info.product_id),
+        protocol,
+        cjtag_format,
+    )?;
     probe
         .select_protocol(protocol)
         .map_err(AttachError::Configure)?;
@@ -1814,7 +1850,10 @@ pub fn attach(
         })
 }
 
-struct VergeCjtagExtension;
+struct VergeCjtagExtension {
+    /// The one scan format a host may switch the target to, beside OScan1.
+    hold: Option<ScanFormat>,
+}
 
 impl CmsisDapCjtagExtension for VergeCjtagExtension {
     fn scan_formats(
@@ -1826,6 +1865,12 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
         let Some(info) = read_info(&mut send).map_err(into_probe_error)? else {
             return Ok(Vec::new());
         };
+        // Every activation starts in OScan1, so a held format keeps it offered: the host switches
+        // from OScan1 to the held format, where the target has it.
+        let held = |format: &ScanFormat| {
+            self.hold
+                .is_none_or(|hold| *format == ScanFormat::OScan1 || *format == hold)
+        };
         Ok([
             ScanFormat::OScan1,
             ScanFormat::OScan2,
@@ -1833,7 +1878,7 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
             ScanFormat::OScan6,
         ]
         .into_iter()
-        .filter(|format| info.frames(*format))
+        .filter(|format| info.frames(*format) && held(format))
         .collect())
     }
 
@@ -3244,9 +3289,33 @@ mod tests {
                 Ok(reply.clone())
             };
             assert_eq!(
-                VergeCjtagExtension.scan_formats(&mut send).unwrap(),
+                VergeCjtagExtension { hold: None }
+                    .scan_formats(&mut send)
+                    .unwrap(),
                 formats
             );
+        }
+    }
+
+    #[test]
+    fn a_held_format_is_offered_beside_oscan1_alone() {
+        for (hold, formats) in [
+            (ScanFormat::OScan1, &[ScanFormat::OScan1][..]),
+            (
+                ScanFormat::OScan5,
+                &[ScanFormat::OScan1, ScanFormat::OScan5],
+            ),
+            (
+                ScanFormat::OScan6,
+                &[ScanFormat::OScan1, ScanFormat::OScan6],
+            ),
+        ] {
+            let mut send =
+                |_: VendorCommandId, _: &[u8]| Ok(info_reply(7, 0, BoardKind::Pro.number(), 0, 0));
+            let offered = VergeCjtagExtension { hold: Some(hold) }
+                .scan_formats(&mut send)
+                .unwrap();
+            assert_eq!(offered, formats);
         }
     }
 
@@ -3264,12 +3333,14 @@ mod tests {
                 sent.push((command_id.get(), payload.to_vec()));
                 Ok(vec![0])
             };
-            VergeCjtagExtension.set_framing(format, &mut send).unwrap();
+            VergeCjtagExtension { hold: None }
+                .set_framing(format, &mut send)
+                .unwrap();
             assert_eq!(sent, [(0x95, vec![number])]);
         }
         let mut refuse = |_, _: &[u8]| Ok(vec![0xFF]);
         assert!(
-            VergeCjtagExtension
+            VergeCjtagExtension { hold: None }
                 .set_framing(Some(ScanFormat::OScan2), &mut refuse)
                 .is_err()
         );
