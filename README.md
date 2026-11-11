@@ -10,10 +10,14 @@ probe-rs session available for normal target access:
 
 ```rust,no_run
 use escapement_verge_probe::probe_rs::{Permissions, probe::list::Lister};
-use escapement_verge_probe::{VergeProbe, VergeSession, install_cjtag_support};
+use escapement_verge_probe::{VergeProbe, VergeSession, install_cjtag_support, is_mcu_link};
 
 let lister = Lister::new();
-let info = lister.list_all().into_iter().next().expect("no probe found");
+let info = lister
+    .list_all()
+    .into_iter()
+    .find(is_mcu_link)
+    .expect("no MCU-Link found");
 let mut probe = info.open()?;
 install_cjtag_support(&mut probe)?;
 {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use escapement_verge_probe::probe_rs::probe::list::Lister;
 use escapement_verge_probe::{
-    CommandError, ProBusError, Refused, SpiMode, VergeProbe, install_cjtag_support,
+    CommandError, ProBusError, Refused, SpiMode, VergeProbe, install_cjtag_support, is_mcu_link,
 };
 
 fn dio_state(label: &str, state: &escapement_verge_probe::DioState) {
@@ -186,8 +186,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let info = Lister::new()
         .list_all()
         .into_iter()
-        .find(|probe| probe.serial_number.as_deref() == Some(serial.as_str()))
-        .ok_or_else(|| std::io::Error::other(format!("probe {serial} not found")))?;
+        .find(|probe| probe.serial_number.as_deref() == Some(serial.as_str()) && is_mcu_link(probe))
+        .ok_or_else(|| std::io::Error::other(format!("no MCU-Link with serial {serial}")))?;
     let mut probe = info.open()?;
     install_cjtag_support(&mut probe)?;
     let mut verge = VergeProbe::new(&mut probe);
