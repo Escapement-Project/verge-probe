@@ -3,7 +3,8 @@
 use probe_rs::probe::ScanFormat;
 
 pub(crate) const INFO_COMMAND: u8 = 0x82;
-pub(crate) const CJTAG_CONTROL_COMMAND: u8 = 0x83;
+/// `DAP_JTAG_Format`, proposed for CMSIS-DAP, at a vendor ID until Arm assigns one.
+pub(crate) const JTAG_FORMAT_COMMAND: u8 = 0x95;
 pub(crate) const ENERGY_COMMAND: u8 = 0x90;
 pub(crate) const TARGET_SENSE_COMMAND: u8 = 0x86;
 pub(crate) const TARGET_POWER_COMMAND: u8 = 0x8F;
@@ -19,9 +20,7 @@ pub(crate) const CPU_STAGING_COMMAND: u8 = 0x8C;
 pub(crate) const JTAG_LOG_COMMAND: u8 = 0x8D;
 pub(crate) const SPI_COMMAND: u8 = 0x91;
 pub(crate) const I2C_COMMAND: u8 = 0x92;
-pub(crate) const CAP_OSCAN1: u8 = 1 << 0;
-pub(crate) const CAP_OSCAN1_ACTIVE: u8 = 1 << 1;
-pub(crate) const CAP_OSCAN1_AFTER_ACTIVATION: u8 = 1 << 4;
+pub(crate) const CAP_CJTAG_FRAMING: u8 = 1 << 1;
 pub(crate) const CAP_TARGET_SENSE: u8 = 1 << 2;
 pub(crate) const CAP_SWD_CODEGEN: u8 = 1 << 3;
 pub(crate) const CAP_JTAG_CODEGEN: u8 = 1 << 5;
@@ -50,7 +49,8 @@ pub(crate) const I2C_REQUEST_HEADER: usize = 10;
 pub(crate) const BUS_REPLY_HEADER: usize = 4;
 /// The largest packet any Verge transport has: bulk at high speed.
 pub(crate) const LARGEST_PACKET: usize = 512;
-pub(crate) const TAP_RUN_TEST_IDLE: u8 = 1;
+/// The scan formats `0x95` selects, bit n for SCNFMT n: OScan1, OScan2, OScan5 and OScan6.
+pub(crate) const CJTAG_FORMATS: u32 = 1 << 9 | 1 << 10 | 1 << 13 | 1 << 14;
 pub(crate) const SAMPLE_FILL_MAX: u8 = 32;
 
 /// Firmware identity and capabilities returned by vendor command `0x82`.
@@ -65,7 +65,8 @@ pub struct VergeInfo {
     pub firmware: String,
     /// Board kind reported by info format version 3 and later.
     pub board: Option<BoardKind>,
-    /// Bit `n` is set when the probe frames scan format `n`.
+    /// Bit `n` is set when the probe frames SCNFMT `n`, selected with `0x95`. That is OScan1, 2, 5
+    /// and 6 from info format 7, except on an on-board MCU-Link, and none before format 7.
     pub scan_formats: u32,
     /// Energy and other extended capability bits.
     pub extended_capabilities: u32,
@@ -97,28 +98,14 @@ impl BoardKind {
 }
 
 impl VergeInfo {
-    /// Whether the firmware frames OScan1 after host activation.
-    pub fn frames_after_host_activation(&self) -> bool {
-        self.capabilities & CAP_OSCAN1_AFTER_ACTIVATION != 0
-    }
-
-    /// Whether the firmware frames `format` after host activation.
+    /// Whether the firmware frames `format` once the host has activated it on the target.
     pub fn frames(&self, format: ScanFormat) -> bool {
-        if format == ScanFormat::OScan1 {
-            self.frames_after_host_activation()
-        } else {
-            self.scan_formats & (1 << format.number()) != 0
-        }
+        self.scan_formats & (1 << format.number()) != 0
     }
 
-    /// Whether the firmware implements OScan1 framing.
-    pub fn supports_oscan1(&self) -> bool {
-        self.capabilities & CAP_OSCAN1 != 0
-    }
-
-    /// Whether the firmware has OScan1 framing active.
-    pub fn oscan1_active(&self) -> bool {
-        self.capabilities & CAP_OSCAN1_ACTIVE != 0
+    /// Whether cJTAG framing was on when the info was read.
+    pub fn cjtag_framing(&self) -> bool {
+        self.capabilities & CAP_CJTAG_FRAMING != 0
     }
 
     /// Whether the firmware supports target sensing.
@@ -233,11 +220,9 @@ impl VendorStatus {
 }
 
 impl VergeInfo {
-    pub const FLAG_OSCAN1: u8 = CAP_OSCAN1;
-    pub const FLAG_OSCAN1_ACTIVE: u8 = CAP_OSCAN1_ACTIVE;
+    pub const FLAG_CJTAG_FRAMING: u8 = CAP_CJTAG_FRAMING;
     pub const FLAG_TARGET_SENSE: u8 = CAP_TARGET_SENSE;
     pub const FLAG_SWD_CODEGEN: u8 = CAP_SWD_CODEGEN;
-    pub const FLAG_OSCAN1_ENTER: u8 = CAP_OSCAN1_AFTER_ACTIVATION;
     pub const FLAG_JTAG_CODEGEN: u8 = CAP_JTAG_CODEGEN;
     /// [`crate::dap::VENDOR_DIO`] acts: a Pro whose USB-SIO jumper, J15, was not fitted when it started.
     pub const FLAG_DIO: u8 = CAP_DIO;
@@ -252,11 +237,9 @@ impl VergeInfo {
     #[must_use]
     pub fn flag_names(&self) -> Vec<&'static str> {
         [
-            (Self::FLAG_OSCAN1, "OScan1"),
-            (Self::FLAG_OSCAN1_ACTIVE, "OScan1 active"),
+            (Self::FLAG_CJTAG_FRAMING, "cJTAG framing on"),
             (Self::FLAG_TARGET_SENSE, "target sense"),
             (Self::FLAG_SWD_CODEGEN, "generated SWD"),
-            (Self::FLAG_OSCAN1_ENTER, "host-driven OScan1 entry"),
             (Self::FLAG_JTAG_CODEGEN, "generated JTAG"),
             (Self::FLAG_DIO, "DIO pins"),
             (Self::FLAG_TARGET_POWER, "target power"),
@@ -283,10 +266,10 @@ impl VergeInfo {
         .collect()
     }
 
-    /// The cJTAG scan formats offered, by name, or `None` before format 4.
+    /// The cJTAG scan formats framed, by name, or `None` before info format 7.
     #[must_use]
     pub fn scan_format_names(&self) -> Option<Vec<String>> {
-        (self.version >= 4).then(|| {
+        (self.version >= 7).then(|| {
             let mask = self.scan_formats;
             (0..32)
                 .filter(|n| mask >> n & 1 != 0)
@@ -327,12 +310,6 @@ pub(crate) fn encode_dio(mask: u8, outputs: u8, levels: u8) -> [u8; 3] {
     [mask, outputs & mask, levels & mask]
 }
 
-pub(crate) fn encode_scan_formats(mask: u32) -> [u8; 5] {
-    let mut request = [4, 0, 0, 0, 0];
-    request[1..].copy_from_slice(&mask.to_le_bytes());
-    request
-}
-
 pub(crate) fn decode_info(reply: &[u8]) -> Result<Option<VergeInfo>, &'static str> {
     let Some(rest) = reply.strip_prefix(b"CJTAG") else {
         return Ok(None);
@@ -358,9 +335,10 @@ pub(crate) fn decode_info(reply: &[u8]) -> Result<Option<VergeInfo>, &'static st
         info.board = Some(BoardKind::from_byte(*tail.first().ok_or(short)?));
         tail = &tail[1..];
     }
-    if version >= 4 {
-        info.scan_formats =
-            u32::from_le_bytes(tail.get(..4).ok_or(short)?.try_into().map_err(|_| short)?);
+    // Formats 4 to 6 put vendor command 0x83's scan formats here, and this host does not send
+    // 0x83. From format 7 the field is 0, and every board but the on-board MCU-Link has 0x95.
+    if version >= 7 && info.board != Some(BoardKind::OnBoard) {
+        info.scan_formats = CJTAG_FORMATS;
     }
     if version >= 6 {
         info.extended_capabilities =

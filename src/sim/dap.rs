@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
+use super::{Event, Mode, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
 use crate::daplink_rs;
 use crate::protocol::{
@@ -134,17 +134,17 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         },
         [dap::VENDOR_IDENTIFY] => match &firmware {
             SimFirmware::Ours { build } => {
-                // A unit with a board answers as the current image does, in format 6; one without
-                // as recorded.
+                // A unit with a board answers as the current image does, in format 7, which
+                // leaves flag bits 0 and 4 clear; one without as recorded.
                 let board = world.units[unit].board;
-                let format = if board.is_some() {
-                    6
+                let (format, recorded_flags) = if board.is_some() {
+                    (7, world.ours.1.flags & !0x11)
                 } else {
-                    world.ours.1.format
+                    (world.ours.1.format, world.ours.1.flags)
                 };
                 let pro = board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
                 let flags = if pro {
-                    world.ours.1.flags
+                    recorded_flags
                         | CAP_TARGET_POWER
                         | if world.units[unit].dio_disabled {
                             0
@@ -152,7 +152,7 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                             dap::Ours::FLAG_DIO
                         }
                 } else {
-                    world.ours.1.flags
+                    recorded_flags
                 };
                 let mut reply = vec![dap::VENDOR_IDENTIFY];
                 reply.extend_from_slice(dap::IDENTIFY_MAGIC);
@@ -160,7 +160,7 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 reply.extend_from_slice(build.as_bytes());
                 if let Some(board) = board {
                     reply.push(board);
-                    reply.extend_from_slice(&world.units[unit].scan_formats.to_le_bytes());
+                    reply.extend_from_slice(&0u32.to_le_bytes());
                     let extended = if pro {
                         CAP_ENERGY_CAPTURE
                             | CAP_ENERGY_ACCUMULATOR
@@ -196,17 +196,6 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
-        [dap::VENDOR_CJTAG_CONTROL, dap::CJTAG_SET_FORMATS, mask @ ..] if mask.len() == 4 => {
-            match &firmware {
-                SimFirmware::Ours { .. } => {
-                    let mask = u32::from_le_bytes(mask.try_into().expect("four bytes"));
-                    world.units[unit].scan_formats =
-                        (mask & SIM_SCAN_FORMATS) | (1 << dap::SCNFMT_OSCAN1);
-                    vec![dap::VENDOR_CJTAG_CONTROL, dap::DAP_OK]
-                }
-                _ => vec![dap::ID_DAP_INVALID],
-            }
-        }
         // A unit without a board answers as the recorded image, which predates the command.
         [dap::VENDOR_DIO, mask, outputs, levels] => match &firmware {
             SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {

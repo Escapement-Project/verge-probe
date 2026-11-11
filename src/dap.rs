@@ -13,14 +13,6 @@ pub const DAP_OK: u8 = 0x00;
 
 /// Ours answers this with its identity; stock does not know it.
 pub const VENDOR_IDENTIFY: u8 = crate::protocol::INFO_COMMAND;
-/// Ours' cJTAG control. Mode 4 sets the scan formats the unit offers a host until it
-/// restarts: a little-endian mask after the mode, bit n for SCNFMT n.
-pub const VENDOR_CJTAG_CONTROL: u8 = crate::protocol::CJTAG_CONTROL_COMMAND;
-pub const CJTAG_SET_FORMATS: u8 = 4;
-/// The scan formats by their IEEE 1149.7 SCNFMT numbers.
-pub const SCNFMT_OSCAN1: u32 = 9;
-pub const SCNFMT_OSCAN2: u32 = 10;
-pub const SCNFMT_OSCAN5: u32 = 13;
 pub const IDENTIFY_MAGIC: &[u8; 5] = b"CJTAG";
 /// Ours' DIO pins on the MCU-Link Pro's J19: `mask, outputs, levels` sets the direction and the
 /// level of each pin in `mask`, bit n for DIOn; a mask of 0 only reads. Always three bytes after
@@ -193,25 +185,6 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
     })
 }
 
-/// Limits the cJTAG scan formats ours offers a host to `mask` (bit n for SCNFMT n) until the
-/// unit restarts. The unit keeps OScan1 whatever the mask, and drops formats its image does not
-/// frame; `u32::MAX` offers every one it does.
-pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapError> {
-    let mut request = vec![VENDOR_CJTAG_CONTROL];
-    request.extend_from_slice(&crate::protocol::encode_scan_formats(mask));
-    let reply = command(link, &request)?;
-    match reply.get(1) {
-        Some(&DAP_OK) => Ok(()),
-        Some(_) => Err(DapError::Refused {
-            command: VENDOR_CJTAG_CONTROL,
-        }),
-        None => Err(DapError::Short {
-            command: VENDOR_CJTAG_CONTROL,
-            len: reply.len(),
-        }),
-    }
-}
-
 /// Reads a reply to [`VENDOR_DIO`]: `None` from an image of ours that predates the command.
 pub fn parse_dio(reply: &[u8]) -> Result<Option<Dio>, DapError> {
     match reply.first() {
@@ -360,19 +333,19 @@ mod tests {
     fn identify_ours() {
         let mut reply = vec![0x82];
         reply.extend_from_slice(b"CJTAG");
-        reply.extend_from_slice(&[2, 61, 7]);
+        reply.extend_from_slice(&[2, 46, 7]);
         reply.extend_from_slice(b"14d05d4");
         let ours = parse_identify(&reply).unwrap().unwrap();
         assert_eq!(ours.version, 2);
-        assert_eq!(ours.capabilities, 61);
+        assert_eq!(ours.capabilities, 46);
+        assert!(ours.cjtag_framing());
         assert_eq!(ours.firmware, "14d05d4");
         assert_eq!(
             ours.flag_names(),
             [
-                "OScan1",
+                "cJTAG framing on",
                 "target sense",
                 "generated SWD",
-                "host-driven OScan1 entry",
                 "generated JTAG"
             ]
         );
@@ -405,21 +378,36 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_formats_are_read_from_format_4_on() {
-        let ours = parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06, 0, 0]))
+    fn the_cjtag_formats_come_with_format_7_off_board() {
+        let format_7 = |board| {
+            parse_identify(&identify_reply(
+                7,
+                "96be420",
+                &[board, 0, 0, 0, 0, 0, 0, 0, 0],
+            ))
             .unwrap()
-            .unwrap();
-        assert_eq!(ours.scan_formats, 0x600);
+            .unwrap()
+        };
         assert_eq!(
-            ours.scan_format_names(),
-            Some(vec!["OScan1".to_owned(), "OScan2".to_owned()])
+            format_7(Ours::BOARD_MCU_LINK_PRO).scan_format_names(),
+            Some(
+                ["OScan1", "OScan2", "OScan5", "OScan6"]
+                    .map(String::from)
+                    .to_vec()
+            )
         );
-        let older = parse_identify(&identify_reply(3, "v0.3.0", &[0, 0, 0, 0, 0]))
+        assert_eq!(
+            format_7(Ours::BOARD_ON_BOARD).scan_format_names(),
+            Some(vec![])
+        );
+        // Format 6's field lists 0x83's formats, here OScan1 and OScan2, and this host does not
+        // send 0x83.
+        let older = parse_identify(&identify_reply(6, "26ea505", &[0, 0, 6, 0, 0, 0, 0, 0, 0]))
             .unwrap()
             .unwrap();
-        assert_eq!(older.scan_formats, 0);
+        assert_eq!((older.scan_formats, older.scan_format_names()), (0, None));
         assert!(matches!(
-            parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06])),
+            parse_identify(&identify_reply(7, "96be420", &[1, 0, 0, 0, 0, 0, 0])),
             Err(DapError::Short { command: 0x82, .. })
         ));
     }

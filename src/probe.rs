@@ -17,12 +17,12 @@ use thiserror::Error;
 use crate::protocol::{
     self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
     CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER,
-    CAP_TARGET_SENSE, CJTAG_CONTROL_COMMAND, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND,
-    ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER,
-    INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
+    CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
+    I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, J8_COMMAND,
+    JTAG_CODEGEN_COMMAND, JTAG_FORMAT_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
     LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
-    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TAP_RUN_TEST_IDLE,
-    TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND,
+    TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -847,7 +847,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
 
     /// Reads the firmware identity and capabilities, once.
     ///
-    /// The result is cached. Its OScan1-active flag changes when a cJTAG session starts or ends;
+    /// The result is cached. Its cJTAG framing flag changes when a cJTAG session starts or ends;
     /// [`Self::refresh_info`] reads it again.
     pub fn info(&mut self) -> Result<Option<&VergeInfo>, CommandError<Infallible>> {
         if matches!(self.info, InfoCache::Unread) {
@@ -1740,22 +1740,6 @@ pub fn attach(
         })
 }
 
-/// Sets the scan formats the Verge firmware offers during future cJTAG discovery.
-///
-/// Call this on the opened probe before selecting cJTAG and attaching. The mask uses bit `n` for
-/// scan format `n`.
-pub fn set_cjtag_scan_formats(
-    probe: &mut Probe,
-    formats: u32,
-) -> Result<(), CommandError<Refused>> {
-    let request = protocol::encode_scan_formats(formats);
-    expect_accepted(&VergeTransport::send_vendor_command(
-        probe,
-        CJTAG_CONTROL_COMMAND,
-        &request,
-    )?)
-}
-
 struct VergeCjtagExtension;
 
 impl CmsisDapCjtagExtension for VergeCjtagExtension {
@@ -1784,12 +1768,21 @@ impl CmsisDapCjtagExtension for VergeCjtagExtension {
         format: Option<ScanFormat>,
         send_vendor_command: &mut SendVendorCommand<'_>,
     ) -> Result<(), DebugProbeError> {
-        let request = match format {
-            None => vec![0],
-            Some(ScanFormat::OScan1) => vec![2],
-            Some(format) => vec![3, format.number(), TAP_RUN_TEST_IDLE],
+        // DAP_JTAG_Format numbers OScan n as n, and 0 is conventional JTAG. On a JTAG connection it
+        // takes effect at once, so the host calls this once the target is in the format.
+        let number = match format {
+            None => 0,
+            Some(ScanFormat::OScan1) => 1,
+            Some(ScanFormat::OScan2) => 2,
+            Some(ScanFormat::OScan5) => 5,
+            Some(ScanFormat::OScan6) => 6,
+            Some(other) => {
+                return Err(DebugProbeError::Other(format!(
+                    "Verge does not frame {other:?}"
+                )));
+            }
         };
-        let response = send_vendor_command(vendor_id(CJTAG_CONTROL_COMMAND)?, &request)?;
+        let response = send_vendor_command(vendor_id(JTAG_FORMAT_COMMAND)?, &[number])?;
         if vendor_status(response_byte(&response, 0)?)? {
             Ok(())
         } else {
@@ -2329,11 +2322,12 @@ mod tests {
         }
     }
 
+    /// `formats` fills the field formats 4 to 6 used for 0x83's scan formats, 0 from format 7.
     fn info_reply(
         version: u8,
         capabilities: u8,
         board: u8,
-        scan_formats: u32,
+        formats: u32,
         extended_capabilities: u32,
     ) -> Vec<u8> {
         let build = b"test-build";
@@ -2344,7 +2338,7 @@ mod tests {
             reply.push(board);
         }
         if version >= 4 {
-            reply.extend_from_slice(&scan_formats.to_le_bytes());
+            reply.extend_from_slice(&formats.to_le_bytes());
         }
         if version >= 6 {
             reply.extend_from_slice(&extended_capabilities.to_le_bytes());
@@ -3091,8 +3085,10 @@ mod tests {
         for (version, board, scan_formats, extended_capabilities) in [
             (1, None, 0, 0),
             (3, Some(BoardKind::Pro), 0, 0),
-            (4, Some(BoardKind::Pro), 0x204, 0),
-            (6, Some(BoardKind::Pro), 0x204, 0x7),
+            (4, Some(BoardKind::Pro), 0, 0),
+            (6, Some(BoardKind::Pro), 0, 0x7),
+            (7, Some(BoardKind::Pro), protocol::CJTAG_FORMATS, 0x7),
+            (8, Some(BoardKind::Pro), protocol::CJTAG_FORMATS, 0x7),
         ] {
             let reply = info_reply(version, 0xA5, 1, 0x204, 0x7);
             let mut send = |command_id, payload: &[u8]| {
@@ -3152,6 +3148,57 @@ mod tests {
                 replies => panic!("decoders disagree: {replies:?}"),
             }
         }
+    }
+
+    #[test]
+    fn cjtag_formats_are_offered_from_info_format_7_off_board() {
+        let all = [
+            ScanFormat::OScan1,
+            ScanFormat::OScan2,
+            ScanFormat::OScan5,
+            ScanFormat::OScan6,
+        ];
+        for (reply, formats) in [
+            (info_reply(7, 0, BoardKind::Pro.number(), 0, 0), &all[..]),
+            (info_reply(7, 0, BoardKind::Plain.number(), 0, 0), &all[..]),
+            (info_reply(7, 0, BoardKind::OnBoard.number(), 0, 0), &[]),
+            (info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0), &[]),
+            (vec![], &[]),
+        ] {
+            let mut send = |command_id: VendorCommandId, _: &[u8]| {
+                assert_eq!(command_id.get(), INFO_COMMAND);
+                Ok(reply.clone())
+            };
+            assert_eq!(
+                VergeCjtagExtension.scan_formats(&mut send).unwrap(),
+                formats
+            );
+        }
+    }
+
+    #[test]
+    fn cjtag_framing_sends_0x95_with_the_oscan_number_and_0_for_none() {
+        for (format, number) in [
+            (None, 0),
+            (Some(ScanFormat::OScan1), 1),
+            (Some(ScanFormat::OScan2), 2),
+            (Some(ScanFormat::OScan5), 5),
+            (Some(ScanFormat::OScan6), 6),
+        ] {
+            let mut sent = Vec::new();
+            let mut send = |command_id: VendorCommandId, payload: &[u8]| {
+                sent.push((command_id.get(), payload.to_vec()));
+                Ok(vec![0])
+            };
+            VergeCjtagExtension.set_framing(format, &mut send).unwrap();
+            assert_eq!(sent, [(0x95, vec![number])]);
+        }
+        let mut refuse = |_, _: &[u8]| Ok(vec![0xFF]);
+        assert!(
+            VergeCjtagExtension
+                .set_framing(Some(ScanFormat::OScan2), &mut refuse)
+                .is_err()
+        );
     }
 
     #[test]

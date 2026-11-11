@@ -210,8 +210,6 @@ pub struct SimUnit {
     pub stock_product: Option<String>,
     /// The SWD jumper is fitted, so a running firmware offers no CMSIS-DAP interface.
     pub swd_jumper: bool,
-    /// The cJTAG scan formats ours offers, bit n for SCNFMT n, which a restart sets back.
-    pub scan_formats: u32,
     /// The DIO pins a Pro running ours drives, bit n for DIOn. A restart makes them inputs again.
     pub dio_outputs: u8,
     pub dio_aux: bool,
@@ -226,11 +224,6 @@ pub struct SimUnit {
     /// A Pro's target supply and energy capture, which a restart turns off and clears.
     pub energy: energy::SimEnergy,
 }
-
-/// What ours offers after a restart: OScan1, OScan2 and OScan5.
-pub(crate) const SIM_SCAN_FORMATS: u32 = (1 << crate::dap::SCNFMT_OSCAN1)
-    | (1 << crate::dap::SCNFMT_OSCAN2)
-    | (1 << crate::dap::SCNFMT_OSCAN5);
 
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
@@ -396,7 +389,6 @@ impl World {
                 self.enumerate(unit);
             }
             Event::Boot => {
-                self.units[unit].scan_formats = SIM_SCAN_FORMATS;
                 self.units[unit].dio_outputs = 0;
                 self.units[unit].dio_levels = 0;
                 self.units[unit].energy.reset();
@@ -802,7 +794,6 @@ impl SimBus {
             board: None,
             stock_product: None,
             swd_jumper: false,
-            scan_formats: SIM_SCAN_FORMATS,
             dio_outputs: 0,
             dio_aux: true,
             dio_disabled: false,
