@@ -1,11 +1,11 @@
+use escapement_verge_probe::aux::{Aux, AuxLink};
+use escapement_verge_probe::dap::{self, DapLink, Ours};
+use escapement_verge_probe::sim::{SimAux, SimBus};
+use escapement_verge_probe::stream::Message;
+use escapement_verge_probe::{Bus, CommandError, DapTransport, EnergyError, VergeControl, detect};
 use std::time::Duration;
-use verge_probe::aux::{Aux, AuxLink};
-use verge_probe::dap::{self, DapLink, Ours};
-use verge_probe::sim::{SimAux, SimBus};
-use verge_probe::stream::Message;
-use verge_probe::{Bus, CommandError, DapTransport, EnergyError, VergeControl, detect};
 
-fn pro() -> (SimBus, verge_probe::UsbDevice) {
+fn pro() -> (SimBus, escapement_verge_probe::UsbDevice) {
     let bus = SimBus::default();
     let unit = bus.add_ours("identity");
     bus.set_board(unit, Ours::BOARD_MCU_LINK_PRO);
@@ -245,8 +245,8 @@ fn a_lost_attach_reply_cannot_adopt_the_queued_header() {
 #[ignore = "uses USB; VERGE_BENCH_SERIAL must name an idle Pro"]
 fn hardware_replacement_survives_stale_stop_on_aux_and_cmsis_dap() {
     let serial = std::env::var("VERGE_BENCH_SERIAL").expect("explicit Pro serial");
-    let bus = verge_probe::usb::UsbBus::default();
-    let unit = verge_probe::detect::detect_named(&bus, Some(&serial))
+    let bus = escapement_verge_probe::usb::UsbBus::default();
+    let unit = escapement_verge_probe::detect::detect_named(&bus, Some(&serial))
         .unwrap()
         .remove(0);
     let mut link = bus.open_dap(&unit.device).unwrap();
@@ -254,7 +254,7 @@ fn hardware_replacement_survives_stale_stop_on_aux_and_cmsis_dap() {
     let mut second = VergeControl::new(&mut transport);
     assert_eq!(
         second.info().unwrap().unwrap().board,
-        Some(verge_probe::BoardKind::Pro)
+        Some(escapement_verge_probe::BoardKind::Pro)
     );
     assert!(second.info().unwrap().unwrap().supports_capture_identity());
     let initial = second.energy_capture_status().unwrap();

@@ -1,5 +1,5 @@
 [package]
-name = "verge-probe"
+name = "escapement-verge-probe"
 edition = "2024"
 license = "Apache-2.0"
 version = "0.1.0"
@@ -44,4 +44,4 @@ simulate = ["dep:minisign"]
 
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-verge-probe = { path = ".", features = ["simulate"] }
+escapement-verge-probe = { path = ".", features = ["simulate"] }

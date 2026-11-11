@@ -4,15 +4,15 @@
 
 use std::time::Duration;
 
-use verge_probe::batch::{
+use escapement_verge_probe::batch::{
     Armed, Batch, Board, Filter, Observer, OursFilter, Record, Settled, StockFilter,
 };
-use verge_probe::progress::Progress;
-use verge_probe::sim::{SimBus, SimFirmware, firmware_image};
-use verge_probe::source::ImageVersion;
-use verge_probe::update::Timing;
-use verge_probe::version::StockVersion;
-use verge_probe::{Bus, Cancel};
+use escapement_verge_probe::progress::Progress;
+use escapement_verge_probe::sim::{SimBus, SimFirmware, firmware_image};
+use escapement_verge_probe::source::ImageVersion;
+use escapement_verge_probe::update::Timing;
+use escapement_verge_probe::version::StockVersion;
+use escapement_verge_probe::{Bus, Cancel};
 
 #[derive(Default)]
 struct Seen {
@@ -40,7 +40,7 @@ fn a_failure_stays_in_the_tally_when_another_unit_takes_its_port() {
         image: firmware_image(&ours("v0.3.0")),
         name: "a file".into(),
         version: ImageVersion::Unknown,
-        source: verge_probe::Source::File("mculink_cjtag.s19".into()),
+        source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
     };
     let filter = Filter {
         board: Board::McuLink,
@@ -90,7 +90,7 @@ fn a_failure_on_stock_stays_in_the_tally_when_a_unit_running_ours_takes_its_port
         image: firmware_image(&ours("v0.3.0")),
         name: "a file".into(),
         version: ImageVersion::Unknown,
-        source: verge_probe::Source::File("mculink_cjtag.s19".into()),
+        source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
     };
     let filter = Filter {
         board: Board::McuLink,
@@ -145,7 +145,7 @@ fn another_unit_running_ours_on_the_port_is_a_unit_of_its_own() {
         image: firmware_image(&ours("v0.3.0")),
         name: "a file".into(),
         version: ImageVersion::Unknown,
-        source: verge_probe::Source::File("mculink_cjtag.s19".into()),
+        source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
     };
     let filter = Filter {
         board: Board::McuLink,

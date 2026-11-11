@@ -1,11 +1,13 @@
 //! Releases kept between runs: downloaded only when agreed, kept once they check out, checked
 //! again every time they are used, and never a reason to skip looking a release up.
 
-use verge_probe::cache::Cache;
-use verge_probe::progress::Quiet;
-use verge_probe::release::{Download, GitHub, Http, HttpError, Release, ReleaseError, Repo};
-use verge_probe::sim::http::{SimHttp, SimKey, SimRelease};
-use verge_probe::source::{self, LoadError, Source};
+use escapement_verge_probe::cache::Cache;
+use escapement_verge_probe::progress::Quiet;
+use escapement_verge_probe::release::{
+    Download, GitHub, Http, HttpError, Release, ReleaseError, Repo,
+};
+use escapement_verge_probe::sim::http::{SimHttp, SimKey, SimRelease};
+use escapement_verge_probe::source::{self, LoadError, Source};
 
 fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
@@ -111,7 +113,7 @@ enum Asset {
 }
 
 impl Asset {
-    fn of(self, release: &Release) -> &verge_probe::release::Asset {
+    fn of(self, release: &Release) -> &escapement_verge_probe::release::Asset {
         match self {
             Asset::Image => &release.image,
             Asset::Checksum => &release.checksum,

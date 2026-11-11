@@ -2,10 +2,12 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use verge_probe::probe_rs::probe::list::Lister;
-use verge_probe::{CommandError, ProBusError, Refused, SpiMode, VergeProbe, install_cjtag_support};
+use escapement_verge_probe::probe_rs::probe::list::Lister;
+use escapement_verge_probe::{
+    CommandError, ProBusError, Refused, SpiMode, VergeProbe, install_cjtag_support,
+};
 
-fn dio_state(label: &str, state: &verge_probe::DioState) {
+fn dio_state(label: &str, state: &escapement_verge_probe::DioState) {
     println!(
         "DIO {label}: status={:?} outputs={:x} levels={:x} read={:x}",
         state.status, state.outputs, state.levels, state.read

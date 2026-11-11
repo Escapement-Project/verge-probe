@@ -6,19 +6,19 @@
 
 use std::path::Path;
 
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use verge_probe::progress::Quiet;
-use verge_probe::release::{
+use escapement_verge_probe::progress::Quiet;
+use escapement_verge_probe::release::{
     Download, GitHub, Http, HttpError, ReleaseError, Repo, Timeouts, Ureq, parse_checksum,
     verify_signature,
 };
-use verge_probe::sim::http::{SimAsset, SimHttp, SimKey, SimRelease};
-use verge_probe::sim::{SimBus, SimFirmware, firmware_image, firmware_srecord};
-use verge_probe::source::{self, LoadError, Source};
-use verge_probe::update::{self, Outcome, Timing};
-use verge_probe::version::Relation;
-use verge_probe::{Cancel, Firmware, State, detect};
+use escapement_verge_probe::sim::http::{SimAsset, SimHttp, SimKey, SimRelease};
+use escapement_verge_probe::sim::{SimBus, SimFirmware, firmware_image, firmware_srecord};
+use escapement_verge_probe::source::{self, LoadError, Source};
+use escapement_verge_probe::update::{self, Outcome, Timing};
+use escapement_verge_probe::version::Relation;
+use escapement_verge_probe::{Cancel, Firmware, State, detect};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -731,7 +731,12 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
         board: board.into(),
         built_for: built_for.into(),
     };
-    let cases: [(&str, &verge_probe::Unit, Option<u32>, Option<LoadError>); 7] = [
+    let cases: [(
+        &str,
+        &escapement_verge_probe::Unit,
+        Option<u32>,
+        Option<LoadError>,
+    ); 7] = [
         (
             "pro, nothing declared",
             &pro,
@@ -761,7 +766,7 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
         http.publish_ours_declaring("v0.3.0", boards);
         let file = std::env::temp_dir().join(format!("verge-board-{}.s19", std::process::id()));
         let image = match boards {
-            Some(boards) => verge_probe::sim::firmware_srecord_declaring(
+            Some(boards) => escapement_verge_probe::sim::firmware_srecord_declaring(
                 &SimFirmware::Ours {
                     build: "v0.3.0".into(),
                 },
@@ -797,7 +802,7 @@ fn a_board_no_image_can_name_is_refused_before_the_download() {
     http.publish_ours_declaring("v0.3.0", Some(u32::MAX));
     let bus = SimBus::default();
     let unit = bus.add_ours("v0.2.0");
-    bus.set_board(unit, verge_probe::dap::Ours::BOARD_ON_BOARD);
+    bus.set_board(unit, escapement_verge_probe::dap::Ours::BOARD_ON_BOARD);
     let unit = detect(&bus).unwrap().remove(0);
     let result = source::load(
         &Source::Release(None),
@@ -818,7 +823,7 @@ fn a_board_no_image_can_name_is_refused_before_the_download() {
     std::fs::write(
         dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19"),
         firmware_srecord(&SimFirmware::Stock {
-            version: verge_probe::version::StockVersion::parse("3.172").unwrap(),
+            version: escapement_verge_probe::version::StockVersion::parse("3.172").unwrap(),
         }),
     )
     .unwrap();

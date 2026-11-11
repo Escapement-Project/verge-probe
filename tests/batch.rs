@@ -5,18 +5,18 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use verge_probe::batch::{
+use escapement_verge_probe::batch::{
     Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, Settled, Status, StockFilter,
     Verdict, judge,
 };
-use verge_probe::bus::{BusError, UsbDevice};
-use verge_probe::dap::{LinkError, Ours};
-use verge_probe::progress::Progress;
-use verge_probe::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
-use verge_probe::source::{ImageVersion, Source};
-use verge_probe::update::Timing;
-use verge_probe::version::StockVersion;
-use verge_probe::{Bus, Cancel};
+use escapement_verge_probe::bus::{BusError, UsbDevice};
+use escapement_verge_probe::dap::{LinkError, Ours};
+use escapement_verge_probe::progress::Progress;
+use escapement_verge_probe::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
+use escapement_verge_probe::source::{ImageVersion, Source};
+use escapement_verge_probe::update::Timing;
+use escapement_verge_probe::version::StockVersion;
+use escapement_verge_probe::{Bus, Cancel};
 
 #[derive(Default)]
 struct Seen {
@@ -65,7 +65,7 @@ impl<'a> Hooked<'a> {
 }
 
 impl Bus for Hooked<'_> {
-    type Aux = verge_probe::sim::SimAux;
+    type Aux = escapement_verge_probe::sim::SimAux;
     type Dap = SimDap;
     type Isp = SimRom;
 
@@ -89,7 +89,10 @@ impl Bus for Hooked<'_> {
         self.bus.open_dap(device)
     }
 
-    fn open_aux(&self, device: &UsbDevice) -> Result<verge_probe::sim::SimAux, BusError> {
+    fn open_aux(
+        &self,
+        device: &UsbDevice,
+    ) -> Result<escapement_verge_probe::sim::SimAux, BusError> {
         self.bus.open_aux(device)
     }
 
@@ -505,7 +508,7 @@ fn ours_older_than_the_image_needs_an_image_of_ours() {
     let bus = SimBus::default();
     bus.add_running(ours("14d05d4"));
     bus.add_running(ours("v0.3.0"));
-    let units = verge_probe::detect::detect(&bus).unwrap();
+    let units = escapement_verge_probe::detect::detect(&bus).unwrap();
     let (old, current) = (&units[0], &units[1]);
     let older = filter();
     let any = Filter {
@@ -527,11 +530,11 @@ fn ours_older_than_the_image_needs_an_image_of_ours() {
     assert_eq!(judge(current, &any, &release), Verdict::Current);
 }
 
-fn stock_probe(product: &str) -> verge_probe::Unit {
-    use verge_probe::bus::UsbDevice;
-    use verge_probe::dap::Identity;
-    use verge_probe::{Firmware, State};
-    verge_probe::Unit {
+fn stock_probe(product: &str) -> escapement_verge_probe::Unit {
+    use escapement_verge_probe::bus::UsbDevice;
+    use escapement_verge_probe::dap::Identity;
+    use escapement_verge_probe::{Firmware, State};
+    escapement_verge_probe::Unit {
         device: UsbDevice {
             vid: 0x1fc9,
             pid: 0x0143,
@@ -973,11 +976,11 @@ fn a_stop_before_the_bootloader_request_starts_no_update() {
 fn a_cancel_before_the_bootloader_request_sends_none() {
     let bus = SimBus::default();
     bus.add_stock("3.172");
-    let unit = verge_probe::detect(&bus).unwrap().remove(0);
+    let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
     let cancel = Cancel::new();
     let mut hooked = Hooked::new(&bus);
     hooked.on_open = Box::new(|_| cancel.cancel());
-    let result = verge_probe::update::enter_bootloader(
+    let result = escapement_verge_probe::update::enter_bootloader(
         &hooked,
         &unit,
         false,
@@ -986,7 +989,7 @@ fn a_cancel_before_the_bootloader_request_sends_none() {
         &cancel,
     );
     assert!(
-        matches!(result, Err(verge_probe::UpdateError::Stopped)),
+        matches!(result, Err(escapement_verge_probe::UpdateError::Stopped)),
         "{result:?}"
     );
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
@@ -996,7 +999,7 @@ fn a_cancel_before_the_bootloader_request_sends_none() {
 /// or a file the batch does not arm, rather than skip every unit running ours.
 #[test]
 fn a_batch_that_cannot_date_ours_does_not_arm() {
-    use verge_probe::batch::ArmError;
+    use escapement_verge_probe::batch::ArmError;
     let bus = SimBus::default();
     let stock_image = Armed {
         image: firmware_image(&stock("3.172")),
@@ -1038,7 +1041,7 @@ fn a_batch_that_cannot_date_ours_does_not_arm() {
 /// units that say they are one.
 #[test]
 fn a_batch_for_the_pro_takes_pros_with_an_image_that_declares_it() {
-    use verge_probe::batch::ArmError;
+    use escapement_verge_probe::batch::ArmError;
     let bus = SimBus::default();
     let pro_filter = Filter {
         board: Board::McuLinkPro,
@@ -1062,8 +1065,9 @@ fn a_batch_for_the_pro_takes_pros_with_an_image_that_declares_it() {
     );
 
     let both = Armed {
-        image: verge_probe::image::Image::parse(
-            verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b11).as_bytes(),
+        image: escapement_verge_probe::image::Image::parse(
+            escapement_verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b11)
+                .as_bytes(),
         )
         .unwrap(),
         ..release()
@@ -1089,10 +1093,10 @@ fn a_batch_for_the_pro_takes_pros_with_an_image_that_declares_it() {
         status(&batch, "1-2"),
         Status::Skipped("a full MCU-Link, not an MCU-Link Pro".into())
     );
-    let back = verge_probe::detect(&bus).unwrap().remove(0);
+    let back = escapement_verge_probe::detect(&bus).unwrap().remove(0);
     assert_eq!(
         back.hardware(),
-        verge_probe::detect::Hardware::Board(Board::McuLinkPro)
+        escapement_verge_probe::detect::Hardware::Board(Board::McuLinkPro)
     );
 }
 
@@ -1479,7 +1483,9 @@ fn a_file_batch_counts_a_unit_that_came_back_once() {
 #[test]
 fn a_batch_skips_a_unit_with_its_swd_jumper() {
     let bus = SimBus::scenario("swd-jumper").unwrap();
-    let unit = verge_probe::detect::detect(&bus).unwrap().remove(0);
+    let unit = escapement_verge_probe::detect::detect(&bus)
+        .unwrap()
+        .remove(0);
     let any = Filter {
         ours: OursFilter::Any,
         ..filter()
@@ -1495,7 +1501,7 @@ fn a_batch_skips_a_unit_with_its_swd_jumper() {
 fn a_batch_skips_daplink_rs_and_says_why() {
     let bus = SimBus::default();
     bus.add_daplink_rs("507437947680");
-    let units = verge_probe::detect::detect(&bus).unwrap();
+    let units = escapement_verge_probe::detect::detect(&bus).unwrap();
     let any = Filter {
         ours: OursFilter::Any,
         stock: StockFilter::Any,

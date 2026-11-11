@@ -1,13 +1,13 @@
 //! Detection and path choice against the simulated bench, whose probes answer from the recorded
 //! identities.
 
+use escapement_verge_probe::board::Board;
+use escapement_verge_probe::dap::Ours;
+use escapement_verge_probe::detect::{Guess, Hardware, Jumpered, State};
+use escapement_verge_probe::sim::{SimBus, SimFirmware};
+use escapement_verge_probe::version::StockVersion;
+use escapement_verge_probe::{Bus, Firmware, Path, detect, offer};
 use serde_json::Value;
-use verge_probe::board::Board;
-use verge_probe::dap::Ours;
-use verge_probe::detect::{Guess, Hardware, Jumpered, State};
-use verge_probe::sim::{SimBus, SimFirmware};
-use verge_probe::version::StockVersion;
-use verge_probe::{Bus, Firmware, Path, detect, offer};
 
 /// The recorded `DAP_Info` block for `label`, read here rather than through the simulator.
 fn recorded(label: &str) -> Value {
@@ -155,7 +155,7 @@ fn a_pro_held_by_a_debugger_is_asked_over_verge_aux() {
     assert_eq!(units[0].hardware(), Hardware::Board(Board::McuLinkPro));
     assert_eq!(
         units[0].build(),
-        Some(verge_probe::version::Build::parse("26ea505"))
+        Some(escapement_verge_probe::version::Build::parse("26ea505"))
     );
     assert_eq!(units[0].serial(), units[0].device.serial.as_deref());
     let offer = offer(&units[0], &units);
@@ -405,11 +405,11 @@ fn naming_a_unit_leaves_a_unit_another_program_holds_unopened() {
     bus.set_serials(mine, "CJ00000001", "NXP0000001");
     bus.set_serials(theirs, "CJ00000002", "NXP0000002");
     bus.set_busy(theirs, true);
-    let units = verge_probe::detect::detect_named(&bus, Some("CJ00000001")).unwrap();
+    let units = escapement_verge_probe::detect::detect_named(&bus, Some("CJ00000001")).unwrap();
     assert_eq!(units.len(), 1, "the other unit was asked");
     assert_eq!(units[0].serial(), Some("CJ00000001"));
     // A serial no USB descriptor carries asks every unit, as DAP_Info may still name it.
-    let units = verge_probe::detect::detect_named(&bus, Some("CJ0000000X")).unwrap();
+    let units = escapement_verge_probe::detect::detect_named(&bus, Some("CJ0000000X")).unwrap();
     assert_eq!(units.len(), 2);
     assert!(
         units
@@ -431,9 +431,9 @@ fn daplink_rs_is_asked_only_its_own_discovery() {
     assert_eq!(
         *firmware,
         Firmware::DaplinkRs {
-            reboot: Some(verge_probe::daplink_rs::Reboot {
+            reboot: Some(escapement_verge_probe::daplink_rs::Reboot {
                 version: 1,
-                kind: verge_probe::daplink_rs::KIND_NXP_ISP
+                kind: escapement_verge_probe::daplink_rs::KIND_NXP_ISP
             })
         }
     );
@@ -456,7 +456,7 @@ fn naming_another_unit_leaves_daplink_rs_unopened() {
     let bus = SimBus::default();
     bus.add_ours("v0.3.0");
     bus.add_daplink_rs("507437947680");
-    let units = verge_probe::detect::detect_named(&bus, Some("CJ3E7A91C2")).unwrap();
+    let units = escapement_verge_probe::detect::detect_named(&bus, Some("CJ3E7A91C2")).unwrap();
     assert_eq!(units.len(), 1, "{units:?}");
     assert!(
         !bus.log().iter().any(|l| l.starts_with("1-2: DAP")),
@@ -465,7 +465,7 @@ fn naming_another_unit_leaves_daplink_rs_unopened() {
     );
     // Named by its USB serial, it alone is asked.
     let serial = bus.devices().unwrap()[1].serial.clone().unwrap();
-    let units = verge_probe::detect::detect_named(&bus, Some(&serial)).unwrap();
+    let units = escapement_verge_probe::detect::detect_named(&bus, Some(&serial)).unwrap();
     let [unit] = units.as_slice() else {
         panic!("{units:?}");
     };

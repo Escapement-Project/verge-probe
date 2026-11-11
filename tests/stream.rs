@@ -2,8 +2,8 @@
 //! (`tools/energy_vectors.json`, copied to `tests/fixtures`): samples and whole-range digests of each
 //! pair's conversion, and pair sequences with pauses and the totals they give.
 
+use escapement_verge_probe::stream::{self, Converter, Message, Pair, Pairs};
 use serde_json::Value;
-use verge_probe::stream::{self, Converter, Message, Pair, Pairs};
 
 fn vectors() -> Value {
     serde_json::from_str(include_str!("fixtures/energy_vectors.json")).expect("vectors parse")

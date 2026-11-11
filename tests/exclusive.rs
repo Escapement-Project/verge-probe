@@ -8,17 +8,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use verge_probe::batch::{
+use escapement_verge_probe::batch::{
     Armed, Batch, Board, Filter, Observer, OursFilter, Record, Settled, StockFilter,
 };
-use verge_probe::bus::{BusError, UsbDevice};
-use verge_probe::dap::{DapLink, LinkError};
-use verge_probe::progress::Progress;
-use verge_probe::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
-use verge_probe::source::{ImageVersion, Source};
-use verge_probe::update::Timing;
-use verge_probe::version::StockVersion;
-use verge_probe::{Bus, Cancel};
+use escapement_verge_probe::bus::{BusError, UsbDevice};
+use escapement_verge_probe::dap::{DapLink, LinkError};
+use escapement_verge_probe::progress::Progress;
+use escapement_verge_probe::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
+use escapement_verge_probe::source::{ImageVersion, Source};
+use escapement_verge_probe::update::Timing;
+use escapement_verge_probe::version::StockVersion;
+use escapement_verge_probe::{Bus, Cancel};
 
 struct Held {
     dap: SimDap,
@@ -52,7 +52,7 @@ struct Exclusive<'a> {
 }
 
 impl Bus for Exclusive<'_> {
-    type Aux = verge_probe::sim::SimAux;
+    type Aux = escapement_verge_probe::sim::SimAux;
     type Dap = Held;
     type Isp = SimRom;
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
@@ -80,7 +80,10 @@ impl Bus for Exclusive<'_> {
             }
         }
     }
-    fn open_aux(&self, device: &UsbDevice) -> Result<verge_probe::sim::SimAux, BusError> {
+    fn open_aux(
+        &self,
+        device: &UsbDevice,
+    ) -> Result<escapement_verge_probe::sim::SimAux, BusError> {
         self.bus.open_aux(device)
     }
 

@@ -7,13 +7,13 @@
 use std::time::Duration;
 
 #[cfg(not(windows))]
-use verge_probe::detect::Jumpered;
-use verge_probe::image::{Image, PAGE};
-use verge_probe::progress::{Cancel, Progress, Step};
-use verge_probe::sim::{Mode, SimBus, SimFirmware, firmware_image};
-use verge_probe::source::{ImageVersion, Payload};
-use verge_probe::update::{self, Outcome, Timing, UpdateError};
-use verge_probe::{Bus, Firmware, State, Unit, detect};
+use escapement_verge_probe::detect::Jumpered;
+use escapement_verge_probe::image::{Image, PAGE};
+use escapement_verge_probe::progress::{Cancel, Progress, Step};
+use escapement_verge_probe::sim::{Mode, SimBus, SimFirmware, firmware_image};
+use escapement_verge_probe::source::{ImageVersion, Payload};
+use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
+use escapement_verge_probe::{Bus, Firmware, State, Unit, detect};
 
 /// What an image of ours from a file is.
 static FILE: ImageVersion = ImageVersion::Unknown;
@@ -63,12 +63,12 @@ fn stock(version: &str) -> SimFirmware {
 }
 
 trait ParseStock {
-    fn parse_stock(&self) -> verge_probe::version::StockVersion;
+    fn parse_stock(&self) -> escapement_verge_probe::version::StockVersion;
 }
 
 impl ParseStock for str {
-    fn parse_stock(&self) -> verge_probe::version::StockVersion {
-        verge_probe::version::StockVersion::parse(self).unwrap()
+    fn parse_stock(&self) -> escapement_verge_probe::version::StockVersion {
+        escapement_verge_probe::version::StockVersion::parse(self).unwrap()
     }
 }
 
@@ -422,8 +422,8 @@ fn back_to_stock_without_the_jumper() {
 /// on reading an erased page, as the real one does, so a clean update shows none was read.
 #[test]
 fn an_erased_page_read_drops_the_bootloader() {
+    use escapement_verge_probe::Bus;
     use mboot::McuBoot;
-    use verge_probe::Bus;
     let bus = SimBus::scenario("isp").unwrap();
     let rom = bus.devices().unwrap().remove(0);
     let mut boot = McuBoot::new(bus.open_isp(&rom).unwrap());
@@ -452,7 +452,8 @@ fn an_image_that_does_not_boot_is_reported() {
             record
         })
         .collect();
-    let image = verge_probe::Image::parse(srec::generate_srec_file(&records).as_bytes()).unwrap();
+    let image = escapement_verge_probe::Image::parse(srec::generate_srec_file(&records).as_bytes())
+        .unwrap();
     image.check_for_mculink().unwrap();
     let bus = SimBus::scenario("isp").unwrap();
     let result = update::flash_now(
@@ -482,7 +483,9 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
     assert!(
         matches!(
             result,
-            Err(UpdateError::Isp(verge_probe::isp::IspError::Cancelled))
+            Err(UpdateError::Isp(
+                escapement_verge_probe::isp::IspError::Cancelled
+            ))
         ),
         "{result:?}"
     );
@@ -873,7 +876,7 @@ fn the_update_itself_checks_the_board() {
     assert!(!bus.log().iter().any(|l| l.contains("DAP 81")));
 
     let declaring = Image::parse(
-        verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes(),
+        escapement_verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes(),
     )
     .unwrap();
     let outcome = update::install(
@@ -971,7 +974,7 @@ fn a_pro_with_its_swd_jumper_takes_only_an_image_that_declares_it() {
     assert!(!bus.log().iter().any(|l| l.contains("control")));
 
     let declaring = Image::parse(
-        verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes(),
+        escapement_verge_probe::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes(),
     )
     .unwrap();
     let outcome = update::install(
@@ -1034,7 +1037,9 @@ fn a_jumpered_unit_gone_before_the_request_is_named_gone() {
     assert!(
         matches!(
             result,
-            Err(UpdateError::Bus(verge_probe::bus::BusError::Gone { .. }))
+            Err(UpdateError::Bus(
+                escapement_verge_probe::bus::BusError::Gone { .. }
+            ))
         ),
         "{result:?}"
     );

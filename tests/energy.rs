@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use verge_probe::dap::{self, DapLink, Ours};
-use verge_probe::sim::SimBus;
-use verge_probe::{
+use escapement_verge_probe::dap::{self, DapLink, Ours};
+use escapement_verge_probe::sim::SimBus;
+use escapement_verge_probe::{
     Bus, CalibrationRange, CommandError, DapTransport, EnergyCalibration, EnergyCaptureSample,
     EnergyError, EnergyTotal, VergeControl, detect,
 };

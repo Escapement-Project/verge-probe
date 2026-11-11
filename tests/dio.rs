@@ -3,16 +3,17 @@
 
 use std::time::Duration;
 
-use verge_probe::dap::{self, DapLink, Ours};
-use verge_probe::sim::SimBus;
-use verge_probe::{Bus, detect};
+use escapement_verge_probe::dap::{self, DapLink, Ours};
+use escapement_verge_probe::sim::SimBus;
+use escapement_verge_probe::{Bus, detect};
 
 #[test]
 fn aux_and_cmsis_dap_share_dio_state_and_refusals() {
-    use verge_probe::{CommandError, DapTransport, VergeControl};
+    use escapement_verge_probe::{CommandError, DapTransport, VergeControl};
     let bus = SimBus::scenario("ours-pro-held").unwrap();
     let unit = detect(&bus).unwrap().remove(0);
-    let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
+    let mut aux =
+        escapement_verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
     let mut control = VergeControl::new(&mut aux);
     let info = control.info().unwrap().unwrap();
     assert!(info.supports_dio_on_aux());
@@ -36,14 +37,15 @@ fn aux_and_cmsis_dap_share_dio_state_and_refusals() {
 
 #[test]
 fn dio_refusals_explain_old_aux_j15_and_non_pro() {
-    use verge_probe::{CommandError, VergeControl, pro};
+    use escapement_verge_probe::{CommandError, VergeControl, pro};
     for (scenario, reason) in [
         ("ours-pro-old-aux", "predates DIO on Verge Aux"),
         ("ours-pro-j15", "remove J15"),
     ] {
         let bus = SimBus::scenario(scenario).unwrap();
         let unit = detect(&bus).unwrap().remove(0);
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
         let mut control = VergeControl::new(&mut aux);
         assert!(
             pro::check_offered("unit", &mut control, pro::Feature::Dio)

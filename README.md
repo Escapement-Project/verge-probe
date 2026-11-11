@@ -9,8 +9,8 @@ it uses probe-rs. `VergeSession` adds typed commands for Verge firmware while ke
 probe-rs session available for normal target access:
 
 ```rust,no_run
-use verge_probe::probe_rs::{Permissions, probe::list::Lister};
-use verge_probe::{VergeProbe, VergeSession, install_cjtag_support};
+use escapement_verge_probe::probe_rs::{Permissions, probe::list::Lister};
+use escapement_verge_probe::{VergeProbe, VergeSession, install_cjtag_support};
 
 let lister = Lister::new();
 let info = lister.list_all().into_iter().next().expect("no probe found");
@@ -27,7 +27,7 @@ let mut session = probe.attach("MSPM0L1306", Permissions::default())?;
 let mut verge = VergeSession::new(&mut session);
 let info = verge.info()?;
 let target_sense = verge.read_target_sense()?;
-let spi = verge.spi_transfer(100_000, verge_probe::SpiMode::Mode0, false, &[0xA5])?;
+let spi = verge.spi_transfer(100_000, escapement_verge_probe::SpiMode::Mode0, false, &[0xA5])?;
 let i2c = verge.i2c_transfer(0x50, 100_000, &[0], 2)?;
 let _target_core = verge.session().core(0)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -70,8 +70,8 @@ Both frontends use the library for discovery, image loading and updates:
 
 ```rust,no_run
 use std::path::{Path, PathBuf};
-use verge_probe::{Source, detect, image::Image};
-use verge_probe::usb::UsbBus;
+use escapement_verge_probe::{Source, detect, image::Image};
+use escapement_verge_probe::usb::UsbBus;
 
 let bus = UsbBus::default();
 let units = detect(&bus)?;

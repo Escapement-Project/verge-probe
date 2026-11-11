@@ -3,20 +3,25 @@
 
 use std::time::Duration;
 
-use verge_probe::aux::Aux;
-use verge_probe::dap::{DapLink, Ours};
-use verge_probe::sim::SimBus;
-use verge_probe::stream::{EndReason, Message};
-use verge_probe::{Bus, CommandError, DapTransport, EnergyTotal, Marked, VergeControl, detect};
+use escapement_verge_probe::aux::Aux;
+use escapement_verge_probe::dap::{DapLink, Ours};
+use escapement_verge_probe::sim::SimBus;
+use escapement_verge_probe::stream::{EndReason, Message};
+use escapement_verge_probe::{
+    Bus, CommandError, DapTransport, EnergyTotal, Marked, VergeControl, detect,
+};
 
-fn pro(bus: &SimBus) -> verge_probe::UsbDevice {
+fn pro(bus: &SimBus) -> escapement_verge_probe::UsbDevice {
     let unit = bus.add_ours("26ea505");
     bus.set_board(unit, Ours::BOARD_MCU_LINK_PRO);
     detect(bus).unwrap().remove(0).device
 }
 
 /// Messages until `want` matches one, or the stream goes quiet for a second of simulated time.
-fn until(aux: &mut Aux<verge_probe::sim::SimAux>, want: impl Fn(&Message) -> bool) -> Vec<Message> {
+fn until(
+    aux: &mut Aux<escapement_verge_probe::sim::SimAux>,
+    want: impl Fn(&Message) -> bool,
+) -> Vec<Message> {
     let mut seen = Vec::new();
     while let Some(message) = aux.message(Duration::from_secs(1)).unwrap() {
         let done = want(&message);
@@ -181,7 +186,7 @@ fn opening_drops_what_the_last_program_left() {
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
-    verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
+    escapement_verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
     drop(first);
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     assert_eq!(aux.exchange(&[0x8F, 2]).unwrap()[0], 0x8F);
@@ -191,7 +196,7 @@ fn opening_drops_what_the_last_program_left() {
 /// probe's OUT endpoint shut until a host reads what waits: the opener reads before it writes.
 #[test]
 fn opening_reads_past_a_reply_held_behind_a_stream_message() {
-    use verge_probe::aux::AuxLink;
+    use escapement_verge_probe::aux::AuxLink;
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
@@ -214,8 +219,8 @@ fn the_typed_stream_calls_drive_the_stream() {
     let mut verge = VergeControl::new(&mut aux);
     assert!(matches!(
         verge.stream_energy_capture(0),
-        Err(verge_probe::CommandError::Firmware(
-            verge_probe::EnergyError::Stopped
+        Err(escapement_verge_probe::CommandError::Firmware(
+            escapement_verge_probe::EnergyError::Stopped
         ))
     ));
     assert_eq!(
@@ -292,7 +297,7 @@ fn a_stream_reports_the_edges_it_asked_for_after_their_pairs() {
     bus.sleep(Duration::from_millis(350));
     verge.end_energy_stream().unwrap();
     let messages = until(verge.transport(), |m| matches!(m, Message::End(_)));
-    let edges: Vec<verge_probe::stream::Edge> = messages
+    let edges: Vec<escapement_verge_probe::stream::Edge> = messages
         .iter()
         .filter_map(|message| match message {
             Message::Edges(edges) => {
@@ -473,11 +478,11 @@ fn a_reply_left_unread_outlasts_its_program() {
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
-    verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
+    escapement_verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
     drop(first);
     let mut raw = bus.open_aux(&device).unwrap();
     assert_eq!(
-        verge_probe::aux::AuxLink::read(&mut raw, Duration::from_millis(50)).unwrap()[0],
+        escapement_verge_probe::aux::AuxLink::read(&mut raw, Duration::from_millis(50)).unwrap()[0],
         0x82,
         "the probe keeps it"
     );

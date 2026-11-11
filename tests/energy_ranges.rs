@@ -1,12 +1,12 @@
 //! `0x90` mode 14 on the simulated Pro: a capture that switches automatically, the default, and
 //! one that holds the high range, whose pairs near the amplifier's floor come marked under range.
 //! The setting is the next start's alone.
+use escapement_verge_probe::aux::Aux;
+use escapement_verge_probe::dap::Ours;
+use escapement_verge_probe::sim::{SimAux, SimBus};
+use escapement_verge_probe::stream::{Converter, Header, Message, Pair};
+use escapement_verge_probe::{Bus, EnergyRanges, VergeControl, detect};
 use std::time::Duration;
-use verge_probe::aux::Aux;
-use verge_probe::dap::Ours;
-use verge_probe::sim::{SimAux, SimBus};
-use verge_probe::stream::{Converter, Header, Message, Pair};
-use verge_probe::{Bus, EnergyRanges, VergeControl, detect};
 
 /// A Pro's Verge Aux with the target supply on.
 fn pro() -> Aux<SimAux> {
