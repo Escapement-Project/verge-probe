@@ -102,8 +102,8 @@ fn a_stream_carries_every_pair_to_its_end() {
         panic!("no header first");
     };
     assert_eq!(
-        (header.rate, header.first_sequence, header.setting_ma),
-        (1000, 1, Some(350))
+        (header.rate(), header.first_sequence, header.setting_ma),
+        (1000.0, 1, Some(350))
     );
     let mut next = 1;
     for message in until(
@@ -232,7 +232,7 @@ fn the_typed_stream_calls_drive_the_stream() {
     );
     assert!(matches!(
         verge.transport().message(Duration::from_secs(1)).unwrap(),
-        Some(Message::Header(header)) if header.rate == 2000
+        Some(Message::Header(header)) if header.rate() == 2000.0
     ));
     verge.end_energy_stream().unwrap();
     let ended = until(verge.transport(), |m| matches!(m, Message::End(_)));
@@ -301,7 +301,7 @@ fn a_stream_reports_the_edges_it_asked_for_after_their_pairs() {
         .iter()
         .filter_map(|message| match message {
             Message::Edges(edges) => {
-                assert!(!edges.lost());
+                assert_eq!(edges.flags, 0);
                 Some(edges.edges.clone())
             }
             _ => None,
@@ -320,7 +320,7 @@ fn a_stream_reports_the_edges_it_asked_for_after_their_pairs() {
                         "{received} edges before pairs needing {due}"
                     );
                 }
-                through = Some(pairs.time_of(pairs.pairs.len() - 1, header.rate));
+                through = Some(pairs.time_of(pairs.pairs.len() - 1, &header));
             }
             Message::Edges(message) => received += message.edges.len(),
             _ => {}

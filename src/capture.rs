@@ -30,7 +30,7 @@ pub enum CaptureError {
     #[error("the capture restarted before its stream ended")]
     Restarted,
     #[error("a stream of {0} pairs a second, which a capture cannot hold")]
-    Rate(u32),
+    Rate(f64),
     #[error("the stream's times went back")]
     Timestamps,
     #[error("a time past what a capture holds")]

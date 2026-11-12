@@ -1,6 +1,6 @@
 use super::store::{BINS, FAN, bin_interval, cancelled, decode, encode};
 use super::{Archive, CaptureError, Interval, Result};
-use crate::stream::Edge;
+use crate::stream::{DioLost, Edge};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
@@ -49,37 +49,37 @@ pub(super) struct DigitalWriter {
     pub losses: u64,
 }
 impl DigitalWriter {
-    pub fn edge(&mut self, edge: Edge, lost: bool) -> Result<()> {
+    pub fn edge(&mut self, edge: Edge) -> Result<()> {
         if let Some((start, levels)) = self.tail {
             if edge.time_ns < start {
                 return Err(CaptureError::Timestamps);
             }
-            if lost && levels.is_some() {
-                self.spans.push(DigitalSpan {
-                    interval: Interval::new(start, start),
-                    levels,
-                });
-            }
-            if edge.time_ns >= start {
-                self.spans.push(DigitalSpan {
-                    interval: Interval::new(start, edge.time_ns),
-                    levels: if lost { None } else { levels },
-                });
-            }
+            self.spans.push(DigitalSpan {
+                interval: Interval::new(start, edge.time_ns),
+                levels,
+            });
         }
         self.tail = Some((edge.time_ns, Some(edge.levels)));
         Ok(())
     }
-    pub fn lost(&mut self) {
-        if let Some((at, levels)) = &mut self.tail {
-            if levels.is_some() {
-                self.spans.push(DigitalSpan {
-                    interval: Interval::new(*at, *at),
-                    levels: *levels,
-                });
+    /// The probe lost edges from `from_ns`: the levels are unknown until `to_ns`, and its levels from
+    /// then on.
+    pub fn lost(&mut self, lost: &DioLost) -> Result<()> {
+        if let Some((start, levels)) = self.tail {
+            if lost.from_ns < start || lost.to_ns < lost.from_ns {
+                return Err(CaptureError::Timestamps);
             }
-            *levels = None;
+            self.spans.push(DigitalSpan {
+                interval: Interval::new(start, lost.from_ns),
+                levels,
+            });
+            self.spans.push(DigitalSpan {
+                interval: Interval::new(lost.from_ns, lost.to_ns),
+                levels: None,
+            });
         }
+        self.tail = Some((lost.to_ns, Some(lost.levels)));
+        Ok(())
     }
     pub fn flush(&self, db: &rusqlite::Connection, pins: u8) -> Result<()> {
         if !self.spans.is_empty() {

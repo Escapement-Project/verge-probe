@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use crate::protocol::{ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND};
-use crate::stream::{Edge, Edges, LABEL_MAX, Marker, Markers};
+use crate::stream::{DioLost, Edge, Edges, LABEL_MAX, Marker, Markers};
 
 const DAP_OK: u8 = 0x00;
 const DAP_ERROR: u8 = 0xFF;
@@ -474,20 +474,27 @@ impl SimEnergy {
                 _ => messages.push(vec![edge]),
             }
         }
-        messages
-            .into_iter()
-            .map(|edges| {
-                Edges::new(
-                    if std::mem::take(&mut self.lose_next_edges) {
-                        Edges::LOST
-                    } else {
-                        0
-                    },
-                    edges,
-                )
-                .to_bytes()
-            })
-            .collect()
+        let mut out = Vec::new();
+        for mut edges in messages {
+            // A loss as the probe reports it: edges from the window's start may be missing, and the
+            // levels are known again at what would have been the first edge, which the loss stands
+            // for.
+            if std::mem::take(&mut self.lose_next_edges) {
+                let first = edges.remove(0);
+                out.push(
+                    DioLost {
+                        from_ns: after * 1_000,
+                        to_ns: first.time_ns,
+                        levels: first.levels,
+                    }
+                    .to_bytes(),
+                );
+            }
+            if !edges.is_empty() {
+                out.push(Edges::new(0, edges).to_bytes());
+            }
+        }
+        out
     }
 
     fn header(
@@ -497,8 +504,10 @@ impl SimEnergy {
         pins: u8,
         levels: u8,
     ) -> Vec<u8> {
-        let mut header = vec![0xA1, 1];
+        // The simulator's timer runs at the rate itself: one count a pair.
+        let mut header = vec![0xA1, 3];
         header.extend_from_slice(&capture.rate.to_le_bytes());
+        header.extend_from_slice(&1u32.to_le_bytes());
         header.push(1);
         header.extend_from_slice(&(FULL_SCALE_MV as u16).to_le_bytes());
         header.extend_from_slice(&first_sequence.to_le_bytes());
@@ -514,10 +523,16 @@ impl SimEnergy {
         header.extend_from_slice(&[pins, levels & pins]);
         let resolution = if pins == 0 { 0 } else { EDGE_RESOLUTION_NS };
         header.extend_from_slice(&resolution.to_le_bytes());
-        if capture.high_range_only {
-            // Step 5's fields: no weight, the high range held (flag bit 2), no current before.
-            header.extend_from_slice(&[0, 0, 4, 0, 0, 0, 0]);
-        }
+        // Step 5's fields: no weight and no current before; flag bit 2 when the high range is held.
+        header.extend_from_slice(&[
+            0,
+            0,
+            if capture.high_range_only { 4 } else { 0 },
+            0,
+            0,
+            0,
+            0,
+        ]);
         header
     }
 
@@ -679,9 +694,9 @@ impl SimEnergy {
             .rev()
             .find(|message| message.first() == Some(&0xa1))
             .expect("successful stream has a header");
-        header[1] = 2;
-        // The identity goes before step 5's fields, where format 2 puts it.
-        header.splice(68..68, id.as_bytes().iter().copied());
+        header[1] = 4;
+        // The identity goes before step 5's fields, where format 4 puts it.
+        header.splice(72..72, id.as_bytes().iter().copied());
         vec![reply, header]
     }
 

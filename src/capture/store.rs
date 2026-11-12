@@ -138,6 +138,26 @@ struct HeaderV5 {
     previous_shunt_nanoamps: Option<u32>,
 }
 
+/// The stream header as archives of versions 6 and 7 stored it, with a whole rate where the clock
+/// and the period are now.
+#[derive(Serialize, Deserialize)]
+struct HeaderV7 {
+    rate: u32,
+    setting_ma: Option<u16>,
+    full_scale_mv: u16,
+    first_sequence: u32,
+    previous_low: bool,
+    low: Vec<crate::CalibrationPoint>,
+    high: Vec<crate::CalibrationPoint>,
+    dio_mask: u8,
+    dio_levels: u8,
+    edge_resolution_ns: u16,
+    switch_weight_q16: u16,
+    rearm_between_pairs: bool,
+    previous_shunt_nanoamps: Option<u32>,
+    high_range_only: bool,
+}
+
 /// A block's sample as archives of versions 4 and 5 stored it, without the under-range mark.
 #[derive(Serialize, Deserialize)]
 struct SupportedV5 {
@@ -176,7 +196,7 @@ impl Archive {
             CaptureError::NotCapture,
         )?;
         let version = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        ensure((1..=7).contains(&version), CaptureError::Version(version))?;
+        ensure((1..=8).contains(&version), CaptureError::Version(version))?;
         Ok(Self { db, version })
     }
     pub(super) fn meta<T: for<'a> Deserialize<'a>>(&self, key: &str) -> Result<T> {
@@ -188,13 +208,36 @@ impl Archive {
         decode(&bytes)
     }
     pub fn header(&self) -> Result<Header> {
-        let mut header: Header = if self.version >= 6 {
+        // An archive before version 8 times and weighs its pairs by a whole rate: a clock at that
+        // rate, one count a pair, does the same.
+        let mut header: Header = if self.version >= 8 {
             self.meta("header")?
+        } else if self.version >= 6 {
+            let old: HeaderV7 = self.meta("header")?;
+            Header {
+                capture_id: None,
+                clock_hz: old.rate,
+                period: 1,
+                setting_ma: old.setting_ma,
+                full_scale_mv: old.full_scale_mv,
+                first_sequence: old.first_sequence,
+                previous_low: old.previous_low,
+                low: old.low,
+                high: old.high,
+                dio_mask: old.dio_mask,
+                dio_levels: old.dio_levels,
+                edge_resolution_ns: old.edge_resolution_ns,
+                switch_weight_q16: old.switch_weight_q16,
+                rearm_between_pairs: old.rearm_between_pairs,
+                previous_shunt_nanoamps: old.previous_shunt_nanoamps,
+                high_range_only: old.high_range_only,
+            }
         } else if self.version == 5 {
             let old: HeaderV5 = self.meta("header")?;
             Header {
                 capture_id: None,
-                rate: old.rate,
+                clock_hz: old.rate,
+                period: 1,
                 setting_ma: old.setting_ma,
                 full_scale_mv: old.full_scale_mv,
                 first_sequence: old.first_sequence,
@@ -213,7 +256,8 @@ impl Archive {
             let old: HeaderV4 = self.meta("header")?;
             Header {
                 capture_id: None,
-                rate: old.rate,
+                clock_hz: old.rate,
+                period: 1,
                 setting_ma: old.setting_ma,
                 full_scale_mv: old.full_scale_mv,
                 first_sequence: old.first_sequence,
@@ -403,7 +447,7 @@ impl Archive {
         if blocks == 0 {
             return Ok(Vec::new());
         }
-        let period = 1_000_000_000u64.div_ceil(u64::from(self.header()?.rate.max(1)));
+        let period = self.header()?.period_ns();
         let mut level = 0;
         let mut covered = 1u64;
         while covered < blocks {
@@ -663,7 +707,7 @@ impl Archive {
             {
                 sink.include_markers()?;
             }
-            sink.begin_with_dio_gaps(header.rate, pins, header.dio_levels)?;
+            sink.begin_with_dio_gaps(header.whole_rate(), pins, header.dio_levels)?;
             let extent = self.extent()?;
             self.export_markers(
                 &mut sink,
@@ -728,7 +772,7 @@ impl CaptureWriter {
             .open(path)?;
         let db = Connection::open(path)?;
         configure(&db)?;
-        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=7;
+        db.execute_batch(&format!("PRAGMA application_id={APPLICATION}; PRAGMA user_version=8;
             PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE blocks(n INTEGER PRIMARY KEY,start_ns INTEGER,end_ns INTEGER,data BLOB NOT NULL);
@@ -785,15 +829,18 @@ impl CaptureWriter {
         match &message {
             Message::Header(header) => {
                 ensure(self.header.is_none(), CaptureError::Restarted)?;
+                // 1 to 100,000 pairs a second, as the probe takes.
                 ensure(
-                    (1..=100_000).contains(&header.rate),
-                    CaptureError::Rate(header.rate),
+                    header.period != 0
+                        && header.period <= header.clock_hz
+                        && u64::from(header.clock_hz) <= 100_000 * u64::from(header.period),
+                    CaptureError::Rate(header.rate()),
                 )?;
                 self.set("header", header)?;
                 if let Some(id) = header.capture_id {
                     self.set("capture_id", &id)?;
                 }
-                self.period = 1_000_000_000u64.div_ceil(u64::from(header.rate));
+                self.period = header.period_ns();
                 self.header = Some(header.clone());
                 self.converter = Some(Converter::new(header));
                 self.next = Some(header.first_sequence);
@@ -825,9 +872,9 @@ impl CaptureWriter {
                     }
                 }
                 self.next = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
-                if let Some(last) = pairs.pairs.len().checked_sub(1) {
-                    self.last_pair_ns =
-                        Some(pairs.time_of(last, self.header.as_ref().map_or(1, |h| h.rate)));
+                if let (Some(last), Some(header)) = (pairs.pairs.len().checked_sub(1), &self.header)
+                {
+                    self.last_pair_ns = Some(pairs.time_of(last, header));
                 }
                 converter.add_message(pairs);
                 let samples = converter.take_samples();
@@ -848,15 +895,14 @@ impl CaptureWriter {
             }
             Message::Edges(_) if self.header.is_none() => return Ok(false),
             Message::Edges(edges) => {
-                if edges.lost() {
-                    self.digital.losses += 1;
+                for &edge in &edges.edges {
+                    self.digital.edge(edge)?;
                 }
-                for (index, &edge) in edges.edges.iter().enumerate() {
-                    self.digital.edge(edge, index == 0 && edges.lost())?;
-                }
-                if edges.lost() && edges.edges.is_empty() {
-                    self.digital.lost();
-                }
+            }
+            Message::DioLost(_) if self.header.is_none() => return Ok(false),
+            Message::DioLost(lost) => {
+                self.digital.losses += 1;
+                self.digital.lost(lost)?;
             }
             Message::Markers(_) if self.header.is_none() => return Ok(false),
             Message::Markers(markers) => self.markers.ingest(markers),
@@ -1116,11 +1162,12 @@ mod tests {
         assert!(header.capture_id.is_none());
         assert_eq!(
             (
-                header.rate,
+                header.clock_hz,
+                header.period,
                 header.switch_weight_q16,
                 header.rearm_between_pairs
             ),
-            (old.rate, 0, false)
+            (old.rate, 1, 0, false)
         );
         let raw: Vec<u8> = archive
             .db
@@ -1159,10 +1206,12 @@ mod tests {
         assert!(stored.capture_id.is_none());
     }
 
+    /// A header at `rate` pairs a second, which the 96 MHz clock divides.
     fn header(rate: u32) -> Header {
         Header {
             capture_id: None,
-            rate,
+            clock_hz: 96_000_000,
+            period: 96_000_000 / rate,
             setting_ma: Some(350),
             full_scale_mv: 3300,
             first_sequence: u32::MAX - 2,
@@ -1380,7 +1429,7 @@ mod tests {
 
     #[test]
     fn review_the_edge_before_a_loss_keeps_its_level() {
-        use crate::stream::{Edge, Edges};
+        use crate::stream::{DioLost, Edge, Edges};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("loss.vergecapture");
         let mut writer = raw_writer(&path, 1000);
@@ -1389,14 +1438,22 @@ mod tests {
         writer.header = Some(h.clone());
         writer.set("header", &h).unwrap();
         writer.append((1..8).map(sample)).unwrap();
-        for (flags, time_ns, levels) in [(0, 2_000_000, 8), (Edges::LOST, 5_000_000, 0)] {
-            writer
-                .ingest(Message::Edges(Edges::new(
-                    flags,
-                    vec![Edge { time_ns, levels }],
-                )))
-                .unwrap();
-        }
+        writer
+            .ingest(Message::Edges(Edges::new(
+                0,
+                vec![Edge {
+                    time_ns: 2_000_000,
+                    levels: 8,
+                }],
+            )))
+            .unwrap();
+        writer
+            .ingest(Message::DioLost(DioLost {
+                from_ns: 2_000_000,
+                to_ns: 5_000_000,
+                levels: 0,
+            }))
+            .unwrap();
         writer.finish().unwrap();
         let archive = Archive::open(&path).unwrap();
         let cancel = AtomicBool::new(false);
@@ -1560,20 +1617,27 @@ mod tests {
         writer.ingest(Message::Header(h)).unwrap();
         writer.digital.tail = Some((0, Some(0)));
         writer.append((0..10).map(sample)).unwrap();
-        for (flags, edges) in [
-            (0, vec![(1_200_000, 8), (1_400_000, 0), (3_000_000, 8)]),
-            (Edges::LOST, vec![(6_000_000, 0), (8_000_000, 8)]),
-        ] {
-            writer
-                .ingest(Message::Edges(Edges::new(
-                    flags,
-                    edges
-                        .into_iter()
-                        .map(|(time_ns, levels)| Edge { time_ns, levels })
-                        .collect(),
-                )))
-                .unwrap();
-        }
+        let edges = |edges: Vec<(u64, u8)>| {
+            Message::Edges(Edges::new(
+                0,
+                edges
+                    .into_iter()
+                    .map(|(time_ns, levels)| Edge { time_ns, levels })
+                    .collect(),
+            ))
+        };
+        writer
+            .ingest(edges(vec![(1_200_000, 8), (1_400_000, 0), (3_000_000, 8)]))
+            .unwrap();
+        // Edges lost after the one at 3 ms, the levels known again at 6 ms.
+        writer
+            .ingest(Message::DioLost(crate::stream::DioLost {
+                from_ns: 3_000_000,
+                to_ns: 6_000_000,
+                levels: 0,
+            }))
+            .unwrap();
+        writer.ingest(edges(vec![(8_000_000, 8)])).unwrap();
         writer.finish().unwrap();
         let archive = Archive::open(&path).unwrap();
         let cancel = AtomicBool::new(false);
@@ -1657,13 +1721,10 @@ mod tests {
             for n in block * 100..(block + 1) * 100 {
                 writer
                     .digital
-                    .edge(
-                        Edge {
-                            time_ns: u64::from(n + 1) * 10_000,
-                            levels: (n % 2) as u8,
-                        },
-                        false,
-                    )
+                    .edge(Edge {
+                        time_ns: u64::from(n + 1) * 10_000,
+                        levels: (n % 2) as u8,
+                    })
                     .unwrap();
             }
             writer.append([sample(block)]).unwrap();
@@ -2120,6 +2181,7 @@ mod tests {
         check(&archive);
         drop(archive);
         let db = Connection::open(&path).unwrap();
+        version_7_header(&db);
         db.execute_batch("DROP TABLE lost; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
@@ -2135,6 +2197,7 @@ mod tests {
             .lost_spans(everything, &cancel)
             .unwrap();
         let db = Connection::open(path).unwrap();
+        version_7_header(&db);
         db.execute_batch("DROP TABLE lost; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
@@ -2546,6 +2609,60 @@ mod tests {
         assert!(csv.contains("1,1000000,3000,1000000,low\n"));
         assert!(!csv.contains("3,3000000"));
     }
+    /// Rewrites the header in the layout versions 6 and 7 stored: a whole rate.
+    fn version_7_header(db: &Connection) {
+        let data: Vec<u8> = db
+            .query_row("SELECT value FROM metadata WHERE key='header'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let header: Header = decode(&data).unwrap();
+        let old = HeaderV7 {
+            rate: header.whole_rate(),
+            setting_ma: header.setting_ma,
+            full_scale_mv: header.full_scale_mv,
+            first_sequence: header.first_sequence,
+            previous_low: header.previous_low,
+            low: header.low,
+            high: header.high,
+            dio_mask: header.dio_mask,
+            dio_levels: header.dio_levels,
+            edge_resolution_ns: header.edge_resolution_ns,
+            switch_weight_q16: header.switch_weight_q16,
+            rearm_between_pairs: header.rearm_between_pairs,
+            previous_shunt_nanoamps: header.previous_shunt_nanoamps,
+            high_range_only: header.high_range_only,
+        };
+        db.execute(
+            "UPDATE metadata SET value=? WHERE key='header'",
+            params![encode(&old).unwrap()],
+        )
+        .unwrap();
+    }
+    #[test]
+    fn version_7_headers_read_at_their_whole_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.vergecapture");
+        let mut h = header(1000);
+        h.period = 13_714_286;
+        h.high_range_only = true;
+        let mut writer = CaptureWriter::create(&path).unwrap();
+        writer.ingest(Message::Header(h.clone())).unwrap();
+        writer.append((0..5).map(sample)).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(Archive::open(&path).unwrap().header().unwrap(), h);
+        let db = Connection::open(&path).unwrap();
+        version_7_header(&db);
+        db.execute_batch("PRAGMA user_version=7;").unwrap();
+        drop(db);
+        // Version 7 kept 7 pairs a second; it reads back as a clock at that rate, a count a pair.
+        let read = Archive::open(&path).unwrap().header().unwrap();
+        assert_eq!(
+            (read.clock_hz, read.period, read.high_range_only),
+            (7, 1, true)
+        );
+        assert_eq!(read.pair_offset_ns(7), 1_000_000_000);
+    }
     /// Rewrites the header in the layout archives before version 5 stored.
     fn old_header(db: &Connection) {
         let data: Vec<u8> = db
@@ -2555,7 +2672,7 @@ mod tests {
             .unwrap();
         let header: Header = decode(&data).unwrap();
         let old = HeaderV4 {
-            rate: header.rate,
+            rate: header.whole_rate(),
             setting_ma: header.setting_ma,
             full_scale_mv: header.full_scale_mv,
             first_sequence: header.first_sequence,
@@ -2617,7 +2734,7 @@ mod tests {
             .unwrap();
         let header: Header = decode(&data).unwrap();
         let old = HeaderV5 {
-            rate: header.rate,
+            rate: header.whole_rate(),
             setting_ma: header.setting_ma,
             full_scale_mv: header.full_scale_mv,
             first_sequence: header.first_sequence,
@@ -2723,7 +2840,10 @@ mod tests {
         drop(db);
         let archive = Archive::open(&path).unwrap();
         let read = archive.header().unwrap();
-        assert_eq!((read.rate, read.low.len(), read.dio_mask), (1000, 2, 0));
+        assert_eq!(
+            (read.clock_hz, read.period, read.low.len(), read.dio_mask),
+            (1000, 1, 2, 0)
+        );
         assert_eq!(
             (
                 read.switch_weight_q16,

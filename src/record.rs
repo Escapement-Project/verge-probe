@@ -1,7 +1,7 @@
 //! CSV and sigrok session writers shared by frontends.
 
 mod markers;
-use crate::stream::{CurrentRange, Edge, Markers, Sample};
+use crate::stream::{CurrentRange, DioLost, Edge, Markers, Sample};
 pub use markers::label as marker_label;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -266,6 +266,13 @@ impl Sink {
             Sink::Sigrok(sigrok) => &mut sigrok.dio,
         };
         dio.edges.push_back(DioEvent { time_ns, levels });
+    }
+
+    /// The probe lost edges: the levels are unknown from `lost.from_ns` and known again at
+    /// `lost.to_ns`.
+    pub fn dio_lost(&mut self, lost: &DioLost) {
+        self.dio_state(lost.from_ns, None);
+        self.dio_state(lost.to_ns, Some(lost.levels));
     }
 
     /// Flush events and missing pairs before `time_ns` without buffering the interval.

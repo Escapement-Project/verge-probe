@@ -16,10 +16,13 @@ pub const HEADER: u8 = 0xA1;
 pub const END: u8 = 0xA2;
 pub const EDGES: u8 = 0xA3;
 pub const MARKS: u8 = 0xA4;
+pub const DIO_LOST: u8 = 0xA5;
 /// The longest label a marker carries.
 pub const LABEL_MAX: usize = 32;
 
-const HEADER_BYTES: usize = 68;
+const HEADER_BYTES: usize = 79;
+const ID_HEADER_BYTES: usize = 103;
+const DIO_LOST_BYTES: usize = 19;
 const PAIRS_FIXED: usize = 16;
 const PAIR_BYTES: usize = 5;
 const END_BYTES: usize = 6;
@@ -35,7 +38,7 @@ const MARK_BYTES: usize = 13;
 pub fn is_stream_message(bytes: &[u8]) -> bool {
     bytes
         .first()
-        .is_some_and(|&first| (PAIRS..=MARKS).contains(&first))
+        .is_some_and(|&first| (PAIRS..=DIO_LOST).contains(&first))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -46,7 +49,7 @@ pub enum StreamError {
     Short(usize),
     #[error("0x{0:02x} starts no stream message")]
     Unknown(u8),
-    #[error("stream format {0} is newer than this tool reads")]
+    #[error("stream format {0} is one this tool does not read: update the firmware or the tool")]
     Format(u8),
 }
 
@@ -56,8 +59,11 @@ pub enum StreamError {
 pub struct Header {
     #[serde(skip)]
     pub capture_id: Option<crate::CaptureId>,
-    /// Pairs a second.
-    pub rate: u32,
+    /// The clock the probe times pairs and edges by, in Hz.
+    pub clock_hz: u32,
+    /// The pair period, in counts of `clock_hz`. The rate is their ratio, rarely a whole number of
+    /// pairs a second.
+    pub period: u32,
     /// The current range jumper: 350 or 50 mA, `None` when the probe could not read it.
     pub setting_ma: Option<u16>,
     pub full_scale_mv: u16,
@@ -87,6 +93,34 @@ pub struct Header {
     /// stays high across a pause.
     #[serde(default)]
     pub high_range_only: bool,
+}
+
+impl Header {
+    /// Pairs a second, for showing. Time and weigh pairs by the period and the clock instead.
+    #[must_use]
+    pub fn rate(&self) -> f64 {
+        f64::from(self.clock_hz) / f64::from(self.period.max(1))
+    }
+
+    /// The time from a message's first pair to its pair `index`, in ns, rounded down.
+    #[must_use]
+    pub fn pair_offset_ns(&self, index: u64) -> u64 {
+        (u128::from(index) * u128::from(self.period) * 1_000_000_000
+            / u128::from(self.clock_hz.max(1))) as u64
+    }
+
+    /// The rate to the nearest pair a second, for a format that takes a whole rate, such as a sigrok
+    /// session's samplerate.
+    #[must_use]
+    pub fn whole_rate(&self) -> u32 {
+        self.rate().round() as u32
+    }
+
+    /// One period in ns, rounded up.
+    #[must_use]
+    pub fn period_ns(&self) -> u64 {
+        (u64::from(self.period) * 1_000_000_000).div_ceil(u64::from(self.clock_hz.max(1)))
+    }
 }
 
 /// One voltage and current reading, as the converter left them.
@@ -141,10 +175,10 @@ impl Pairs {
         self.flags & Self::HELD != 0
     }
 
-    /// Pair `index`'s time, in ns since the capture started, at the header's `rate`.
+    /// Pair `index`'s time, in ns since the capture started, at the header's period.
     #[must_use]
-    pub fn time_of(&self, index: usize, rate: u32) -> u64 {
-        self.time_ns + index as u64 * 1_000_000_000 / u64::from(rate.max(1))
+    pub fn time_of(&self, index: usize, header: &Header) -> u64 {
+        self.time_ns + header.pair_offset_ns(index as u64)
     }
 }
 
@@ -178,27 +212,27 @@ pub struct Edge {
 }
 
 /// Up to 99 DIO edges, in time order. Every edge up to a pairs message's last pair arrives before
-/// the next pairs message or the end.
+/// the next pairs message or the end, and so does every [`DioLost`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Edges {
+    /// Zero from firmware that sends [`DioLost`]. Recordings from before it set bit 0 when edges
+    /// were lost before the first one.
     pub flags: u8,
     pub edges: Vec<Edge>,
 }
 
 impl Edges {
-    pub const LOST: u8 = 1;
-
     /// A message as the probe would send it, for a simulator or a test.
     #[must_use]
     pub fn new(flags: u8, edges: Vec<Edge>) -> Edges {
         Edges { flags, edges }
     }
 
-    /// The probe lost edges before the first one, so the levels before it are not known.
+    /// An old recording's mark that the probe lost edges before the first one.
     #[must_use]
-    pub fn lost(&self) -> bool {
-        self.flags & Self::LOST != 0
+    pub fn lost_before(&self) -> bool {
+        self.flags & 1 != 0
     }
 
     /// The message's bytes, as the probe sends them. Empty without edges, which the probe never
@@ -217,6 +251,28 @@ impl Edges {
             bytes.extend_from_slice(&offset.to_le_bytes());
             bytes.push(edge.levels);
         }
+        bytes
+    }
+}
+
+/// The probe lost DIO edges: some between the two times may be missing. From `to_ns` on the levels
+/// are `levels` again. `from_ns` is never before an edge the stream already sent.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DioLost {
+    pub from_ns: u64,
+    pub to_ns: u64,
+    /// Every reporting pin's level from `to_ns` on, bit `k` for DIO`k`; other pins read 0.
+    pub levels: u8,
+}
+
+impl DioLost {
+    /// The message's bytes, as the probe sends them.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![DIO_LOST, 0];
+        bytes.extend_from_slice(&self.from_ns.to_le_bytes());
+        bytes.extend_from_slice(&self.to_ns.to_le_bytes());
+        bytes.push(self.levels);
         bytes
     }
 }
@@ -277,6 +333,7 @@ pub enum Message {
     End(End),
     Edges(Edges),
     Markers(Markers),
+    DioLost(DioLost),
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -302,46 +359,52 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
     let short = || StreamError::Short(bytes.len());
     match bytes.first() {
         Some(&HEADER) => {
-            if bytes.len() < HEADER_BYTES {
+            let identified = match bytes.get(1) {
+                Some(3) => false,
+                Some(4) => true,
+                Some(&other) => return Err(StreamError::Format(other)),
+                None => return Err(short()),
+            };
+            if bytes.len()
+                < if identified {
+                    ID_HEADER_BYTES
+                } else {
+                    HEADER_BYTES
+                }
+            {
                 return Err(short());
             }
-            if !matches!(bytes[1], 1 | 2) {
-                return Err(StreamError::Format(bytes[1]));
-            }
-            let capture_id = if bytes[1] == 2 {
-                let bytes = bytes.get(68..92).ok_or_else(short)?;
+            let capture_id = if identified {
                 Some(
-                    crate::CaptureId::from_bytes(bytes.try_into().expect("24 bytes"))
+                    crate::CaptureId::from_bytes(bytes[72..96].try_into().expect("24 bytes"))
                         .ok_or(StreamError::Identity)?,
                 )
             } else {
                 None
             };
-            // Step 5's fields follow the identity in format 2; firmware before them ends there.
-            let at = if bytes[1] == 2 { 92 } else { HEADER_BYTES };
-            let (switch_weight_q16, flags, previous) = match bytes.get(at..at + 7) {
-                Some(fields) => (u16_at(fields, 0), fields[2], u32_at(fields, 3)),
-                None => (0, 0, 0),
-            };
+            // Step 5's fields follow the identity in format 4.
+            let at = if identified { 96 } else { 72 };
+            let flags = bytes[at + 2];
             Ok(Message::Header(Header {
                 capture_id,
-                rate: u32_at(bytes, 2),
-                setting_ma: match bytes[6] {
+                clock_hz: u32_at(bytes, 2),
+                period: u32_at(bytes, 6),
+                setting_ma: match bytes[10] {
                     1 => Some(350),
                     2 => Some(50),
                     _ => None,
                 },
-                full_scale_mv: u16_at(bytes, 7),
-                first_sequence: u32_at(bytes, 9),
-                previous_low: bytes[13] & 1 != 0,
-                low: points(bytes, 14),
-                high: points(bytes, 39),
-                dio_mask: bytes[64],
-                dio_levels: bytes[65],
-                edge_resolution_ns: u16_at(bytes, 66),
-                switch_weight_q16: switch_weight_q16.min(32768),
+                full_scale_mv: u16_at(bytes, 11),
+                first_sequence: u32_at(bytes, 13),
+                previous_low: bytes[17] & 1 != 0,
+                low: points(bytes, 18),
+                high: points(bytes, 43),
+                dio_mask: bytes[68],
+                dio_levels: bytes[69],
+                edge_resolution_ns: u16_at(bytes, 70),
+                switch_weight_q16: u16_at(bytes, at).min(32768),
                 rearm_between_pairs: flags & 1 != 0,
-                previous_shunt_nanoamps: (flags & 2 != 0).then_some(previous),
+                previous_shunt_nanoamps: (flags & 2 != 0).then_some(u32_at(bytes, at + 3)),
                 high_range_only: flags & 4 != 0,
             }))
         }
@@ -429,6 +492,16 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
             Ok(Message::Markers(Markers {
                 flags: bytes[1],
                 markers,
+            }))
+        }
+        Some(&DIO_LOST) => {
+            if bytes.len() < DIO_LOST_BYTES {
+                return Err(short());
+            }
+            Ok(Message::DioLost(DioLost {
+                from_ns: u64::from_le_bytes(bytes[2..10].try_into().expect("eight bytes")),
+                to_ns: u64::from_le_bytes(bytes[10..18].try_into().expect("eight bytes")),
+                levels: bytes[18],
             }))
         }
         Some(&other) => Err(StreamError::Unknown(other)),
@@ -578,7 +651,7 @@ fn stand_in(next_nanoamps: u32, before_nanoamps: u32, weight_q16: u16) -> u32 {
 /// Converts a stream's pairs, and sums them as the probe does (step 5 and the total).
 #[derive(Clone, Debug)]
 pub struct Converter {
-    rate: u32,
+    header: Header,
     full_scale_mv: u16,
     low: Table,
     high: Table,
@@ -598,11 +671,12 @@ impl Converter {
     #[must_use]
     pub fn new(header: &Header) -> Converter {
         Converter {
-            rate: header.rate,
+            header: header.clone(),
             full_scale_mv: header.full_scale_mv,
             low: Table::new(&header.low),
             high: Table::new(&header.high),
-            scale_q32: (1u64 << 32) / u64::from(header.rate.max(1)),
+            // A pair's share of a second, as the probe weighs it.
+            scale_q32: (u64::from(header.period) << 32) / u64::from(header.clock_hz.max(1)),
             previous_low: header.previous_low,
             before: header.previous_shunt_nanoamps,
             switch_weight_q16: header.switch_weight_q16.min(32768),
@@ -704,7 +778,7 @@ impl Converter {
         }
         for (index, pair) in pairs.pairs.iter().enumerate() {
             let sequence = pairs.first_sequence.wrapping_add(index as u32);
-            self.add(pair, sequence, pairs.time_of(index, self.rate));
+            self.add(pair, sequence, pairs.time_of(index, &self.header));
         }
     }
 

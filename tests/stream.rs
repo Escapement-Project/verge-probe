@@ -18,10 +18,18 @@ fn points(value: &Value) -> Vec<(u16, u32)> {
         .collect()
 }
 
-/// A header as the probe sends it, with the stream's tables.
-fn header_bytes(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]) -> Vec<u8> {
-    let mut bytes = vec![stream::HEADER, 1];
-    bytes.extend_from_slice(&rate.to_le_bytes());
+/// A format 3 header as the probe sends it, up to step 5's fields: the clock and the pair period,
+/// then the stream's tables.
+fn header_prefix(
+    clock_hz: u32,
+    period: u32,
+    full_scale: u16,
+    low: &[(u16, u32)],
+    high: &[(u16, u32)],
+) -> Vec<u8> {
+    let mut bytes = vec![stream::HEADER, 3];
+    bytes.extend_from_slice(&clock_hz.to_le_bytes());
+    bytes.extend_from_slice(&period.to_le_bytes());
     bytes.push(1);
     bytes.extend_from_slice(&full_scale.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes());
@@ -35,8 +43,19 @@ fn header_bytes(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u3
         }
     }
     bytes.extend_from_slice(&[0, 0, 0, 0]);
-    assert_eq!(bytes.len(), 68);
+    assert_eq!(bytes.len(), 72);
     bytes
+}
+
+/// A whole format 3 header at `rate` pairs a second, which the 96 MHz clock divides, with step 5's
+/// fields zero.
+fn header_bytes(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]) -> Vec<u8> {
+    with_step_5(
+        header_prefix(96_000_000, 96_000_000 / rate, full_scale, low, high),
+        0,
+        false,
+        None,
+    )
 }
 
 fn converter(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]) -> Converter {
@@ -46,7 +65,7 @@ fn converter(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]
     }
 }
 
-/// Step 5's fields after a format 1 header: weight, flags and the current before.
+/// Step 5's fields after a header's prefix (or its identity): weight, flags and the current before.
 fn with_step_5(mut header: Vec<u8>, weight: u16, between: bool, before: Option<u32>) -> Vec<u8> {
     header.extend_from_slice(&weight.to_le_bytes());
     header.push(u8::from(between) | if before.is_some() { 2 } else { 0 });
@@ -135,11 +154,13 @@ fn each_pair_converts_as_the_firmware_converts_it() {
 fn a_stream_sums_to_the_firmware_total() {
     let vectors = vectors();
     for case in vectors["sequences"].as_array().unwrap() {
-        let rate = case["rate"].as_u64().unwrap() as u32;
+        let clock = case["clock_hz"].as_u64().unwrap() as u32;
+        let period = case["period"].as_u64().unwrap() as u32;
         let full_scale = case["full_scale_mv"].as_u64().unwrap() as u16;
         let header = with_step_5(
-            header_bytes(
-                rate,
+            header_prefix(
+                clock,
+                period,
                 full_scale,
                 &points(&case["low"]),
                 &points(&case["high"]),
@@ -180,15 +201,15 @@ fn a_stream_sums_to_the_firmware_total() {
         let samples = convert.take_samples();
         assert_eq!(samples.len() as u64, total.pairs);
         assert!(samples.iter().zip(1..).all(|(s, n)| s.sequence == n));
-        // docs/host-interface.md's rule: mv × nA per pair, scaled by floor(2^32 / rate).
-        let scale = (1u128 << 32) / u128::from(rate);
+        // docs/host-interface.md's rule: mv × nA per pair, scaled by floor(2^32 × period / clock).
+        let scale = (u128::from(period) << 32) / u128::from(clock);
         let q32 = samples.iter().fold(0u128, |sum, s| {
             sum + u128::from(s.millivolts) * u128::from(s.nanoamps) * scale
         });
         assert_eq!(
             (q32 >> 32, q32 & 0xFFFF_FFFF),
             (u128::from(total.picojoules), u128::from(total.fraction_q32)),
-            "the samples at {rate} pairs/s"
+            "the samples at a period of {period}"
         );
         assert_eq!(
             (total.picojoules, u64::from(total.fraction_q32), total.pairs),
@@ -197,7 +218,7 @@ fn a_stream_sums_to_the_firmware_total() {
                 case["fraction_q32"].as_u64().unwrap(),
                 case["pairs"].as_u64().unwrap()
             ),
-            "the sequence at {rate} pairs/s"
+            "the sequence at a period of {period}"
         );
     }
 }
@@ -231,7 +252,23 @@ fn messages_parse_as_the_probe_lays_them_out() {
             },
         ]
     );
-    assert_eq!(message.time_of(1, 1000), 2_500_000);
+    let Message::Header(at_1000) = stream::parse(&header_bytes(1000, 3000, &[], &[])).unwrap()
+    else {
+        panic!("header")
+    };
+    assert_eq!(message.time_of(1, &at_1000), 2_500_000);
+    // Asked for 7 pairs a second the timer runs at 6.99999985: the period, not a rounded rate.
+    let Message::Header(at_7) = stream::parse(&with_step_5(
+        header_prefix(96_000_000, 13_714_286, 3000, &[], &[]),
+        0,
+        false,
+        None,
+    ))
+    .unwrap() else {
+        panic!("header")
+    };
+    assert_eq!(message.time_of(1, &at_7), 1_500_000 + 142_857_145);
+    assert!((at_7.rate() - 6.999_999_854).abs() < 1e-9);
     assert_eq!(
         stream::parse(&[stream::END, 3, 7, 0, 0, 0]).unwrap(),
         Message::End(stream::End {
@@ -247,31 +284,41 @@ fn messages_parse_as_the_probe_lays_them_out() {
         stream::parse(&[0x90, 0, 0]),
         Err(stream::StreamError::Unknown(0x90))
     );
-    let mut header = header_bytes(1000, 3000, &[(1, 2), (3, 4)], &[(5, 6), (7, 8)]);
-    header[1] = 2;
-    assert_eq!(stream::parse(&header), Err(stream::StreamError::Short(68)));
-    header.extend_from_slice(&[0; 24]);
-    assert_eq!(stream::parse(&header), Err(stream::StreamError::Identity));
-    header[84] = 1;
+    let header = header_bytes(1000, 3000, &[(1, 2), (3, 4)], &[(5, 6), (7, 8)]);
     let Message::Header(parsed) = stream::parse(&header).unwrap() else {
         panic!("header")
     };
-    assert_eq!(parsed.capture_id.unwrap().as_bytes(), &header[68..]);
-    // Firmware before step 5's fields: weight 0 and no flags, the rule as it was.
     assert_eq!(
         (
-            parsed.switch_weight_q16,
-            parsed.rearm_between_pairs,
-            parsed.previous_shunt_nanoamps
+            parsed.clock_hz,
+            parsed.period,
+            parsed.full_scale_mv,
+            parsed.first_sequence
         ),
-        (0, false, None)
+        (96_000_000, 96_000, 3000, 1)
     );
-    // Format 2 carries them after the identity.
-    let mut current = with_step_5(header.clone(), 9786, true, Some(1_234_567));
+    assert_eq!((parsed.low.len(), parsed.high[1].current_nanoamps), (2, 8));
+    assert_eq!(
+        stream::parse(&header[..78]),
+        Err(stream::StreamError::Short(78))
+    );
+    // Format 4 carries the identity, then step 5's fields.
+    let mut identified = header_prefix(
+        96_000_000,
+        96_000,
+        3000,
+        &[(1, 2), (3, 4)],
+        &[(5, 6), (7, 8)],
+    );
+    identified[1] = 4;
+    identified.extend_from_slice(&[0; 24]);
+    let mut current = with_step_5(identified.clone(), 9786, true, Some(1_234_567));
+    assert_eq!(stream::parse(&current), Err(stream::StreamError::Identity));
+    current[88] = 1;
     let Message::Header(parsed) = stream::parse(&current).unwrap() else {
         panic!("header")
     };
-    assert_eq!(parsed.capture_id.unwrap().as_bytes(), &header[68..]);
+    assert_eq!(parsed.capture_id.unwrap().as_bytes(), &current[72..96]);
     assert_eq!(
         (
             parsed.switch_weight_q16,
@@ -280,7 +327,11 @@ fn messages_parse_as_the_probe_lays_them_out() {
         ),
         (9786, true, Some(1_234_567))
     );
-    current[94] = 0;
+    assert_eq!(
+        stream::parse(&current[..102]),
+        Err(stream::StreamError::Short(102))
+    );
+    current[98] = 0;
     let Message::Header(parsed) = stream::parse(&current).unwrap() else {
         panic!("header")
     };
@@ -288,8 +339,15 @@ fn messages_parse_as_the_probe_lays_them_out() {
         (parsed.rearm_between_pairs, parsed.previous_shunt_nanoamps),
         (false, None)
     );
-    header[1] = 3;
-    assert_eq!(stream::parse(&header), Err(stream::StreamError::Format(3)));
+    // Formats 1 and 2 weighed pairs by a rate rounded down: refused, not misread.
+    for format in [1, 2, 5] {
+        let mut other = header.clone();
+        other[1] = format;
+        assert_eq!(
+            stream::parse(&other),
+            Err(stream::StreamError::Format(format))
+        );
+    }
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
 
     let mut edges = vec![stream::EDGES, 1];
@@ -299,7 +357,8 @@ fn messages_parse_as_the_probe_lays_them_out() {
     let Message::Edges(message) = stream::parse(&edges).unwrap() else {
         panic!("not edges");
     };
-    assert!(message.lost());
+    // An old recording's flag, which firmware that sends DIO lost messages never sets.
+    assert!(message.lost_before());
     let first = u64::from(u32::MAX) + 9;
     assert_eq!(
         message.edges,
@@ -322,6 +381,28 @@ fn messages_parse_as_the_probe_lays_them_out() {
     assert_eq!(
         stream::parse(&edges[..11]),
         Err(stream::StreamError::Short(11))
+    );
+
+    // DIO lost: the two times, then the levels from the second on.
+    let mut lost = vec![stream::DIO_LOST, 0];
+    lost.extend_from_slice(&3_000u64.to_le_bytes());
+    lost.extend_from_slice(&(u64::from(u32::MAX) + 2).to_le_bytes());
+    lost.push(0x0A);
+    let Message::DioLost(message) = stream::parse(&lost).unwrap() else {
+        panic!("not a DIO lost message");
+    };
+    assert_eq!(
+        message,
+        stream::DioLost {
+            from_ns: 3_000,
+            to_ns: u64::from(u32::MAX) + 2,
+            levels: 0x0A
+        }
+    );
+    assert!(stream::is_stream_message(&lost) && message.to_bytes() == lost);
+    assert_eq!(
+        stream::parse(&lost[..18]),
+        Err(stream::StreamError::Short(18))
     );
 
     // Markers: count, then each marker's time, number, label length and label.
@@ -361,7 +442,7 @@ fn messages_parse_as_the_probe_lays_them_out() {
             "{length} bytes"
         );
     }
-    assert!(!stream::is_stream_message(&[0xA5]));
+    assert!(!stream::is_stream_message(&[0xA6]));
 }
 
 /// Step 5 in the samples: a pair at a range switch keeps its time and voltage, takes the next
@@ -412,9 +493,14 @@ fn a_switching_pair_takes_the_next_pairs_current() {
 fn a_held_high_range_stays_high_across_a_pause() {
     let low = [(0, 0), (60_000, 60_000)];
     let high = [(0, 0), (60_000, 6_000_000)];
-    let mut header = with_step_5(header_bytes(1000, 3300, &low, &high), 0, false, None);
-    header[13] = 0;
-    header[70] |= 4;
+    let mut header = with_step_5(
+        header_prefix(96_000_000, 96_000, 3300, &low, &high),
+        0,
+        false,
+        None,
+    );
+    header[17] = 0;
+    header[74] |= 4;
     let Message::Header(header) = stream::parse(&header).unwrap() else {
         panic!("not a header");
     };
@@ -444,7 +530,7 @@ fn a_switch_up_weighs_the_pair_before_and_a_clean_switch_down_keeps_its_own() {
     let high = [(0, 0), (60_000, 6_000_000)];
     // An attached stream: the pair before the first one sent read 400 nA on the low range.
     let header = with_step_5(
-        header_bytes(1000, 3300, &low, &high),
+        header_prefix(96_000_000, 96_000, 3300, &low, &high),
         16384,
         true,
         Some(400),
@@ -488,7 +574,12 @@ fn a_switch_up_weighs_the_pair_before_and_a_clean_switch_down_keeps_its_own() {
 fn a_hold_keeps_the_pair_before_and_a_gap_forgets_it() {
     let low = [(0, 0), (60_000, 60_000)];
     let high = [(0, 0), (60_000, 6_000_000)];
-    let header = with_step_5(header_bytes(1000, 3300, &low, &high), 16384, true, None);
+    let header = with_step_5(
+        header_prefix(96_000_000, 96_000, 3300, &low, &high),
+        16384,
+        true,
+        None,
+    );
     let Message::Header(header) = stream::parse(&header).unwrap() else {
         panic!("header")
     };

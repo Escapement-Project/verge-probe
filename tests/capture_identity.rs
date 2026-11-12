@@ -88,7 +88,7 @@ fn saved_pre_reply_headers_are_discarded_when_attaching() {
     };
     assert_ne!(a, b);
     assert_eq!(header.capture_id, Some(b));
-    assert_eq!(header.rate, 2000);
+    assert_eq!((header.clock_hz, header.period), (2000, 1));
     assert!(!matches!(
         aux.message(Duration::from_millis(1)).unwrap(),
         Some(Message::Header(_))
@@ -296,7 +296,7 @@ fn hardware_replacement_survives_stale_stop_on_aux_and_cmsis_dap() {
                     next_sequence = next_sequence.wrapping_add(message.pairs.len() as u32);
                 }
                 Some(Message::Edges(message)) => {
-                    assert!(!message.lost());
+                    assert_eq!(message.flags, 0);
                     edges += message.edges.len();
                 }
                 _ => {}
