@@ -34,6 +34,9 @@ pub const FIRST_DIO: usize = 4;
 pub const GENERATOR: &str = "verge";
 pub const FORMAT: &str = "verge-energy";
 
+mod export;
+pub use export::export;
+
 #[cfg(all(test, feature = "capture"))]
 mod tests;
 
@@ -54,6 +57,14 @@ pub enum Error {
     Write(#[from] escapement_tickwave_format::writer::WriteError),
     #[error("compacting the recording: {0}")]
     Recut(#[from] escapement_tickwave_format::recut::RecutError),
+    #[error("reading the recording: {0}")]
+    View(#[from] escapement_tickwave_view::Error),
+    #[error(transparent)]
+    Record(#[from] crate::record::RecordError),
+    #[error("the recording isn't an energy capture Verge recorded")]
+    NotVerge,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 type Result<T> = std::result::Result<T, Error>;

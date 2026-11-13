@@ -25,19 +25,39 @@ impl Spool {
             self.untimed_losses += 1;
         }
         for (index, marker) in message.markers.iter().enumerate() {
-            if self.last.is_some_and(|last| marker.time_ns < last) {
-                return Err(RecordError::MarkerTime);
-            }
-            self.rows.write_record([
-                marker.time_ns.to_string(),
-                marker.number.to_string(),
-                label(&marker.label),
-                u8::from(index == 0 && lost).to_string(),
-            ])?;
-            self.last = Some(marker.time_ns);
-            self.first.get_or_insert(marker.time_ns);
+            self.append_text(
+                marker.time_ns,
+                marker.number,
+                &label(&marker.label),
+                index == 0 && lost,
+            )?;
         }
         Ok(())
+    }
+    /// A marker whose label is already the text [`label`] makes of it.
+    pub fn append_text(
+        &mut self,
+        time_ns: u64,
+        number: u32,
+        label: &str,
+        after_loss: bool,
+    ) -> Result<()> {
+        if self.last.is_some_and(|last| time_ns < last) {
+            return Err(RecordError::MarkerTime);
+        }
+        self.rows.write_record([
+            time_ns.to_string(),
+            number.to_string(),
+            label.to_owned(),
+            u8::from(after_loss).to_string(),
+        ])?;
+        self.last = Some(time_ns);
+        self.first.get_or_insert(time_ns);
+        Ok(())
+    }
+    /// A loss report that came with no marker.
+    pub fn untimed_loss(&mut self) {
+        self.untimed_losses += 1;
     }
     /// Nothing to merge: no marker and no loss report arrived.
     pub fn is_empty(&self) -> bool {

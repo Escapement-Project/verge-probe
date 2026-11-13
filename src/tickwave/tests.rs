@@ -861,3 +861,209 @@ fn an_attached_streams_recording_starts_at_its_request_and_refuses_anything_befo
     encoder.ingest(&early[0]).unwrap();
     assert!(matches!(encoder.ingest(&early[1]), Err(Error::Timestamps)));
 }
+
+/// Each export's rows, split as CSV.
+fn csv_table(path: &Path) -> Vec<Vec<String>> {
+    csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(path)
+        .unwrap()
+        .records()
+        .map(|r| r.unwrap().iter().map(str::to_owned).collect())
+        .collect()
+}
+
+/// The rows, the same field for field but for times, which may differ by 1 ns: a pair's time in
+/// the stream is its message's first time plus a floored offset. Returns how many rows.
+fn same_csv(archive: &Path, recording: &Path, case: &str) -> usize {
+    let (a, b) = (csv_table(archive), csv_table(recording));
+    let times: Vec<bool> = a
+        .first()
+        .map(|h| h.iter().map(|c| c.contains("time")).collect())
+        .unwrap_or_default();
+    let mut bad = Vec::new();
+    for (n, (ra, rb)) in a.iter().zip(&b).enumerate() {
+        let same = ra.len() == rb.len()
+            && ra.iter().zip(rb).enumerate().all(|(k, (x, y))| {
+                x == y
+                    || times.get(k).copied().unwrap_or(false)
+                        && matches!((x.parse::<i64>(), y.parse::<i64>()), (Ok(x), Ok(y)) if (x - y).abs() <= 1)
+            });
+        if !same {
+            bad.push(format!("row {n}: {ra:?} / {rb:?}"));
+        }
+    }
+    assert!(
+        bad.is_empty() && a.len() == b.len(),
+        "{case}: {} rows against {}, {} differ:\n{}",
+        a.len(),
+        b.len(),
+        bad.len(),
+        bad.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
+    );
+    a.len()
+}
+
+/// The same text but for integers that differ by at most 1: times in ns.
+fn within_a_ns(a: &[u8], b: &[u8]) -> bool {
+    let split = |t: &[u8]| {
+        let text = String::from_utf8_lossy(t).into_owned();
+        let mut out = Vec::new();
+        let mut word = String::new();
+        for ch in text.chars() {
+            if ch.is_ascii_digit() != word.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && !word.is_empty()
+            {
+                out.push(std::mem::take(&mut word));
+            }
+            word.push(ch);
+        }
+        out.push(word);
+        out
+    };
+    let (a, b) = (split(a), split(b));
+    a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| {
+        x == y
+            || matches!((x.parse::<i64>(), y.parse::<i64>()), (Ok(x), Ok(y)) if (x - y).abs() <= 1)
+    })
+}
+
+/// The sessions' members, byte for byte, but for times in the text ones. Returns how many members.
+fn same_sigrok(archive: &Path, recording: &Path, case: &str) -> usize {
+    let read = |path: &Path| {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        (0..zip.len())
+            .map(|i| {
+                let mut member = zip.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut member, &mut bytes).unwrap();
+                (member.name().unwrap().into_owned(), bytes)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (a, b) = (read(archive), read(recording));
+    let names = |m: &[(String, Vec<u8>)]| m.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&a), names(&b), "{case}: members");
+    let differ: Vec<String> = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| {
+            x.1 != y.1 && !(x.0 == "metadata" || x.0 == "markers.csv") || !within_a_ns(&x.1, &y.1)
+        })
+        .map(|(x, y)| {
+            let at = x.1.iter().zip(&y.1).position(|(p, q)| p != q);
+            let text = |b: &[u8]| {
+                if b.len() < 2000 {
+                    String::from_utf8_lossy(b).into_owned()
+                } else {
+                    String::new()
+                }
+            };
+            format!(
+                "{} ({} against {} bytes, first at {at:?})\n{}\n---\n{}",
+                x.0,
+                x.1.len(),
+                y.1.len(),
+                text(&x.1),
+                text(&y.1)
+            )
+        })
+        .collect();
+    assert!(differ.is_empty(), "{case}: {}", differ.join(", "));
+    a.len()
+}
+
+/// One stream through both writers, exported whole and over selections from both, compared.
+/// Returns the CSV rows, sigrok members and selections compared.
+fn compare_exports(seed: u64, messages: &[Message]) -> (usize, usize, usize) {
+    use escapement_tickwave_view::{Cache, Recording};
+    let cancel = AtomicBool::new(false);
+    let (mut rows, mut members, mut selections) = (0, 0, 0);
+    let dir = tempfile::tempdir().unwrap();
+    let file = encode(messages);
+    let archive = archive(dir.path(), messages);
+    let recording = Recording::open(std::sync::Arc::new(file), Cache::new(64 << 20)).unwrap();
+    let source = &recording.sources()[0];
+    let header = header_from(&source.extra).unwrap();
+    let base = -source.origin;
+    let half = i64::from(header.period) / 2;
+    let runs = recording.runs(recording.channel("V").unwrap()).unwrap();
+    let case = |t0: i64, t1: i64| {
+        (
+            Interval::new(nanos(t0 + base, CLOCK), nanos(t1 + base, CLOCK)),
+            t0..t1,
+        )
+    };
+    let mut cases = vec![(Interval::new(0, u64::MAX / 4), 0..i64::MAX / 4)];
+    // From where no pair is, so the export opens with the pair before moved there, or with none:
+    // inside a span the probe lost or paused, and before the first pair. And to inside one, so a
+    // sigrok session repeats the last pair up to the end.
+    let holes: Vec<i64> = runs
+        .breaks
+        .iter()
+        .filter(|b| b.index > 0)
+        .filter_map(|b| {
+            let end = escapement_tickwave_view::runs::place_after(&runs, b.index - 1);
+            (b.tick > end + 1).then(|| end + (b.tick - end) / 2)
+        })
+        .collect();
+    if runs.count > 0 && runs.first > 1 {
+        cases.push(case(runs.first / 2, runs.tick(runs.count / 2) + half));
+    }
+    for pair in holes.windows(2).take(2) {
+        cases.push(case(pair[0], pair[1]));
+    }
+    // Between pairs, each end inside one's support.
+    if runs.count > 4 {
+        let mut rng = Rng(seed);
+        for _ in 0..2 {
+            let a = rng.below(runs.count - 2);
+            let b = a + 1 + rng.below(runs.count - a - 2);
+            cases.push(case(runs.tick(a) + half, runs.tick(b) + half));
+        }
+    }
+    selections += cases.len() - 1;
+    for (k, (ns, ticks)) in cases.into_iter().enumerate() {
+        for csv in [true, false] {
+            let name = format!(
+                "seed {seed} case {k} {}",
+                if csv { "csv" } else { "sigrok" }
+            );
+            let ext = if csv { "csv" } else { "sr" };
+            let a = dir.path().join(format!("archive-{k}.{ext}"));
+            let b = dir.path().join(format!("recording-{k}.{ext}"));
+            archive.export(&a, csv, ns, &cancel).unwrap();
+            export(&recording, &b, csv, ticks.clone(), &cancel).unwrap();
+            if csv {
+                rows += same_csv(&a, &b, &name);
+            } else {
+                members += same_sigrok(&a, &b, &name);
+            }
+        }
+    }
+    (rows, members, selections)
+}
+
+#[test]
+fn exports_from_a_recording_match_the_archives() {
+    let (mut rows, mut members, mut selections) = (0, 0, 0);
+    let mut add = |(r, m, s): (usize, usize, usize)| {
+        rows += r;
+        members += m;
+        selections += s;
+    };
+    for shape in shapes() {
+        add(compare_exports(shape.seed, &stream(shape)));
+    }
+    // A capture whose only marker message is a loss report with no marker in it.
+    let mut messages: Vec<Message> = stream(shapes()[0])
+        .into_iter()
+        .filter(|m| !matches!(m, Message::Markers(_)))
+        .collect();
+    let at = messages.len() - usize::from(matches!(messages.last(), Some(Message::End(_))));
+    messages.insert(at, Message::Markers(Markers::new(Markers::LOST, vec![])));
+    add(compare_exports(0, &messages));
+    eprintln!("rows {rows}, sigrok members {members}, selections {selections}");
+    assert!(rows > 100_000 && members > 100 && selections > 80);
+}

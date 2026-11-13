@@ -206,6 +206,39 @@ impl Sink {
         Ok(true)
     }
 
+    /// A marker read back from a recording, its label the text [`marker_label`] made of it.
+    /// Whether it was recorded, as [`Sink::markers`].
+    #[cfg(feature = "tickwave")]
+    pub(crate) fn marker_text(
+        &mut self,
+        time_ns: u64,
+        number: u32,
+        label: &str,
+        after_loss: bool,
+    ) -> Result<bool> {
+        let Some(spool) = self.spool() else {
+            return Ok(false);
+        };
+        spool.append_text(time_ns, number, label, after_loss)?;
+        Ok(true)
+    }
+    /// A marker loss report that came with no marker, read back from a recording.
+    #[cfg(feature = "tickwave")]
+    pub(crate) fn marker_loss(&mut self) -> bool {
+        let Some(spool) = self.spool() else {
+            return false;
+        };
+        spool.untimed_loss();
+        true
+    }
+    #[cfg(feature = "tickwave")]
+    fn spool(&mut self) -> Option<&mut markers::Spool> {
+        match self {
+            Self::Csv(csv) => csv.markers.as_mut().map(|markers| &mut markers.spool),
+            Self::Sigrok(sigrok) => sigrok.markers.as_mut(),
+        }
+    }
+
     /// The stream began at `rate` pairs a second, reporting the edges of `pins`, at `levels`.
     pub fn begin(&mut self, rate: u32, pins: u8, levels: u8) -> Result<()> {
         self.begin_mode(rate, pins, levels, false)
