@@ -3,8 +3,9 @@
 use probe_rs::{
     Permissions, Session,
     probe::{
-        DebugProbe, DebugProbeError, DebugProbeInfo, Probe, ScanFormat, WireProtocol,
-        cmsisdap::{CmsisDap, CmsisDapCjtagExtension, SendVendorCommand, VendorCommandId},
+        DebugProbe, DebugProbeError, DebugProbeInfo, Probe, ProbeTransport, UsbProbeInfo,
+        WireProtocol,
+        cmsisdap::{CmsisDap, ScanFormat, VendorCommandId},
         list::Lister,
     },
 };
@@ -19,10 +20,9 @@ use crate::protocol::{
     CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER,
     CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
     I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, J8_COMMAND,
-    JTAG_CODEGEN_COMMAND, JTAG_FORMAT_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
-    LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
-    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND,
-    TARGET_SENSE_COMMAND,
+    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND,
+    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ,
+    SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -1673,19 +1673,6 @@ impl VergeControl<'_, Session> {
     }
 }
 
-/// Installs Verge's cJTAG vendor-command adapter on an opened CMSIS-DAP probe.
-///
-/// Hand it only a probe that [`is_mcu_link`] accepts. Other firmware reads Verge's vendor commands
-/// as its own: DAPLink's `0x82` sets its UART.
-pub fn install_cjtag_support(probe: &mut Probe) -> Result<(), DebugProbeError> {
-    let cmsisdap =
-        cmsis_dap(Some(probe.driver_mut())).ok_or(DebugProbeError::CommandNotSupportedByProbe {
-            command_name: "CMSIS-DAP cJTAG extension",
-        })?;
-    cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: None }));
-    Ok(())
-}
-
 /// Why [`attach`] could not open a session.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -1722,7 +1709,13 @@ pub enum AttachError {
 /// `0x82` without acting on it, so Verge's vendor commands are safe to send it.
 #[must_use]
 pub fn is_mcu_link(info: &DebugProbeInfo) -> bool {
-    mcu_link_id(info.vendor_id, info.product_id)
+    let usb = usb(info);
+    mcu_link_id(usb.vendor_id, usb.product_id)
+}
+
+fn usb(info: &DebugProbeInfo) -> &UsbProbeInfo {
+    let ProbeTransport::Usb(usb) = &info.transport;
+    usb
 }
 
 fn mcu_link_id(vid: u16, pid: u16) -> bool {
@@ -1730,12 +1723,11 @@ fn mcu_link_id(vid: u16, pid: u16) -> bool {
 }
 
 /// Readies an opened probe for probe-rs to select `protocol`, as [`attach`] does. For cJTAG it
-/// installs Verge's adapter, and refuses a probe that is not an MCU-Link running Verge with cJTAG.
-/// For SWD and JTAG it sends nothing.
+/// refuses a probe that is not an MCU-Link running Verge with cJTAG, and selects the scan format
+/// the connection comes up in: `cjtag_format`, or OScan1 without one. Nothing checks that the
+/// target has that format. For SWD and JTAG it sends nothing.
 ///
-/// `usb_id` is the probe's VID and PID, from its listing or the selector that opened it. With
-/// `cjtag_format`, the adapter offers OScan1 and that format alone, so a host switches the target to
-/// it where the target has it and stays in OScan1 where not.
+/// `usb_id` is the probe's VID and PID, from its listing or the selector that opened it.
 pub fn prepare_probe(
     probe: &mut Probe,
     usb_id: (u16, u16),
@@ -1754,12 +1746,12 @@ pub fn prepare_probe(
     require_cjtag(probe)?;
     let cmsisdap =
         cmsis_dap(Some(probe.driver_mut())).ok_or(AttachError::Configure(NOT_CMSIS_DAP))?;
-    cmsisdap.set_cjtag_extension(Box::new(VergeCjtagExtension { hold: cjtag_format }));
+    cmsisdap.set_cjtag_scan_format(cjtag_format.unwrap_or_default());
     Ok(())
 }
 
-/// On an MCU-Link, before probe-rs selects cJTAG: refuses one whose firmware has none. Nothing a
-/// session selects outlives its JTAG connection, so there is no format to clear first.
+/// On an MCU-Link, before probe-rs selects cJTAG: refuses one whose firmware has none, or whose
+/// `0x95` does not select the next connect's format yet (info format 8).
 fn require_cjtag<T: VergeTransport + ?Sized>(transport: &mut T) -> Result<(), AttachError> {
     let info = VergeControl::new(transport)
         .info()
@@ -1767,7 +1759,7 @@ fn require_cjtag<T: VergeTransport + ?Sized>(transport: &mut T) -> Result<(), At
         .cloned();
     match info {
         None => Err(AttachError::NotVerge),
-        Some(info) if info.version < 7 => Err(AttachError::VergeTooOld(info.firmware)),
+        Some(info) if info.version < 8 => Err(AttachError::VergeTooOld(info.firmware)),
         Some(info) if info.scan_formats == 0 => Err(AttachError::NoCjtag),
         Some(_) => Ok(()),
     }
@@ -1776,7 +1768,7 @@ fn require_cjtag<T: VergeTransport + ?Sized>(transport: &mut T) -> Result<(), At
 /// Opens the probe with `serial`, or the only one attached, and attaches to `chip` over
 /// `protocol`.
 ///
-/// [`prepare_probe`] readies it first, holding cJTAG to `cjtag_format` when one is given. Without
+/// [`prepare_probe`] readies it first, selecting `cjtag_format` for cJTAG, or OScan1. Without
 /// `speed_khz` the probe keeps its default clock.
 pub fn attach(
     serial: Option<&str>,
@@ -1789,7 +1781,7 @@ pub fn attach(
     let info = match serial {
         Some(serial) => probes
             .into_iter()
-            .find(|probe| probe.serial_number.as_deref() == Some(serial))
+            .find(|probe| usb(probe).serial_number.as_deref() == Some(serial))
             .ok_or_else(|| AttachError::NotFound(serial.to_owned()))?,
         None => match probes.len() {
             0 => return Err(AttachError::NoneAttached),
@@ -1803,7 +1795,7 @@ pub fn attach(
     let mut probe = info.open().map_err(AttachError::Open)?;
     prepare_probe(
         &mut probe,
-        (info.vendor_id, info.product_id),
+        (usb(&info).vendor_id, usb(&info).product_id),
         protocol,
         cjtag_format,
     )?;
@@ -1819,68 +1811,6 @@ pub fn attach(
             chip: chip.to_owned(),
             source,
         })
-}
-
-struct VergeCjtagExtension {
-    /// The one scan format a host may switch the target to, beside OScan1.
-    hold: Option<ScanFormat>,
-}
-
-impl CmsisDapCjtagExtension for VergeCjtagExtension {
-    fn scan_formats(
-        &mut self,
-        send_vendor_command: &mut SendVendorCommand<'_>,
-    ) -> Result<Vec<ScanFormat>, DebugProbeError> {
-        let mut send =
-            |command_id, payload: &[u8]| send_vendor_command(vendor_id(command_id)?, payload);
-        let Some(info) = read_info(&mut send).map_err(into_probe_error)? else {
-            return Ok(Vec::new());
-        };
-        // Every activation starts in OScan1, so a held format keeps it offered: the host switches
-        // from OScan1 to the held format, where the target has it.
-        let held = |format: &ScanFormat| {
-            self.hold
-                .is_none_or(|hold| *format == ScanFormat::OScan1 || *format == hold)
-        };
-        Ok([
-            ScanFormat::OScan1,
-            ScanFormat::OScan2,
-            ScanFormat::OScan5,
-            ScanFormat::OScan6,
-        ]
-        .into_iter()
-        .filter(|format| info.frames(*format) && held(format))
-        .collect())
-    }
-
-    fn set_framing(
-        &mut self,
-        format: Option<ScanFormat>,
-        send_vendor_command: &mut SendVendorCommand<'_>,
-    ) -> Result<(), DebugProbeError> {
-        // DAP_JTAG_Format numbers OScan n as n, and 0 is conventional JTAG. On a JTAG connection it
-        // takes effect at once, so the host calls this once the target is in the format.
-        let number = match format {
-            None => 0,
-            Some(ScanFormat::OScan1) => 1,
-            Some(ScanFormat::OScan2) => 2,
-            Some(ScanFormat::OScan5) => 5,
-            Some(ScanFormat::OScan6) => 6,
-            Some(other) => {
-                return Err(DebugProbeError::Other(format!(
-                    "Verge does not frame {other:?}"
-                )));
-            }
-        };
-        let response = send_vendor_command(vendor_id(JTAG_FORMAT_COMMAND)?, &[number])?;
-        if vendor_status(response_byte(&response, 0)?)? {
-            Ok(())
-        } else {
-            Err(DebugProbeError::Other(
-                "the firmware refused the cJTAG framing".to_owned(),
-            ))
-        }
-    }
 }
 
 type VendorCommandSender<'a> =
@@ -3241,83 +3171,6 @@ mod tests {
     }
 
     #[test]
-    fn cjtag_formats_are_offered_from_info_format_7_off_board() {
-        let all = [
-            ScanFormat::OScan1,
-            ScanFormat::OScan2,
-            ScanFormat::OScan5,
-            ScanFormat::OScan6,
-        ];
-        for (reply, formats) in [
-            (info_reply(7, 0, BoardKind::Pro.number(), 0, 0), &all[..]),
-            (info_reply(7, 0, BoardKind::Plain.number(), 0, 0), &all[..]),
-            (info_reply(7, 0, BoardKind::OnBoard.number(), 0, 0), &[]),
-            (info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0), &[]),
-            (vec![], &[]),
-        ] {
-            let mut send = |command_id: VendorCommandId, _: &[u8]| {
-                assert_eq!(command_id.get(), INFO_COMMAND);
-                Ok(reply.clone())
-            };
-            assert_eq!(
-                VergeCjtagExtension { hold: None }
-                    .scan_formats(&mut send)
-                    .unwrap(),
-                formats
-            );
-        }
-    }
-
-    #[test]
-    fn a_held_format_is_offered_beside_oscan1_alone() {
-        for (hold, formats) in [
-            (ScanFormat::OScan1, &[ScanFormat::OScan1][..]),
-            (
-                ScanFormat::OScan5,
-                &[ScanFormat::OScan1, ScanFormat::OScan5],
-            ),
-            (
-                ScanFormat::OScan6,
-                &[ScanFormat::OScan1, ScanFormat::OScan6],
-            ),
-        ] {
-            let mut send =
-                |_: VendorCommandId, _: &[u8]| Ok(info_reply(7, 0, BoardKind::Pro.number(), 0, 0));
-            let offered = VergeCjtagExtension { hold: Some(hold) }
-                .scan_formats(&mut send)
-                .unwrap();
-            assert_eq!(offered, formats);
-        }
-    }
-
-    #[test]
-    fn cjtag_framing_sends_0x95_with_the_oscan_number_and_0_for_none() {
-        for (format, number) in [
-            (None, 0),
-            (Some(ScanFormat::OScan1), 1),
-            (Some(ScanFormat::OScan2), 2),
-            (Some(ScanFormat::OScan5), 5),
-            (Some(ScanFormat::OScan6), 6),
-        ] {
-            let mut sent = Vec::new();
-            let mut send = |command_id: VendorCommandId, payload: &[u8]| {
-                sent.push((command_id.get(), payload.to_vec()));
-                Ok(vec![0])
-            };
-            VergeCjtagExtension { hold: None }
-                .set_framing(format, &mut send)
-                .unwrap();
-            assert_eq!(sent, [(0x95, vec![number])]);
-        }
-        let mut refuse = |_, _: &[u8]| Ok(vec![0xFF]);
-        assert!(
-            VergeCjtagExtension { hold: None }
-                .set_framing(Some(ScanFormat::OScan2), &mut refuse)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn only_an_mcu_links_usb_id_is_an_mcu_link() {
         let info = |vid, pid| {
             DebugProbeInfo::new(
@@ -3348,13 +3201,14 @@ mod tests {
             (result, transport.commands)
         };
         let identify = (INFO_COMMAND, vec![]);
-        let (result, sent) = prepare(info_reply(7, 0, BoardKind::Pro.number(), 0, 0));
+        let (result, sent) = prepare(info_reply(8, 0, BoardKind::Pro.number(), 0, 0));
         assert!(result.is_ok());
         assert_eq!(sent, std::slice::from_ref(&identify));
-        let (result, sent) = prepare(info_reply(7, 0, BoardKind::OnBoard.number(), 0, 0));
+        let (result, sent) = prepare(info_reply(8, 0, BoardKind::OnBoard.number(), 0, 0));
         assert!(matches!(result, Err(AttachError::NoCjtag)));
         assert_eq!(sent, std::slice::from_ref(&identify));
-        let (result, sent) = prepare(info_reply(6, 0, BoardKind::Pro.number(), 0x600, 0));
+        // Format 7 has 0x95, but on it a Format sent while disconnected selects nothing.
+        let (result, sent) = prepare(info_reply(7, 0, BoardKind::Pro.number(), 0, 0));
         assert!(matches!(result, Err(AttachError::VergeTooOld(build)) if build == "test-build"));
         assert_eq!(sent, std::slice::from_ref(&identify));
         // NXP's firmware: 0x82 without CJTAG.

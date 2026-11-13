@@ -1,10 +1,8 @@
 //! Shared Verge vendor-command payloads, independent of the transport.
 
-use probe_rs::probe::ScanFormat;
+use probe_rs::probe::cmsisdap::ScanFormat;
 
 pub(crate) const INFO_COMMAND: u8 = 0x82;
-/// `DAP_JTAG_Format`, proposed for CMSIS-DAP, at a vendor ID until Arm assigns one.
-pub(crate) const JTAG_FORMAT_COMMAND: u8 = 0x95;
 pub(crate) const ENERGY_COMMAND: u8 = 0x90;
 pub(crate) const TARGET_SENSE_COMMAND: u8 = 0x86;
 pub(crate) const TARGET_POWER_COMMAND: u8 = 0x8F;
@@ -100,7 +98,7 @@ impl BoardKind {
 impl VergeInfo {
     /// Whether the firmware frames `format` once the host has activated it on the target.
     pub fn frames(&self, format: ScanFormat) -> bool {
-        self.scan_formats & (1 << format.number()) != 0
+        self.scan_formats & (1 << format.oscan()) != 0
     }
 
     /// Whether cJTAG framing was on when the info was read.
