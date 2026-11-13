@@ -637,8 +637,8 @@ impl Archive {
                 let first = query.bin(sample.time_ns.max(interval.start_ns));
                 let last = query.bin(stop.min(interval.end_ns).saturating_sub(1));
                 let pixels = query.values.len();
-                for bin in first..=last {
-                    query.values[bin].add(sample, stop, bin_interval(interval, pixels, bin));
+                for (bin, value) in query.values[first..=last].iter_mut().enumerate() {
+                    value.add(sample, stop, bin_interval(interval, pixels, first + bin));
                 }
             }
         }
