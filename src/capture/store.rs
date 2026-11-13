@@ -1,6 +1,6 @@
 use super::{CaptureError, Interval, Result, Statistics};
 use crate::record::{Sink, temp_beside};
-use crate::stream::{Converter, Header, Message, Sample};
+use crate::stream::{Converter, Header, Message, Sample, skipped};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -645,7 +645,7 @@ impl Archive {
         Ok(())
     }
     /// Each stored block's samples whose support overlaps `interval`, in order.
-    fn overlapping(
+    pub(crate) fn overlapping(
         &self,
         interval: Interval,
         cancel: &AtomicBool,
@@ -1093,15 +1093,6 @@ fn overlaps(spans: &[Interval], interval: Interval) -> bool {
     spans
         .get(after)
         .is_some_and(|span| span.start_ns < interval.end_ns)
-}
-
-pub fn skipped(next: u32, first: u32) -> u64 {
-    let difference = first.wrapping_sub(next);
-    if difference < 0x8000_0000 {
-        u64::from(difference)
-    } else {
-        0
-    }
 }
 
 /// Deletes the capture at `path`, with the WAL and its index a capture still in WAL mode keeps.

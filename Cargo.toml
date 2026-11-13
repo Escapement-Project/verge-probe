@@ -8,6 +8,7 @@ description = "Host library for MCU-Link probes running Verge firmware"
 [dependencies]
 csv = "1.4.0"
 dirs = "7.0.0"
+escapement-tickwave-format = { version = "0.1.0", path = "../tickwave/crates/format", optional = true }
 hex = "0.4.3"
 hidapi = "2.6.7"
 humantime = "2.4.0"
@@ -39,7 +40,9 @@ enum_glob_use = "deny"
 
 [features]
 # Disk-backed energy captures (`capture`), on SQLite.
-capture = ["dep:postcard", "dep:rusqlite"]
+capture = ["dep:postcard", "dep:rusqlite", "tickwave"]
+# Energy captures as tickwave recordings (`tickwave`).
+tickwave = ["dep:escapement-tickwave-format"]
 simulate = ["dep:minisign"]
 
 [dev-dependencies]

@@ -54,6 +54,8 @@ pub enum CaptureError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Record(#[from] RecordError),
+    #[error(transparent)]
+    Tickwave(#[from] crate::tickwave::Error),
 }
 
 type Result<T> = std::result::Result<T, CaptureError>;

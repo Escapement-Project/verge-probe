@@ -123,6 +123,18 @@ impl Header {
     }
 }
 
+/// Pairs the sequence skipped between the one expected next and `first`; none for a sequence that
+/// went back.
+#[must_use]
+pub fn skipped(next: u32, first: u32) -> u64 {
+    let difference = first.wrapping_sub(next);
+    if difference < 0x8000_0000 {
+        u64::from(difference)
+    } else {
+        0
+    }
+}
+
 /// One voltage and current reading, as the converter left them.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pair {

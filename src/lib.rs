@@ -31,6 +31,8 @@ pub mod sim;
 pub mod source;
 pub mod stock;
 pub mod stream;
+#[cfg(feature = "tickwave")]
+pub mod tickwave;
 pub mod update;
 pub mod usb;
 pub mod version;

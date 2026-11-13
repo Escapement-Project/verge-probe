@@ -1,7 +1,10 @@
 use super::{CaptureError, CaptureWriter, Result};
 use crate::stream::Message;
+use crate::tickwave::{Context, FileWriter};
+use escapement_tickwave_format::snapshot::Snapshot;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -11,9 +14,51 @@ pub struct Recorder {
     thread: Option<JoinHandle<Result<()>>>,
 }
 
+/// Where a recorder's messages go.
+trait Disk: Send + 'static {
+    fn ingest(&mut self, message: Message) -> Result<bool>;
+    fn flush(&mut self) -> Result<()>;
+    fn finish(self) -> Result<()>;
+}
+
+impl Disk for CaptureWriter {
+    fn ingest(&mut self, message: Message) -> Result<bool> {
+        CaptureWriter::ingest(self, message)
+    }
+    fn flush(&mut self) -> Result<()> {
+        CaptureWriter::flush(self)
+    }
+    fn finish(self) -> Result<()> {
+        CaptureWriter::finish(self)
+    }
+}
+
+impl Disk for FileWriter {
+    fn ingest(&mut self, message: Message) -> Result<bool> {
+        Ok(FileWriter::ingest(self, &message)?)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(FileWriter::flush(self)?)
+    }
+    fn finish(self) -> Result<()> {
+        Ok(FileWriter::finish(self)?)
+    }
+}
+
 impl Recorder {
+    /// A `.vergecapture` archive.
     pub fn create(path: &Path) -> Result<Self> {
-        let mut writer = CaptureWriter::create(path)?;
+        Self::spawn(CaptureWriter::create(path)?)
+    }
+
+    /// A `.tickwave` recording, and the latest snapshot of it for a view in this process.
+    pub fn tickwave(path: &Path, context: Context) -> Result<(Self, Arc<Mutex<Option<Snapshot>>>)> {
+        let writer = FileWriter::create(path, context)?;
+        let snapshots = writer.snapshots();
+        Ok((Self::spawn(writer)?, snapshots))
+    }
+
+    fn spawn(mut writer: impl Disk) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(256);
         let thread = thread::Builder::new()
             .name("capture-disk".into())

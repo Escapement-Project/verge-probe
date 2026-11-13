@@ -407,7 +407,7 @@ impl Archive {
         sink.advance_to(interval.end_ns)?;
         Ok(())
     }
-    pub(super) fn digital_spans(
+    pub(crate) fn digital_spans(
         &self,
         interval: Interval,
         cancel: &AtomicBool,
