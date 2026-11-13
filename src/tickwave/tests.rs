@@ -214,6 +214,9 @@ fn stream(shape: Shape) -> Vec<Message> {
             markers.sort_by_key(|marker| marker.time_ns);
             let flags = if rng.one_in(4) { Markers::LOST } else { 0 };
             out.push(Message::Markers(Markers::new(flags, markers)));
+        } else if rng.one_in(12) {
+            // The probe lost markers and has none to send.
+            out.push(Message::Markers(Markers::new(Markers::LOST, vec![])));
         }
     }
     if shape.end {

@@ -771,7 +771,9 @@ impl Open {
                     self.writer.gap(FIRST_DIO + i, gap)?;
                 }
                 self.dio_levels = Some(levels);
-                self.dio_end = self.dio_end.max(to);
+                // The levels are known at `to`: a gap that reached the length would read as
+                // unknown to the end instead.
+                self.dio_end = self.dio_end.max(to + 1);
             }
         }
         Ok(())
