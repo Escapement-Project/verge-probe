@@ -356,7 +356,7 @@ impl Encoder {
             Message::Edges(edges) => {
                 let open = self.open.as_mut().unwrap();
                 for edge in &edges.edges {
-                    let tick = open.at(edge.time_ns)?;
+                    let tick = open.stamp(edge.time_ns)?;
                     open.arrive(Dio::Edge {
                         tick,
                         levels: edge.levels,
@@ -365,8 +365,8 @@ impl Encoder {
             }
             Message::DioLost(lost) => {
                 let open = self.open.as_mut().unwrap();
-                let from = open.at(lost.from_ns)?;
-                let to = open.at(lost.to_ns)?;
+                let from = open.stamp(lost.from_ns)?;
+                let to = open.stamp(lost.to_ns)?;
                 // A report that spans nothing lost nothing: the levels stand from then on.
                 let item = match to.cmp(&from) {
                     std::cmp::Ordering::Less => return Err(Error::Timestamps),
@@ -536,6 +536,19 @@ impl Open {
         };
         let start = self.at(pairs.time_ns)?;
         let missing = skipped(self.next, pairs.first_sequence);
+        // Lost pairs take their periods, and pauses and holds add moments: a message can come no
+        // earlier than its sequence puts it, and no more than `ahead` later.
+        let due = self
+            .last_pair
+            .map_or(0, |last| last.saturating_add(self.period))
+            .saturating_add(
+                i64::try_from(missing)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(self.period),
+            );
+        if start < due || start > due.saturating_add(self.ahead()) {
+            return Err(Error::Timestamps);
+        }
         let lost = match self.last_pair {
             None => {
                 self.lost_before += missing;
@@ -572,8 +585,26 @@ impl Open {
     /// The probe's time `ns` as the recording's tick. Nothing the stream stamps comes before its
     /// start, so a time that would is refused rather than moved.
     fn at(&self, ns: u64) -> Result<i64> {
-        let at = tick(ns, self.clock_hz) - self.base;
+        let ticks = (u128::from(ns) * u128::from(self.clock_hz)).div_ceil(1_000_000_000);
+        let at = i64::try_from(ticks).map_err(|_| Error::Timestamps)? - self.base;
         if at < 0 {
+            return Err(Error::Timestamps);
+        }
+        Ok(at)
+    }
+
+    /// How far past what its pairs account for a stream may stamp anything: its pauses and holds
+    /// are moments, so further is a corrupt stamp, and placing one would stretch the recording to
+    /// it, with every bucket of overview in between.
+    fn ahead(&self) -> i64 {
+        i64::from(AHEAD_S) * i64::from(self.clock_hz)
+    }
+
+    /// An edge's, loss report's or marker's stamp as `at` gives it, refused past `ahead` of the
+    /// newest pair, or of the start before any.
+    fn stamp(&self, ns: u64) -> Result<i64> {
+        let at = self.at(ns)?;
+        if at > self.last_pair.unwrap_or(0).saturating_add(self.ahead()) {
             return Err(Error::Timestamps);
         }
         Ok(at)
@@ -621,7 +652,7 @@ impl Open {
             self.marker_losses += 1;
         }
         for (index, marker) in markers.markers.iter().enumerate() {
-            let tick = self.at(marker.time_ns)?;
+            let tick = self.stamp(marker.time_ns)?;
             let seen = self.marker_ticks.entry(tick).or_default();
             let id = match *seen {
                 0 => format!("marker/{tick}"),
@@ -889,6 +920,9 @@ pub struct FileWriter {
     published: Option<Instant>,
     latest: Arc<Mutex<Option<Snapshot>>>,
 }
+
+/// How far a stream may stamp past what its pairs account for, in seconds (`Open::ahead`).
+const AHEAD_S: u32 = 60;
 
 /// How often a crash can lose what came in, at most.
 const FLUSH_EVERY: Duration = Duration::from_secs(1);

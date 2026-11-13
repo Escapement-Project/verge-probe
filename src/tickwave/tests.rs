@@ -1067,3 +1067,234 @@ fn exports_from_a_recording_match_the_archives() {
     eprintln!("rows {rows}, sigrok members {members}, selections {selections}");
     assert!(rows > 100_000 && members > 100 && selections > 80);
 }
+
+/// A value a corrupt or foreign stream could carry: the ends of the range as often as the middle.
+fn extreme(rng: &mut Rng) -> u64 {
+    match rng.below(6) {
+        0 => 0,
+        1 => 1,
+        2 => u64::MAX,
+        3 => u64::MAX / 2,
+        4 => i64::MAX as u64,
+        _ => rng.next(),
+    }
+}
+
+fn mutate(message: &mut Message, rng: &mut Rng) {
+    match message {
+        Message::Header(header) => {
+            header.clock_hz = extreme(rng) as u32;
+            header.period = extreme(rng) as u32;
+            header.first_sequence = extreme(rng) as u32;
+        }
+        Message::Pairs(pairs) => {
+            pairs.first_sequence = extreme(rng) as u32;
+            pairs.time_ns = extreme(rng);
+            pairs.flags = rng.next() as u8;
+        }
+        Message::Edges(edges) => {
+            for edge in &mut edges.edges {
+                if rng.one_in(2) {
+                    edge.time_ns = extreme(rng);
+                }
+                edge.levels = rng.next() as u8;
+            }
+        }
+        Message::DioLost(lost) => {
+            lost.from_ns = extreme(rng);
+            lost.to_ns = extreme(rng);
+            lost.levels = rng.next() as u8;
+        }
+        Message::Markers(markers) => {
+            markers.flags = rng.next() as u8;
+            for marker in &mut markers.markers {
+                marker.time_ns = extreme(rng);
+                marker.number = extreme(rng) as u32;
+            }
+        }
+        Message::End(end) => end.last_sequence = extreme(rng) as u32,
+    }
+}
+
+/// Whatever a corrupt transfer, a foreign firmware or a message left from an earlier stream hands
+/// the recorder comes back as an error, never a panic: random bytes of every kind through
+/// `stream::parse` and on into the Encoder, and real streams with their fields set to anything,
+/// through to the finish. Each failure names its seed.
+#[test]
+fn nothing_from_the_probe_panics_the_recorder() {
+    use crate::stream::{self, parse};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let shape = |seed: u64| Shape {
+        seed,
+        rate: [1_000, 10_000, 100_000, 7][seed as usize % 4],
+        first_sequence: if seed.is_multiple_of(5) {
+            u32::MAX - 2
+        } else {
+            1
+        },
+        dio_mask: 0x0f,
+        messages: 40,
+        end: seed.is_multiple_of(2),
+    };
+    for (clock_hz, period) in [(0, 0), (0, 1), (CLOCK, 0)] {
+        let mut encoder = Encoder::new(Context::default());
+        let bad = Header {
+            clock_hz,
+            period,
+            ..header(shape(1))
+        };
+        assert!(
+            encoder.ingest(&Message::Header(bad)).is_err(),
+            "clock {clock_hz}, period {period}"
+        );
+    }
+    // Stamps the pairs can't account for are refused rather than placed, and their neighbours
+    // just inside the bounds are taken.
+    let fresh = || {
+        let mut encoder = Encoder::new(Context::default());
+        encoder.ingest(&Message::Header(header(shape(1)))).unwrap();
+        encoder
+    };
+    let period = u64::from(header(shape(1)).period);
+    let minute = 60 * u64::from(CLOCK);
+    let pairs_at = |first_sequence: u32, at: u64| {
+        Message::Pairs(Pairs {
+            flags: 0,
+            first_sequence,
+            time_ns: ns(at),
+            pairs: vec![Pair {
+                voltage_code: 1000,
+                current_code: 1000,
+                low: true,
+                under_range: false,
+            }],
+        })
+    };
+    let edge_at = |at: u64| {
+        Message::Edges(stream::Edges {
+            flags: 0,
+            edges: vec![stream::Edge {
+                time_ns: ns(at),
+                levels: 1,
+            }],
+        })
+    };
+    assert!(
+        fresh().ingest(&pairs_at(1, minute + 1)).is_err(),
+        "first pairs past a minute"
+    );
+    assert!(
+        fresh().ingest(&pairs_at(1, minute)).is_ok(),
+        "first pairs at a minute"
+    );
+    let mut encoder = fresh();
+    encoder.ingest(&pairs_at(1, 0)).unwrap();
+    assert!(
+        encoder.ingest(&pairs_at(2, period - 1)).is_err(),
+        "pairs before their sequence"
+    );
+    let mut encoder = fresh();
+    encoder.ingest(&pairs_at(1, 0)).unwrap();
+    assert!(
+        encoder.ingest(&pairs_at(5, 4 * period + minute)).is_ok(),
+        "pairs after a loss and a pause"
+    );
+    let mut encoder = fresh();
+    encoder.ingest(&pairs_at(1, 0)).unwrap();
+    assert!(
+        encoder
+            .ingest(&pairs_at(5, 4 * period + minute + 1))
+            .is_err(),
+        "pairs past a loss and a minute"
+    );
+    let mut encoder = fresh();
+    encoder.ingest(&pairs_at(1, 0)).unwrap();
+    assert!(
+        encoder.ingest(&edge_at(minute + 1)).is_err(),
+        "an edge past a minute ahead"
+    );
+    let mut encoder = fresh();
+    encoder.ingest(&pairs_at(1, 0)).unwrap();
+    assert!(
+        encoder.ingest(&edge_at(minute)).is_ok(),
+        "an edge a minute ahead"
+    );
+    let kinds = [
+        stream::PAIRS,
+        stream::HEADER,
+        stream::END,
+        stream::EDGES,
+        stream::MARKS,
+        stream::DIO_LOST,
+        0x00,
+        0xff,
+    ];
+    let mut parsed = 0;
+    for seed in 1..=300u64 {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let mut encoder = Encoder::new(Context::default());
+            let _ = encoder.ingest(&Message::Header(header(shape(seed))));
+            let mut parsed = 0;
+            for _ in 0..200 {
+                let len = rng.below(600) as usize;
+                let mut bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+                if let Some(kind) = bytes.first_mut() {
+                    *kind = kinds[rng.below(kinds.len() as u64) as usize];
+                }
+                // Counts that fit the length, half the time, so whole messages get through.
+                if rng.one_in(2) {
+                    match bytes.first() {
+                        Some(&stream::PAIRS) if len >= 16 => {
+                            let k = ((len - 16) / 5).clamp(1, 99) as u16;
+                            bytes[14..16].copy_from_slice(&k.to_le_bytes());
+                        }
+                        Some(&stream::EDGES) if len >= 12 => {
+                            let e = ((len - 12) / 5).clamp(1, 99) as u16;
+                            bytes[10..12].copy_from_slice(&e.to_le_bytes());
+                        }
+                        Some(&stream::HEADER) if len >= 2 => bytes[1] = 3 + rng.below(2) as u8,
+                        _ => {}
+                    }
+                }
+                if let Ok(message) = parse(&bytes) {
+                    parsed += 1;
+                    let _ = encoder.ingest(&message);
+                    let _ = encoder.take_output();
+                }
+            }
+            let _ = encoder.finish("random");
+            parsed
+        }));
+        match outcome {
+            Ok(n) => parsed += n,
+            Err(_) => panic!("random bytes, seed {seed}"),
+        }
+    }
+    assert!(parsed > 10_000, "only {parsed} random messages parsed");
+    for seed in 1..=200u64 {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut rng = Rng(seed.wrapping_mul(0xbf58_476d_1ce4_e5b9) | 1);
+            let mut messages = stream(shape(seed));
+            for message in messages.iter_mut().skip(1) {
+                if rng.one_in(4) {
+                    mutate(message, &mut rng);
+                }
+            }
+            if rng.one_in(3) && messages.len() > 2 {
+                let (a, b) = (
+                    rng.below(messages.len() as u64),
+                    rng.below(messages.len() as u64),
+                );
+                messages.swap(a as usize, b as usize);
+            }
+            let mut encoder = Encoder::new(Context::default());
+            for message in &messages {
+                let _ = encoder.ingest(message);
+                let _ = encoder.take_output();
+            }
+            let _ = encoder.finish("mutated");
+        }));
+        assert!(outcome.is_ok(), "mutated stream, seed {seed}");
+    }
+}
