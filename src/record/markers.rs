@@ -56,6 +56,7 @@ impl Spool {
         Ok(())
     }
     /// A loss report that came with no marker.
+    #[cfg(feature = "tickwave")]
     pub fn untimed_loss(&mut self) {
         self.untimed_losses += 1;
     }
