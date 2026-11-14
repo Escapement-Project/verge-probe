@@ -489,11 +489,15 @@ impl Sigrok {
 
     /// `sample` at `time_ns`: itself, or the last pair repeated across a gap.
     fn put(&mut self, sample: &Sample, gap: bool, time_ns: u64) -> Result<()> {
+        let first = self.origin.is_none();
         self.origin.get_or_insert(time_ns);
         self.volts.push(sample.millivolts as f32 / 1e3);
         self.milliamps.push(sample.nanoamps as f32 / 1e6);
         // GAP is bit 0, then the pins in order.
         let (levels, unknown) = self.dio.at(time_ns);
+        // The first sample has no sample before it in the file, so it reads the pins at its own
+        // instant, as the CSV's first row does, not the export's seed before it.
+        let unknown = if first { self.dio.unknown } else { unknown };
         let dio = self
             .dio
             .names()

@@ -862,6 +862,74 @@ fn an_attached_streams_recording_starts_at_its_request_and_refuses_anything_befo
     assert!(matches!(encoder.ingest(&early[1]), Err(Error::Timestamps)));
 }
 
+/// An export that starts where a DIO loss ends starts as the levels arrive: unknown just before
+/// it, known at it. The sigrok session's first sample reads them as the CSV's first row does,
+/// whether a pair is at the start or the export opens with the pair before repeated there.
+#[test]
+fn an_export_from_where_a_dio_loss_ends_knows_its_first_samples_dio() {
+    use escapement_tickwave_view::{Cache, Recording};
+    let shape = Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 1,
+        dio_mask: 0b0100,
+        messages: 2,
+        end: true,
+    };
+    let header = header(shape);
+    let p = u64::from(header.period);
+    let pair = Pair {
+        voltage_code: 30_000,
+        current_code: 1_000,
+        low: true,
+        under_range: false,
+    };
+    // The levels known again at a pair, and inside pairs the probe lost (from 10p to 15p).
+    for (known_at, resume, repeated) in [(5 * p, 10 * p, 0), (12 * p, 15 * p, 1)] {
+        let sequence = 1 + (resume / p) as u32;
+        let messages = [
+            Message::Header(header.clone()),
+            Message::Pairs(Pairs::new(0, 1, ns(0), vec![pair; 10])),
+            Message::DioLost(DioLost {
+                from_ns: ns(2 * p + 1),
+                to_ns: ns(known_at),
+                levels: 0b0100,
+            }),
+            Message::Pairs(Pairs::new(0, sequence, ns(resume), vec![pair; 10])),
+            Message::End(End {
+                reason: EndReason::Stopped,
+                last_sequence: sequence + 9,
+            }),
+        ];
+        let recording =
+            Recording::open(std::sync::Arc::new(encode(&messages)), Cache::new(64 << 20)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let (csv, sr) = (dir.path().join("first.csv"), dir.path().join("first.sr"));
+        let ticks = known_at as i64..(resume + 10 * p) as i64;
+        export(&recording, &csv, true, ticks.clone(), &cancel).unwrap();
+        export(&recording, &sr, false, ticks, &cancel).unwrap();
+
+        let rows = csv_table(&csv);
+        assert_eq!(rows[0][5..], ["dio2", "dio_gap"]);
+        assert_eq!(rows[1][1], ns(known_at).to_string());
+        assert_eq!(
+            rows[1][5..],
+            ["1", "0"],
+            "the CSV's first row, known at {known_at}"
+        );
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(sr).unwrap()).unwrap();
+        let mut logic = Vec::new();
+        std::io::Read::read_to_end(&mut zip.by_name("logic-1-1").unwrap(), &mut logic).unwrap();
+        // GAP, DIO2, DIO_GAP, UNDER: DIO2 high and known, GAP high on the repeated pair.
+        assert_eq!(
+            logic[0],
+            0b0010 | repeated,
+            "the first sample, known at {known_at}"
+        );
+    }
+}
+
 /// Each export's rows, split as CSV.
 fn csv_table(path: &Path) -> Vec<Vec<String>> {
     csv::ReaderBuilder::new()
