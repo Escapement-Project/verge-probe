@@ -368,8 +368,8 @@ pub enum EnergyRanges {
     /// currents finely, and each switch disturbs the reading for about a millisecond.
     #[default]
     Auto,
-    /// The high range for the whole capture. Nothing switches, but currents under about 0.36 mA
-    /// in the 350 mA setting read unreliably and come marked under range (about 46 µA in the 50 mA
+    /// The high range for the whole capture. Nothing switches, but currents under about 0.65 mA
+    /// in the 350 mA setting read unreliably and come marked under range (about 90 µA in the 50 mA
     /// setting, scaled from that and not measured).
     High,
 }
