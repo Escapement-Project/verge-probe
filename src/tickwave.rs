@@ -25,6 +25,8 @@ use crate::stream::{Converter, CurrentRange, EndReason, Header, Markers, Message
 
 /// tickwave's format crate, for reading what this writes.
 pub use escapement_tickwave_format as format;
+/// tickwave's view crate, whose `Recording` [`export`] reads.
+pub use escapement_tickwave_view as view;
 
 pub const V: usize = 0;
 pub const I: usize = 1;
