@@ -59,3 +59,13 @@ pub use probe::{
     SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo,
     VergeProbe, VergeSession, VergeTransport, attach, is_mcu_link, prepare_probe,
 };
+
+/// docs/library.md's examples, each a program `cargo test --doc` builds.
+#[cfg(all(doctest, feature = "tickwave"))]
+#[doc = include_str!("../docs/library.md")]
+struct LibraryExamples;
+
+/// README.md's examples, which `cargo test --doc` builds.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeExamples;

@@ -6,36 +6,8 @@ bootloader entry, firmware image and release handling, updates and batch operati
 
 The library keeps update and ROM-bootloader operations behind its `Bus` API. For target debugging,
 it uses probe-rs. `VergeSession` adds typed commands for Verge firmware while keeping the attached
-probe-rs session available for normal target access:
-
-```rust,no_run
-use escapement_verge_probe::probe_rs::{Permissions, probe::list::Lister};
-use escapement_verge_probe::{VergeProbe, VergeSession, install_cjtag_support, is_mcu_link};
-
-let lister = Lister::new();
-let info = lister
-    .list_all()
-    .into_iter()
-    .find(is_mcu_link)
-    .expect("no MCU-Link found");
-let mut probe = info.open()?;
-install_cjtag_support(&mut probe)?;
-{
-    let mut verge = VergeProbe::new(&mut probe);
-    let info = verge.info()?.expect("probe does not run Verge firmware");
-    if info.supports_target_power() {
-        verge.set_target_power(true)?;
-    }
-}
-let mut session = probe.attach("MSPM0L1306", Permissions::default())?;
-let mut verge = VergeSession::new(&mut session);
-let info = verge.info()?;
-let target_sense = verge.read_target_sense()?;
-let spi = verge.spi_transfer(100_000, escapement_verge_probe::SpiMode::Mode0, false, &[0xA5])?;
-let i2c = verge.i2c_transfer(0x50, 100_000, &[0], 2)?;
-let _target_core = verge.session().core(0)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
+probe-rs session available for normal target access. [docs/library.md](docs/library.md) has
+examples for a tool built on the library, which `cargo test --doc` builds.
 
 Typed commands fail with `CommandError`, which says whether the connection failed, the firmware
 lacks the command, the request was out of range, the reply broke the protocol, or the firmware
