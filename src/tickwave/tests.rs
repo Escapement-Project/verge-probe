@@ -266,7 +266,9 @@ fn decode(file: &[u8]) -> Decoded {
             .unwrap();
         for (c, channel) in block.channels.into_iter().enumerate() {
             match channel {
-                BlockChannel::Digital { edges: e, .. } => edges[c].extend(e),
+                BlockChannel::Digital {
+                    edges: e, source, ..
+                } => edges[c].extend(source.unwrap_or(e)),
                 BlockChannel::Analog { values, .. } => {
                     codes[c].extend(values.iter().map(|sample| match sample {
                         escapement_tickwave_format::model::Sample::U64(code) => code,
@@ -363,12 +365,12 @@ fn pin_events_archive(archive: &Archive, pin: u8, clock_hz: u32, base: i64) -> V
     let mut level: Option<bool> = None;
     archive
         .digital_spans(Interval::new(0, u64::MAX / 2), &cancel, |span| {
-            let at = tick(span.interval.start_ns, clock_hz) - base;
+            let at = tick(span.interval.start_ns, clock_hz);
             let new = span.levels.map(|levels| levels & (1 << pin) != 0);
             match (level, new) {
                 (Some(a), Some(b)) if a != b => events.push(Event::Edge(at)),
                 (Some(_), None) => events.push(Event::Unknown(at)),
-                (None, Some(b)) if !events.is_empty() || at > 0 => {
+                (None, Some(b)) if !events.is_empty() || at > base => {
                     events.push(Event::Known(at, b));
                 }
                 _ => {}
@@ -427,7 +429,8 @@ fn compare(shape: Shape) -> Tally {
     let cancel = AtomicBool::new(false);
     let header = header(shape);
     let period = i64::from(header.period);
-    // The capture's tick at the recording's tick 0.
+    // The capture's tick at the recording's tick 0. The header and blocks hold the capture's
+    // ticks, the annotations the recording's.
     let base = -d.header.sources[0].origin;
 
     // Samples: the same ticks, readings and flags.
@@ -467,7 +470,7 @@ fn compare(shape: Shape) -> Tally {
         );
         assert_eq!(
             at,
-            tick(s.time_ns, CLOCK) - base,
+            tick(s.time_ns, CLOCK),
             "sample {i}, seed {}",
             shape.seed
         );
@@ -526,8 +529,8 @@ fn compare(shape: Shape) -> Tally {
 
     // The range channels: unknown before the first sample, and over each break that lost pairs.
     let mut expected = Vec::new();
-    if *count > 0 && *first > 0 {
-        expected.push((0, *first));
+    if *count > 0 && *first > base {
+        expected.push((base, *first));
     }
     for w in runs.windows(2).filter(|w| w[1].lost > 0) {
         let n = w[1].index;
@@ -554,11 +557,11 @@ fn compare(shape: Shape) -> Tally {
     }
     for (span, &(from, to)) in lost.iter().zip(&mine) {
         assert!(
-            span.start_ns.abs_diff(nanos(from + base, CLOCK)) <= 1,
+            span.start_ns.abs_diff(nanos(from, CLOCK)) <= 1,
             "{span:?} {from}"
         );
         assert!(
-            span.end_ns.abs_diff(nanos(to + base, CLOCK)) <= 1 + (span.duration_ns() / 1000),
+            span.end_ns.abs_diff(nanos(to, CLOCK)) <= 1 + (span.duration_ns() / 1000),
             "{span:?} {to}"
         );
     }
@@ -570,8 +573,8 @@ fn compare(shape: Shape) -> Tally {
         let mut mine = pin_events_tickwave(&d, c);
         if shape.first_sequence > 1 {
             // An attached stream's pins are unknown until it started; the archive takes them as
-            // known from tick 0.
-            assert_eq!(mine.first(), Some(&Event::Unknown(0)));
+            // known from the recording's start.
+            assert_eq!(mine.first(), Some(&Event::Unknown(base)));
             let Some(&Event::Known(to, _)) = mine.get(1) else {
                 panic!("an attached stream's first gap, seed {}", shape.seed);
             };
@@ -1067,17 +1070,16 @@ fn compare_exports(seed: u64, messages: &[Message]) -> (usize, usize, usize) {
     // From where no pair is, so the export opens with the pair before moved there, or with none:
     // inside a span the probe lost or paused, and before the first pair. And to inside one, so a
     // sigrok session repeats the last pair up to the end.
-    let holes: Vec<i64> = runs
-        .breaks
-        .iter()
-        .filter(|b| b.index > 0)
-        .filter_map(|b| {
-            let end = escapement_tickwave_view::runs::place_after(&runs, b.index - 1);
-            (b.tick > end + 1).then(|| end + (b.tick - end) / 2)
+    let holes: Vec<i64> = (0..runs.breaks.len())
+        .filter(|&k| runs.breaks[k].index > 0)
+        .filter_map(|k| {
+            let end = escapement_tickwave_view::runs::place_after(&runs, runs.breaks[k].index - 1);
+            let at = runs.break_tick(k);
+            (at > end + 1).then(|| end + (at - end) / 2)
         })
         .collect();
-    if runs.count > 0 && runs.first > 1 {
-        cases.push(case(runs.first / 2, runs.tick(runs.count / 2) + half));
+    if runs.count > 0 && runs.start() > 1 {
+        cases.push(case(runs.start() / 2, runs.tick(runs.count / 2) + half));
     }
     for pair in holes.windows(2).take(2) {
         cases.push(case(pair[0], pair[1]));

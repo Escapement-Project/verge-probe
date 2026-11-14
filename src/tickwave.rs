@@ -12,6 +12,7 @@ use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
     SourceFormat, SourceHeader,
 };
+use escapement_tickwave_format::mapping::{Spacing, finest_shift};
 use escapement_tickwave_format::model::{Gap, Ratio};
 use escapement_tickwave_format::recut::Recutter;
 use escapement_tickwave_format::snapshot::Snapshot;
@@ -102,10 +103,10 @@ pub fn write_options() -> WriteOptions {
     }
 }
 
-/// The finest overview level's shift for a pair period: about a thousand pairs a bucket, at
-/// most 2^24 ticks.
-fn overview_shift(period: u32) -> u8 {
-    (f64::from(period) * 1024.0).log2().round().clamp(0.0, 24.0) as u8
+/// The finest overview level's shift for a pair period, by tickwave's rule for the densest
+/// channel. The source's ticks are the recording's, so a pair's spacing on the axis is its period.
+fn overview_shift(period: Ratio) -> u8 {
+    finest_shift(Some(Spacing::of_samples(period, Ratio::ONE)))
 }
 
 fn int(scale: i64) -> AnalogCoding {
@@ -278,6 +279,8 @@ struct RunStart {
     lost: u64,
 }
 
+/// Every tick held here is the capture's, as the source's ticks are. The axis starts at `base`,
+/// so an annotation, a flush and the length go to the writer `base` earlier.
 struct Open {
     writer: Writer,
     header: Header,
@@ -409,7 +412,7 @@ impl Encoder {
         if let Some(open) = self.open.as_mut()
             && open.released > open.flushed
         {
-            open.writer.flush(open.released)?;
+            open.writer.flush(open.released - open.base)?;
             open.flushed = open.released;
         }
         Ok(())
@@ -497,7 +500,7 @@ impl Open {
             sources: vec![source],
             title: None,
             meta: BTreeMap::new(),
-            overview_shift: overview_shift(header.period),
+            overview_shift: overview_shift(period),
         };
         Ok(Self {
             writer: Writer::new(declaration, write_options())?,
@@ -517,7 +520,7 @@ impl Open {
             last_sample: None,
             range: [None, None],
             dio_levels: from_start.then_some(header.dio_levels),
-            dio_end: 0,
+            dio_end: base,
             markers: 0,
             marker_losses: 0,
             marker_ticks: HashMap::new(),
@@ -525,8 +528,8 @@ impl Open {
             lost_before: 0,
             lost_after: 0,
             reason: None,
-            released: 0,
-            flushed: 0,
+            released: base,
+            flushed: base,
         })
     }
 
@@ -540,7 +543,7 @@ impl Open {
         // earlier than its sequence puts it, and no more than `ahead` later.
         let due = self
             .last_pair
-            .map_or(0, |last| last.saturating_add(self.period))
+            .map_or(self.base, |last| last.saturating_add(self.period))
             .saturating_add(
                 i64::try_from(missing)
                     .unwrap_or(i64::MAX)
@@ -582,12 +585,12 @@ impl Open {
         Ok(())
     }
 
-    /// The probe's time `ns` as the recording's tick. Nothing the stream stamps comes before its
-    /// start, so a time that would is refused rather than moved.
+    /// The probe's time `ns` as the capture's tick. Nothing the stream stamps comes before the
+    /// recording's start, so a time that would is refused rather than moved.
     fn at(&self, ns: u64) -> Result<i64> {
         let ticks = (u128::from(ns) * u128::from(self.clock_hz)).div_ceil(1_000_000_000);
-        let at = i64::try_from(ticks).map_err(|_| Error::Timestamps)? - self.base;
-        if at < 0 {
+        let at = i64::try_from(ticks).map_err(|_| Error::Timestamps)?;
+        if at < self.base {
             return Err(Error::Timestamps);
         }
         Ok(at)
@@ -604,7 +607,12 @@ impl Open {
     /// newest pair, or of the start before any.
     fn stamp(&self, ns: u64) -> Result<i64> {
         let at = self.at(ns)?;
-        if at > self.last_pair.unwrap_or(0).saturating_add(self.ahead()) {
+        if at
+            > self
+                .last_pair
+                .unwrap_or(self.base)
+                .saturating_add(self.ahead())
+        {
             return Err(Error::Timestamps);
         }
         Ok(at)
@@ -653,10 +661,11 @@ impl Open {
         }
         for (index, marker) in markers.markers.iter().enumerate() {
             let tick = self.stamp(marker.time_ns)?;
-            let seen = self.marker_ticks.entry(tick).or_default();
+            let at = tick - self.base;
+            let seen = self.marker_ticks.entry(at).or_default();
             let id = match *seen {
-                0 => format!("marker/{tick}"),
-                n => format!("marker/{tick}.{n}"),
+                0 => format!("marker/{at}"),
+                n => format!("marker/{at}.{n}"),
             };
             *seen += 1;
             let kind = if index == 0 && markers.lost() {
@@ -667,7 +676,7 @@ impl Open {
             let mut annotation = serde_json::Map::new();
             annotation.insert("id".into(), id.into());
             annotation.insert("kind".into(), kind.into());
-            annotation.insert("start".into(), tick.into());
+            annotation.insert("start".into(), at.into());
             annotation.insert(
                 "label".into(),
                 crate::record::marker_label(&marker.label).into(),
@@ -704,8 +713,8 @@ impl Open {
         Ok(())
     }
 
-    /// An attached stream's pins are unknown from tick 0 until it started: before its first pair,
-    /// and before its first edge or loss report.
+    /// An attached stream's pins are unknown from the recording's start until the stream started:
+    /// before its first pair, and before its first edge or loss report.
     fn first_dio_gap(&mut self) -> Result<()> {
         let levels = self.header.dio_levels;
         self.dio_levels = Some(levels);
@@ -718,13 +727,12 @@ impl Open {
         .min();
         for (i, &k) in self.pins.iter().enumerate() {
             let level = levels & (1 << k) != 0;
+            let from = self.base;
             match to {
-                Some(to) if to >= 1 => {
-                    self.writer.gap(FIRST_DIO + i, Gap { from: 0, to, level })?
-                }
-                // With no room for a gap (the first item at tick 0 or 1), the pins read as known
-                // from tick 0, at most a tick early.
-                _ if level => self.writer.edge(FIRST_DIO + i, 0)?,
+                Some(to) if to > from => self.writer.gap(FIRST_DIO + i, Gap { from, to, level })?,
+                // With no room for a gap (the first item at the start or a tick after it), the
+                // pins read as known from the start, at most a tick early.
+                _ if level => self.writer.edge(FIRST_DIO + i, from)?,
                 _ => {}
             }
         }
@@ -757,15 +765,15 @@ impl Open {
         for (k, flag) in flags.into_iter().enumerate() {
             let c = LOW_RANGE + k;
             match self.range[k] {
-                None if tick == 0 => {
+                None if tick == self.base => {
                     if flag {
-                        self.writer.edge(c, 0)?;
+                        self.writer.edge(c, tick)?;
                     }
                 }
                 None => self.writer.gap(
                     c,
                     Gap {
-                        from: 0,
+                        from: self.base,
                         to: tick,
                         level: flag,
                     },
@@ -822,21 +830,20 @@ impl Open {
     }
 
     fn finish(mut self, stem: &str) -> Result<Finished> {
-        let length = [
+        let end = [
             self.last_sample.map(|t| t + self.period),
             self.last_marker.map(|t| t + 1),
             Some(self.dio_end),
-            Some(1),
+            Some(self.base + 1),
         ]
         .into_iter()
         .flatten()
         .max()
         .expect("one candidate");
-        // A channel never known reads as unknown throughout: a gap to the length leaves its end at
-        // tick 0.
+        // A channel never known reads as unknown throughout: a gap from its start to the end.
         let never = Gap {
-            from: 0,
-            to: length,
+            from: self.base,
+            to: end,
             level: false,
         };
         for k in 0..2 {
@@ -849,7 +856,7 @@ impl Open {
                 self.writer.gap(FIRST_DIO + i, never)?;
             }
         }
-        let ends = vec![length; 2 + self.pins.len()];
+        let ends = vec![end; 2 + self.pins.len()];
         let mut extra = BTreeMap::new();
         extra.insert("pairs_lost_before".into(), self.lost_before.to_string());
         extra.insert("pairs_lost_after".into(), self.lost_after.to_string());
@@ -861,7 +868,7 @@ impl Open {
             bundle: Some(Bundle::Generated { stem: stem.into() }),
             drop_gaps_past_end: false,
         };
-        Ok(self.writer.finish(length, &ends, finish)?)
+        Ok(self.writer.finish(end - self.base, &ends, finish)?)
     }
 }
 
