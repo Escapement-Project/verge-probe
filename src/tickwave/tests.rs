@@ -1148,6 +1148,61 @@ fn same_sigrok(archive: &Path, recording: &Path, case: &str) -> usize {
     a.len()
 }
 
+/// A file whose marker bundle doesn't resolve still opens, and its export is refused rather than
+/// written without the markers.
+#[test]
+fn an_export_of_a_file_whose_markers_dont_resolve_is_refused() {
+    use escapement_tickwave_view::{Cache, Recording};
+    let header = header(Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 1,
+        dio_mask: 0,
+        messages: 1,
+        end: true,
+    });
+    let p = u64::from(header.period);
+    let pair = Pair {
+        voltage_code: 30_000,
+        current_code: 1_000,
+        low: true,
+        under_range: false,
+    };
+    let marker = Marker {
+        time_ns: ns(3 * p),
+        number: 1,
+        label: b"m".to_vec(),
+    };
+    let messages = [
+        Message::Header(header),
+        Message::Pairs(Pairs::new(0, 1, ns(0), vec![pair; 10])),
+        Message::Markers(Markers::new(0, vec![marker])),
+        Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 10,
+        }),
+    ];
+    let mut file = encode(&messages);
+    let (at, len) = Index::of_file(&file).unwrap().footer.bundle.unwrap();
+    file[(at + u64::from(len) / 2) as usize] ^= 0xff;
+    let recording = Recording::open(std::sync::Arc::new(file), Cache::new(64 << 20)).unwrap();
+    assert!(recording.has_markers());
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (name, csv) in [("markers.csv", true), ("markers.sr", false)] {
+        let path = dir.path().join(name);
+        let error = export(&recording, &path, csv, 0..i64::MAX / 4, &cancel).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::View(escapement_tickwave_view::Error::Annotations(_))
+            ),
+            "{name}: {error}"
+        );
+        assert!(!path.exists(), "{name}");
+    }
+}
+
 /// An export reaches past the pairs for what the recording holds there: a marker before the
 /// first pair, and the pins of a recording with no pair.
 #[test]

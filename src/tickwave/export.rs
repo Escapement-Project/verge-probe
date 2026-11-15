@@ -395,6 +395,8 @@ pub fn export(
         return Err(Error::Exists(path.to_owned()));
     }
     let layout = Layout::new(recording)?;
+    // A bundle that doesn't resolve leaves the markers empty, which would export as none.
+    recording.load_markers()?;
     // Only the sink holds the file open, so a CSV marker merge can rename over it.
     let (file, temp) = temp_beside(path)?.into_parts();
     let mut sink = Sink::from_file(file, &temp, csv)?;
