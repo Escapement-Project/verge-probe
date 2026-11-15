@@ -1148,6 +1148,68 @@ fn same_sigrok(archive: &Path, recording: &Path, case: &str) -> usize {
     a.len()
 }
 
+/// An export reaches past the pairs for what the recording holds there: a marker before the
+/// first pair, and the pins of a recording with no pair.
+#[test]
+fn an_export_reaches_the_markers_and_pins_outside_the_pairs() {
+    use escapement_tickwave_view::{Cache, Recording};
+    let shape = |dio_mask| Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 1,
+        dio_mask,
+        messages: 1,
+        end: true,
+    };
+    let p = u64::from(header(shape(0)).period);
+    let pair = Pair {
+        voltage_code: 30_000,
+        current_code: 1_000,
+        low: true,
+        under_range: false,
+    };
+    let marker = Marker {
+        time_ns: ns(2 * p),
+        number: 7,
+        label: b"early".to_vec(),
+    };
+    let early = [
+        Message::Header(header(shape(0))),
+        Message::Markers(Markers::new(0, vec![marker])),
+        // The first four pairs lost.
+        Message::Pairs(Pairs::new(0, 5, ns(4 * p), vec![pair; 10])),
+        Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 14,
+        }),
+    ];
+    let unpaired = [
+        Message::Header(header(shape(0b0001))),
+        Message::Edges(Edges::new_at(vec![(5 * p, 0)])),
+        Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 0,
+        }),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    let rows = |name: &str, messages: &[Message]| {
+        let recording =
+            Recording::open(std::sync::Arc::new(encode(messages)), Cache::new(64 << 20)).unwrap();
+        let path = dir.path().join(name);
+        export(&recording, &path, true, 0..i64::MAX / 4, &cancel).unwrap();
+        csv_table(&path)
+    };
+    let early = rows("early.csv", &early);
+    assert_eq!(early[1][1..], ["2000000", "", "", "", "7", "early", "0"]);
+    assert_eq!(early[2][..2], ["5", "4000000"]);
+    let unpaired = rows("unpaired.csv", &unpaired);
+    assert_eq!(unpaired[1][1..], ["0", "", "", "", "1", "0"]);
+    assert_eq!(unpaired[2][1], ns(5 * p).to_string());
+    assert_eq!(unpaired[2][2..], ["", "", "", "0", "0"]);
+    assert_eq!(unpaired.len(), 3);
+}
+
 /// One stream through both writers, exported whole and over selections from both, compared.
 /// Returns the CSV rows, sigrok members and selections compared.
 fn compare_exports(seed: u64, messages: &[Message]) -> (usize, usize, usize) {

@@ -75,6 +75,37 @@ impl<'a> Layout<'a> {
     fn runs(&self) -> Result<Runs<'a>> {
         Ok(self.recording.runs(self.v)?)
     }
+
+    /// Where an export's rows can fall: from the first pair to the end of the last one's time,
+    /// or the flags' and pins' known span with no pair, widened by the markers. tickwave's extent
+    /// also reaches over the pairs lost before the first and after the last.
+    fn extent(&self) -> Result<Option<Range<i64>>> {
+        let mut extent: Option<Range<i64>> = None;
+        let mut widen = |r: Range<i64>| {
+            if r.end > r.start {
+                extent = Some(match extent.take() {
+                    None => r,
+                    Some(e) => e.start.min(r.start)..e.end.max(r.end),
+                });
+            }
+        };
+        match self.recording.known(self.v)? {
+            ChannelPlace::Analog { runs, end } if runs.count > 0 => widen(runs.start()..end),
+            _ => {
+                let digital = [self.low, self.under].into_iter();
+                for c in digital.chain(self.pins.iter().map(|&(_, c)| c)) {
+                    if let ChannelPlace::Digital { start, end, .. } = self.recording.known(c)? {
+                        widen(start..end);
+                    }
+                }
+            }
+        }
+        let all = self.recording.markers(i64::MIN..i64::MAX, None, usize::MAX);
+        for a in all.entries.iter().map(|m| &m.annotation) {
+            widen(a.start..a.end.unwrap_or(a.start).max(a.start + 1));
+        }
+        Ok(extent)
+    }
 }
 
 /// A pin's history from a tick on: its level, whether it is known, and what changes it next.
@@ -376,7 +407,7 @@ pub fn export(
         sink.include_markers()?;
     }
     sink.begin_with_dio_gaps(layout.header.whole_rate(), pins, layout.header.dio_levels)?;
-    let extent = recording.extent().unwrap_or(0..0);
+    let extent = layout.extent()?.unwrap_or(0..0);
     let clipped = interval.start.max(extent.start)..interval.end.min(extent.end);
     export_markers(&layout, &mut sink, clipped.clone(), cancel)?;
     if pins == 0 {
