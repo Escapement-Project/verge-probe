@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use escapement_tickwave_format::decode::{DecodeError, Footer};
@@ -1005,11 +1007,59 @@ pub fn compact(path: &Path) -> Result<()> {
 pub struct FileWriter {
     path: PathBuf,
     file: File,
+    syncer: Syncer,
     encoder: Encoder,
     flushed: Instant,
     flush_every: Duration,
+    /// A flush whose bytes are not all in the file yet, to sync once they are.
+    unsynced: bool,
     published: Option<Instant>,
     latest: Arc<Mutex<Option<Snapshot>>>,
+}
+
+/// Syncs the file to the disk on a thread of its own, so a slow disk holds up no message.
+struct Syncer {
+    wake: Option<SyncSender<()>>,
+    thread: Option<JoinHandle<std::io::Result<()>>>,
+}
+
+impl Syncer {
+    fn new(file: &File) -> Result<Self> {
+        let file = file.try_clone()?;
+        let (wake, woken) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("capture-sync".into())
+            .spawn(move || {
+                while woken.recv().is_ok() {
+                    file.sync_data()?;
+                }
+                Ok(())
+            })?;
+        Ok(Self {
+            wake: Some(wake),
+            thread: Some(thread),
+        })
+    }
+
+    /// Asks for what is written so far to reach the disk. A sync already asked for and not yet
+    /// begun covers it. A sync that failed is this call's error.
+    fn ask(&mut self) -> Result<()> {
+        match self.wake.as_ref().map(|wake| wake.try_send(())) {
+            Some(Err(TrySendError::Disconnected(()))) => self.stop(),
+            _ => Ok(()),
+        }
+    }
+
+    /// Ends the thread after the sync it is in, if any, closing its handle on the file.
+    fn stop(&mut self) -> Result<()> {
+        self.wake.take();
+        match self.thread.take() {
+            Some(thread) => Ok(thread
+                .join()
+                .map_err(|_| std::io::Error::other("the sync thread panicked"))??),
+            None => Ok(()),
+        }
+    }
 }
 
 /// How far a stream may stamp past what its pairs account for, in seconds (`Open::ahead`).
@@ -1032,10 +1082,12 @@ impl FileWriter {
             })?;
         Ok(Self {
             path: path.to_owned(),
+            syncer: Syncer::new(&file)?,
             file,
             encoder: Encoder::new(context),
             flushed: Instant::now(),
             flush_every: FLUSH_EVERY,
+            unsynced: false,
             published: None,
             latest: Arc::default(),
         })
@@ -1075,6 +1127,7 @@ impl FileWriter {
         if self.flushed.elapsed() >= self.flush_every {
             self.encoder.flush()?;
             self.flushed = Instant::now();
+            self.unsynced = true;
         }
         self.take_output()?;
         if self
@@ -1093,11 +1146,24 @@ impl FileWriter {
         if !bytes.is_empty() {
             self.file.write_all(&bytes)?;
         }
+        // A power cut then loses no more than a crash: what came after the last flush.
+        if self.unsynced && !self.encoder.pending() {
+            self.syncer.ask()?;
+            self.unsynced = false;
+        }
         Ok(())
     }
 
     /// Ends the recording and compacts it. A stream that never sent its header leaves no file.
     pub fn finish(mut self) -> Result<()> {
+        // Compacting renames a copy over the file, which Windows refuses while a handle is open.
+        // A sync that failed is reported once the recording is finished as far as it can be.
+        let synced = self.syncer.stop();
+        let finished = self.finish_file();
+        synced.and(finished)
+    }
+
+    fn finish_file(mut self) -> Result<()> {
         let bytes = self.encoder.take_output();
         self.file.write_all(&bytes)?;
         let encoder = std::mem::replace(&mut self.encoder, Encoder::new(Context::default()));
