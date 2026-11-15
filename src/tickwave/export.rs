@@ -260,7 +260,7 @@ impl<'a> Pairs<'a> {
         let first_sequence = layout
             .header
             .first_sequence
-            .wrapping_add(layout.count("pairs_lost_before") as u32);
+            .wrapping_add(layout.recording.lost_before(layout.v) as u32);
         Ok(Self {
             layout,
             runs: layout.runs()?,

@@ -4,9 +4,9 @@
 use super::*;
 use crate::capture::{Archive, CaptureWriter, Interval};
 use crate::stream::{DioLost, Edge, Edges, End, Marker, Pair};
-use escapement_tickwave_format::decode::{BlockChannel, Footer};
+use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::header::ChannelKind;
-use escapement_tickwave_format::model::sample_tick;
+use escapement_tickwave_format::model::{Break, sample_tick};
 use std::sync::atomic::AtomicBool;
 
 const CLOCK: u32 = 96_000_000;
@@ -252,23 +252,26 @@ struct Decoded {
     header: escapement_tickwave_format::header::Header,
     edges: Vec<Vec<i64>>,
     codes: Vec<Vec<u64>>,
+    /// Each digital channel's gaps, inline or paged.
+    gaps: Vec<Vec<Gap>>,
+    /// Each analog channel's breaks, inline or paged.
+    breaks: Vec<Vec<Break>>,
+    /// Each channel's blocks.
+    blocks: Vec<usize>,
     annotations: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
+/// Read block by block through the format crate, apart from the view crate the export reads with.
 fn decode(file: &[u8]) -> Decoded {
-    let head = Footer::parse_file(file).unwrap();
-    let n = head.header.channels.len();
+    let index = Index::of_file(file).unwrap();
+    let n = index.header().channels.len();
     let (mut edges, mut codes) = (vec![Vec::new(); n], vec![Vec::new(); n]);
-    for i in 0..head.rows.len() {
-        let (offset, len) = head.block_location(i);
-        let block = head
-            .decode_block(i, &file[offset as usize..][..len as usize])
-            .unwrap();
-        for (c, channel) in block.channels.into_iter().enumerate() {
-            match channel {
-                BlockChannel::Digital {
-                    edges: e, source, ..
-                } => edges[c].extend(source.unwrap_or(e)),
+    for c in 0..n {
+        for block in index.channel_blocks(file, c).unwrap() {
+            match &block.data {
+                BlockChannel::Digital { .. } => {
+                    edges[c].extend_from_slice(block.data.source_ticks().unwrap());
+                }
                 BlockChannel::Analog { values, .. } => {
                     codes[c].extend(values.iter().map(|sample| match sample {
                         escapement_tickwave_format::model::Sample::U64(code) => code,
@@ -278,8 +281,20 @@ fn decode(file: &[u8]) -> Decoded {
             }
         }
     }
+    let footer = &index.footer;
+    let gaps = (0..n)
+        .map(|c| footer.gaps(c).unwrap_or_default().to_vec())
+        .collect();
+    let breaks = (0..n)
+        .map(|c| footer.breaks(c).unwrap_or_default().to_vec())
+        .collect();
     let mut annotations = Vec::new();
-    for (name, text) in head.header.annotations.iter().flatten() {
+    for (name, text) in footer
+        .read_bundle(from_memory(file))
+        .unwrap()
+        .iter()
+        .flatten()
+    {
         if name.ends_with(".jsonl") {
             for line in text.lines().skip(1) {
                 annotations.push(serde_json::from_str(line).unwrap());
@@ -287,26 +302,24 @@ fn decode(file: &[u8]) -> Decoded {
         }
     }
     Decoded {
-        header: head.header,
+        header: footer.header.clone(),
         edges,
         codes,
+        gaps,
+        breaks,
+        blocks: index.blocks.iter().map(Vec::len).collect(),
         annotations,
     }
 }
 
 /// A digital channel's level at `tick`, from its initial level, edges and gaps; none inside a gap.
-fn level_at(
-    header: &escapement_tickwave_format::header::Header,
-    edges: &[i64],
-    c: usize,
-    tick: i64,
-) -> Option<bool> {
-    let ChannelKind::Digital { initial, gaps, .. } = &header.channels[c].data else {
+fn level_at(d: &Decoded, c: usize, tick: i64) -> Option<bool> {
+    let ChannelKind::Digital { initial, .. } = &d.header.channels[c].data else {
         panic!("digital");
     };
     let mut level = *initial;
-    let mut gaps = gaps.iter().peekable();
-    let mut edges = edges.iter().peekable();
+    let mut gaps = d.gaps[c].iter().peekable();
+    let mut edges = d.edges[c].iter().peekable();
     loop {
         let edge = edges.peek().map(|&&t| t).filter(|&t| t <= tick);
         let gap = gaps.peek().filter(|g| g.from <= tick);
@@ -343,9 +356,7 @@ enum Event {
 }
 
 fn pin_events_tickwave(d: &Decoded, c: usize) -> Vec<Event> {
-    let ChannelKind::Digital { gaps, .. } = &d.header.channels[c].data else {
-        panic!("digital");
-    };
+    let gaps = &d.gaps[c];
     let mut events: Vec<Event> = d.edges[c].iter().map(|&t| Event::Edge(t)).collect();
     for g in gaps {
         events.push(Event::Unknown(g.from));
@@ -417,6 +428,9 @@ struct Tally {
     markers: usize,
     after_loss: usize,
     attached: usize,
+    /// Shapes that lost pairs before the first, and after the last.
+    lost_first: usize,
+    lost_last: usize,
 }
 
 fn compare(shape: Shape) -> Tally {
@@ -443,13 +457,15 @@ fn compare(shape: Shape) -> Tally {
         .unwrap();
     let ChannelKind::Analog {
         first,
-        breaks,
         count,
+        lost_before,
+        lost_after,
         ..
     } = &d.header.channels[V].data
     else {
         panic!("analog");
     };
+    let breaks = &d.breaks[V];
     assert_eq!(*count as usize, stored.len(), "{}", shape.seed);
     let mut runs = vec![escapement_tickwave_format::model::Break {
         index: 0,
@@ -477,13 +493,13 @@ fn compare(shape: Shape) -> Tally {
         assert_eq!(d.codes[V][i], u64::from(s.millivolts));
         assert_eq!(d.codes[I][i], u64::from(s.nanoamps));
         assert_eq!(
-            level_at(&d.header, &d.edges[LOW_RANGE], LOW_RANGE, at),
+            level_at(&d, LOW_RANGE, at),
             Some(s.range == Some(CurrentRange::Low)),
             "low_range at sample {i}, seed {}",
             shape.seed
         );
         assert_eq!(
-            level_at(&d.header, &d.edges[UNDER_RANGE], UNDER_RANGE, at),
+            level_at(&d, UNDER_RANGE, at),
             Some(s.under_range),
             "under_range at sample {i}"
         );
@@ -510,13 +526,11 @@ fn compare(shape: Shape) -> Tally {
         .collect();
     assert_eq!(lost.len(), mine.len(), "lost spans, seed {}", shape.seed);
     tally.samples = stored.len();
+    tally.lost_first = usize::from(*lost_before > 0);
+    tally.lost_last = usize::from(*lost_after > 0);
     tally.lost_spans = lost.len();
-    // Every pair lost: in breaks, and before the first or after the last, which the extra counts.
-    let extra = &d.header.sources[0].extra;
-    let edges_lost: u64 = ["pairs_lost_before", "pairs_lost_after"]
-        .iter()
-        .map(|key| extra[*key].parse::<u64>().unwrap())
-        .sum();
+    // Every pair lost: in breaks, and before the first or after the last.
+    let edges_lost = lost_before + lost_after;
     let view = archive
         .view(Interval::new(0, u64::MAX / 2), 1, &cancel)
         .unwrap();
@@ -527,7 +541,8 @@ fn compare(shape: Shape) -> Tally {
         shape.seed
     );
 
-    // The range channels: unknown before the first sample, and over each break that lost pairs.
+    // The range channels: unknown before the first sample and over each break that lost pairs,
+    // and known to the last sample's end.
     let mut expected = Vec::new();
     if *count > 0 && *first > base {
         expected.push((base, *first));
@@ -543,11 +558,26 @@ fn compare(shape: Shape) -> Tally {
             expected.push((last + period, w[1].tick));
         }
     }
+    let range_end = match runs.last() {
+        Some(r) if *count > 0 => {
+            sample_tick(
+                r.tick,
+                Ratio::integer(header.period as u64).unwrap(),
+                *count - 1 - r.index,
+            ) + period
+        }
+        _ => base,
+    };
     for c in [LOW_RANGE, UNDER_RANGE] {
-        let ChannelKind::Digital { gaps, .. } = &d.header.channels[c].data else {
+        let ChannelKind::Digital { end, .. } = d.header.channels[c].data else {
             panic!("digital");
         };
-        let gaps: Vec<(i64, i64)> = gaps.iter().map(|g| (g.from, g.to)).collect();
+        assert_eq!(
+            end, range_end,
+            "range end, channel {c}, seed {}",
+            shape.seed
+        );
+        let gaps: Vec<(i64, i64)> = d.gaps[c].iter().map(|g| (g.from, g.to)).collect();
         assert_eq!(
             gaps, expected,
             "range gaps, channel {c}, seed {}",
@@ -686,12 +716,15 @@ fn the_encoder_holds_what_the_archive_holds() {
         total.markers += t.markers;
         total.after_loss += t.after_loss;
         total.attached += t.attached;
+        total.lost_first += t.lost_first;
+        total.lost_last += t.lost_last;
     }
     eprintln!("{total:?}");
     // A comparison that checked nothing passes too: each kind must have come up.
     assert!(total.samples > 100_000 && total.lost_spans > 20 && total.range_gaps > 20);
     assert!(total.dio_events > 1_000 && total.dio_gaps > 20);
     assert!(total.markers > 50 && total.after_loss > 5 && total.attached > 3);
+    assert!(total.lost_first > 3 && total.lost_last > 3);
 }
 
 #[test]
@@ -712,17 +745,12 @@ fn ticks_round_trip_through_the_probes_ns() {
 }
 
 /// Each sample's tick and codes, and each marker's start, from a finished file.
-fn content(file: &[u8]) -> (Vec<(i64, u64, u64)>, Vec<i64>, u32) {
+fn content(file: &[u8]) -> (Vec<(i64, u64, u64)>, Vec<i64>, usize) {
     let d = decode(file);
-    let ChannelKind::Analog {
-        first,
-        breaks,
-        period,
-        ..
-    } = &d.header.channels[V].data
-    else {
+    let ChannelKind::Analog { first, period, .. } = &d.header.channels[V].data else {
         panic!("analog");
     };
+    let breaks = &d.breaks[V];
     let samples = (0..d.codes[V].len())
         .map(|i| {
             let at = escapement_tickwave_format::model::run_sample_tick(
@@ -737,7 +765,7 @@ fn content(file: &[u8]) -> (Vec<(i64, u64, u64)>, Vec<i64>, u32) {
         .map(|a| a["start"].as_i64().unwrap())
         .collect();
     markers.sort_unstable();
-    (samples, markers, d.header.blocks)
+    (samples, markers, d.blocks[V])
 }
 
 fn write_with_file_writer(path: &Path, messages: &[Message], finish: bool) {
@@ -785,10 +813,85 @@ fn a_file_writer_flushes_then_compacts_to_the_same_content() {
     );
     let (samples, markers, count) = content(&compacted);
     assert!(count < 5, "compacted to full-size blocks: {count}");
+    // Each channel's overview follows its own rate: the flags change far less often than pairs
+    // come, so theirs is coarser.
+    let header = Footer::parse_file(&compacted).unwrap().header;
+    let shifts = shifts_for(&header);
+    for (c, &shift) in shifts.iter().enumerate() {
+        assert_eq!(header.shift(c), Some(shift), "channel {c}");
+    }
+    assert!(shifts[LOW_RANGE] > shifts[V], "{shifts:?}");
     let (whole_samples, whole_markers, _) = content(&whole);
     assert_eq!((samples, markers), (whole_samples, whole_markers));
     // Nothing is left beside it.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_stalled_streams_last_blocks_reach_the_file_on_the_recorders_clock() {
+    let messages = stream(Shape {
+        seed: 5,
+        rate: 100_000,
+        first_sequence: 1,
+        dio_mask: 0,
+        messages: 400,
+        end: false,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.tickwave");
+    let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+    writer.flush_every = Duration::MAX;
+    for message in &messages {
+        writer.ingest(message).unwrap();
+    }
+    // The stream stalls with more in its open blocks than one call compresses.
+    writer.flush_every = Duration::ZERO;
+    writer.write().unwrap();
+    assert!(writer.encoder.pending());
+    writer.flush().unwrap();
+    assert!(!writer.encoder.pending());
+}
+
+#[test]
+fn an_end_reporting_more_lost_pairs_than_a_recording_holds_is_refused_and_the_rest_kept() {
+    let messages = stream(Shape {
+        seed: 9,
+        rate: 7,
+        first_sequence: 1,
+        dio_mask: 0,
+        messages: 5,
+        end: false,
+    });
+    let next = messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::Pairs(p) => Some(p.first_sequence.wrapping_add(p.pairs.len() as u32)),
+            _ => None,
+        })
+        .unwrap();
+    let mut encoder = Encoder::new(Context::default());
+    for message in &messages {
+        encoder.ingest(message).unwrap();
+    }
+    // 2^31 − 1 pairs at 7 a second are ten years: past what the axis holds at the probe's clock.
+    let end = Message::End(End {
+        reason: EndReason::Stopped,
+        last_sequence: next.wrapping_add(0x7fff_fffe),
+    });
+    assert!(matches!(
+        encoder.ingest(&end),
+        Err(Error::LostAfter(0x7fff_ffff))
+    ));
+    let finished = encoder.finish("capture").unwrap().unwrap();
+    let ChannelKind::Analog {
+        count, lost_after, ..
+    } = finished.header.channels[V].data
+    else {
+        panic!("analog");
+    };
+    assert!(count > 0);
+    assert_eq!(lost_after, 0);
 }
 
 #[test]

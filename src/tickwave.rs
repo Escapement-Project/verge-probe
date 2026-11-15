@@ -3,25 +3,30 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use escapement_tickwave_format::decode::{DecodeError, Footer};
 use escapement_tickwave_format::header::{
-    AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding,
+    AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding, JSON_SAFE,
     SourceFormat, SourceHeader,
 };
 use escapement_tickwave_format::mapping::{Spacing, finest_shift};
 use escapement_tickwave_format::model::{Gap, Ratio};
-use escapement_tickwave_format::recut::Recutter;
+use escapement_tickwave_format::recut::{Recutter, shifts_for};
 use escapement_tickwave_format::snapshot::Snapshot;
-use escapement_tickwave_format::writer::{Bundle, Finish, Finished, WriteOptions, Writer};
+use escapement_tickwave_format::writer::{
+    Bundle, Compression, Finish, Finished, WriteOptions, Writer,
+};
 
 use crate::probe::CalibrationPoint;
 use crate::record::temp_beside;
 use crate::stream::skipped;
-use crate::stream::{Converter, CurrentRange, EndReason, Header, Markers, Message, Pairs, Sample};
+use crate::stream::{
+    Converter, CurrentRange, End, EndReason, Header, Markers, Message, Pairs, Sample,
+};
 
 /// tickwave's format crate, for reading what this writes.
 pub use escapement_tickwave_format as format;
@@ -52,6 +57,8 @@ pub enum Error {
     Rate(f64),
     #[error("the stream's times went back")]
     Timestamps,
+    #[error("the stream's end reports {0} pairs lost after the last, more than a recording holds")]
+    LostAfter(u64),
     #[error("{} already exists", .0.display())]
     Exists(PathBuf),
     #[error(transparent)]
@@ -101,12 +108,15 @@ pub fn write_options() -> WriteOptions {
     WriteOptions {
         level: 16,
         block_bytes: 1 << 20,
-        batch: 1,
+        promise_with_items: false,
+        compression: Compression::Spread,
     }
 }
 
-/// The finest overview level's shift for a pair period, by tickwave's rule for the densest
-/// channel. The source's ticks are the recording's, so a pair's spacing on the axis is its period.
+/// The finest overview level's shift for a pair period, by tickwave's rule, which every channel
+/// takes while the capture runs: the flags' and pins' rates are known only at its end, and
+/// [`compact`] gives each its own. The source's ticks are the recording's, so a pair's spacing on
+/// the axis is its period.
 fn overview_shift(period: Ratio) -> u8 {
     finest_shift(Some(Spacing::of_samples(period, Ratio::ONE)))
 }
@@ -129,6 +139,7 @@ fn analog(name: &str, unit: &str, period: Ratio, coding: AnalogCoding) -> Declar
             significant: Some(4),
         },
         shaping: Default::default(),
+        overview_shift: None,
     }
 }
 
@@ -139,6 +150,7 @@ fn digital(name: &str, initial: bool) -> DeclaredChannel {
         source: 0,
         data: DeclaredKind::Digital { initial },
         shaping: Default::default(),
+        overview_shift: None,
     }
 }
 
@@ -282,7 +294,7 @@ struct RunStart {
 }
 
 /// Every tick held here is the capture's, as the source's ticks are. The axis starts at `base`,
-/// so an annotation, a flush and the length go to the writer `base` earlier.
+/// so an annotation, a promise, a flush and the length go to the writer `base` earlier.
 struct Open {
     writer: Writer,
     header: Header,
@@ -296,13 +308,15 @@ struct Open {
     pins: Vec<u8>,
     /// The sequence number the next pair should carry.
     next: u32,
+    /// The first pairs message's first pair: its tick.
+    first_pair: Option<i64>,
     /// The last pair taken in, by its message: its tick.
     last_pair: Option<i64>,
-    /// The last pairs message's last pair: everything below it goes at the next release.
-    held: Option<i64>,
+    /// The runs whose first sample the converter has yet to give.
     runs: VecDeque<RunStart>,
-    samples: VecDeque<(i64, Sample)>,
-    dio: VecDeque<Dio>,
+    /// An attached stream's DIO items from before its first pairs message: its pins' first gap
+    /// ends at that message's first pair, so they wait for it.
+    early: Vec<Dio>,
     /// The latest DIO tick taken in: an edge's, or a loss report's `to`.
     dio_arrived: Option<i64>,
     last_sample: Option<i64>,
@@ -317,11 +331,10 @@ struct Open {
     marker_losses: u64,
     marker_ticks: HashMap<i64, u32>,
     last_marker: Option<i64>,
-    lost_before: u64,
     lost_after: u64,
     reason: Option<EndReason>,
-    /// Where the last release stopped: every item placed lies below it.
-    released: i64,
+    /// The latest promise: every item before it is in.
+    promised: i64,
     flushed: i64,
 }
 
@@ -389,33 +402,37 @@ impl Encoder {
             }
             Message::Markers(markers) => self.open.as_mut().unwrap().markers(markers)?,
             Message::End(end) => {
-                let open = self.open.as_mut().unwrap();
-                open.lost_after += skipped(open.next, end.last_sequence.wrapping_add(1));
-                open.reason = Some(end.reason);
-                open.converter.end();
-                open.take_samples()?;
-                open.release(None)?;
+                self.open.as_mut().unwrap().end(end)?;
                 self.ended = true;
             }
         }
         Ok(self.ended)
     }
 
-    /// The recording's bytes since the last call.
+    /// The recording's bytes since the last call. Each call also compresses a slice of the
+    /// blocks closed so far, which reach the output over the calls after their close.
     pub fn take_output(&mut self) -> Vec<u8> {
         self.open
             .as_mut()
             .map_or_else(Vec::new, |open| open.writer.take_output())
     }
 
-    /// Closes the open block where the last release stopped, so a crash loses only what came
-    /// after. Nothing when nothing was released since the last flush.
+    /// Whether closed blocks still wait to be compressed, so that [`Encoder::take_output`]
+    /// has more to give.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.open.as_ref().is_some_and(|open| open.writer.pending())
+    }
+
+    /// Closes every channel's open block at the latest promise, so a crash loses only what came
+    /// after once the output is in the file. Nothing when nothing was promised since the last
+    /// flush.
     pub fn flush(&mut self) -> Result<()> {
         if let Some(open) = self.open.as_mut()
-            && open.released > open.flushed
+            && open.promised > open.flushed
         {
-            open.writer.flush(open.released - open.base)?;
-            open.flushed = open.released;
+            open.writer.flush(open.promised - open.base)?;
+            open.flushed = open.promised;
         }
         Ok(())
     }
@@ -440,9 +457,7 @@ impl Encoder {
             return Ok(None);
         };
         if !self.ended {
-            open.converter.end();
-            open.take_samples()?;
-            open.release(None)?;
+            open.close()?;
         }
         open.finish(stem).map(Some)
     }
@@ -513,11 +528,10 @@ impl Open {
             converter: Converter::new(header),
             pins,
             next: header.first_sequence,
+            first_pair: None,
             last_pair: None,
-            held: None,
             runs: VecDeque::new(),
-            samples: VecDeque::new(),
-            dio: VecDeque::new(),
+            early: Vec::new(),
             dio_arrived: None,
             last_sample: None,
             range: [None, None],
@@ -527,10 +541,9 @@ impl Open {
             marker_losses: 0,
             marker_ticks: HashMap::new(),
             last_marker: None,
-            lost_before: 0,
             lost_after: 0,
             reason: None,
-            released: base,
+            promised: base,
             flushed: base,
         })
     }
@@ -555,10 +568,8 @@ impl Open {
             return Err(Error::Timestamps);
         }
         let lost = match self.last_pair {
-            None => {
-                self.lost_before += missing;
-                Some(0)
-            }
+            // The pairs lost before the first lie between the start and it, as `due` holds.
+            None => Some(missing),
             Some(_) if missing > 0 => Some(missing),
             Some(_) if pairs.paused() || pairs.held() => Some(0),
             Some(last) if start != last + self.period => Some(0),
@@ -575,14 +586,33 @@ impl Open {
             // The store's rule: a pair waiting at a switch keeps its own current.
             self.converter.discontinuity(first.low);
         }
+        // Every edge and loss report up to the last message's last pair has come by now, and a
+        // pair the converter still holds lies at that pair.
+        if let Some(previous) = self.last_pair {
+            self.promise(previous)?;
+        }
         self.converter.add_message(pairs);
         self.next = pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32);
-        let last = start + (pairs.pairs.len() as i64 - 1) * self.period;
-        self.last_pair = Some(last);
-        self.take_samples()?;
-        // Every edge and loss report up to the last message's last pair has come by now.
-        if let Some(held) = self.held.replace(last) {
-            self.release(Some(held))?;
+        self.last_pair = Some(start + (pairs.pairs.len() as i64 - 1) * self.period);
+        if self.first_pair.is_none() {
+            self.first_pair = Some(start);
+            if !self.early.is_empty() {
+                self.start_dio(None)?;
+            }
+        }
+        self.take_samples()
+    }
+
+    /// Every item before the capture's tick `before` is in.
+    fn promise(&mut self, before: i64) -> Result<()> {
+        // With no DIO item yet, an attached stream's first gap goes in at the first promise past
+        // its first pair: every later item lies at or after the promise, so past the gap.
+        if self.dio_levels.is_none() && self.first_pair.is_some_and(|first| before > first) {
+            self.start_dio(None)?;
+        }
+        if before > self.promised {
+            self.writer.promise(before - self.base)?;
+            self.promised = before;
         }
         Ok(())
     }
@@ -623,7 +653,7 @@ impl Open {
     fn take_samples(&mut self) -> Result<()> {
         for sample in self.converter.take_samples() {
             let at = self.at(sample.time_ns)?;
-            self.samples.push_back((at, sample));
+            self.place_sample(at, &sample)?;
         }
         Ok(())
     }
@@ -643,7 +673,7 @@ impl Open {
             Dio::Lost { to, .. } => to,
         });
         let mask = self.header.dio_mask;
-        self.dio.push_back(match item {
+        let item = match item {
             Dio::Edge { tick, levels } => Dio::Edge {
                 tick,
                 levels: levels & mask,
@@ -653,8 +683,15 @@ impl Open {
                 to,
                 levels: levels & mask,
             },
-        });
-        Ok(())
+        };
+        if self.dio_levels.is_none() {
+            if self.first_pair.is_none() {
+                self.early.push(item);
+                return Ok(());
+            }
+            self.start_dio(Some(item.tick()))?;
+        }
+        self.place_dio(item)
     }
 
     fn markers(&mut self, markers: &Markers) -> Result<()> {
@@ -693,40 +730,44 @@ impl Open {
         Ok(())
     }
 
-    /// Places every held item below `limit`, or every one, merged by tick.
-    fn release(&mut self, limit: Option<i64>) -> Result<()> {
-        let below = |tick: i64| limit.is_none_or(|limit| tick < limit);
-        loop {
-            let sample = self.samples.front().map(|(t, _)| *t).filter(|&t| below(t));
-            let dio = self.dio.front().map(|d| d.tick()).filter(|&t| below(t));
-            if (sample.is_some() || dio.is_some()) && self.dio_levels.is_none() {
-                self.first_dio_gap()?;
-            }
-            match (sample, dio) {
-                (None, None) => break,
-                (Some(s), Some(d)) if d <= s => self.place_dio()?,
-                (Some(_), _) => self.place_sample()?,
-                (None, Some(_)) => self.place_dio()?,
+    /// The stream's end message: the pairs the capture took after the last that came, which
+    /// lie in the periods after it.
+    fn end(&mut self, end: &End) -> Result<()> {
+        let lost = skipped(self.next, end.last_sequence.wrapping_add(1));
+        if let Some(last) = self.last_pair {
+            let reach =
+                i128::from(last - self.base) + i128::from(self.period) * (1 + i128::from(lost));
+            if reach >= i128::from(JSON_SAFE) {
+                return Err(Error::LostAfter(lost));
             }
         }
-        if let Some(limit) = limit {
-            self.released = self.released.max(limit);
+        self.lost_after = lost;
+        self.reason = Some(end.reason);
+        self.close()
+    }
+
+    /// The stream ended or stopped: a pair the converter still holds goes in, and an attached
+    /// stream's pins their first gap, if anything came.
+    fn close(&mut self) -> Result<()> {
+        self.converter.end();
+        self.take_samples()?;
+        if self.dio_levels.is_none() && (self.first_pair.is_some() || !self.early.is_empty()) {
+            self.start_dio(None)?;
         }
         Ok(())
     }
 
     /// An attached stream's pins are unknown from the recording's start until the stream started:
-    /// before its first pair, and before its first edge or loss report.
-    fn first_dio_gap(&mut self) -> Result<()> {
+    /// before its first pair, and before its first edge or loss report, the first early one's or
+    /// `next`'s. The early ones go in after.
+    fn start_dio(&mut self, next: Option<i64>) -> Result<()> {
         let levels = self.header.dio_levels;
         self.dio_levels = Some(levels);
-        let to = [
-            self.samples.front().map(|(t, _)| *t),
-            self.dio.front().map(|d| d.tick() - 1),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let first_dio = self.early.first().map(|d| d.tick()).or(next);
+        let to = [self.first_pair, first_dio.map(|t| t - 1)]
+            .into_iter()
+            .flatten()
+            .min();
         for (i, &k) in self.pins.iter().enumerate() {
             let level = levels & (1 << k) != 0;
             let from = self.base;
@@ -741,11 +782,13 @@ impl Open {
         if let Some(to) = to {
             self.dio_end = self.dio_end.max(to);
         }
+        for item in std::mem::take(&mut self.early) {
+            self.place_dio(item)?;
+        }
         Ok(())
     }
 
-    fn place_sample(&mut self) -> Result<()> {
-        let (tick, sample) = self.samples.pop_front().expect("a held sample");
+    fn place_sample(&mut self, tick: i64, sample: &Sample) -> Result<()> {
         let mut lost_from = None;
         if let Some(run) = self
             .runs
@@ -800,8 +843,7 @@ impl Open {
         Ok(())
     }
 
-    fn place_dio(&mut self) -> Result<()> {
-        let item = self.dio.pop_front().expect("a held DIO item");
+    fn place_dio(&mut self, item: Dio) -> Result<()> {
         let before = self.dio_levels.expect("the first gap is placed first");
         match item {
             Dio::Edge { tick, levels } => {
@@ -832,8 +874,10 @@ impl Open {
     }
 
     fn finish(mut self, stem: &str) -> Result<Finished> {
+        // The pairs lost after the last take the periods after its own.
+        let lost_after = i64::try_from(self.lost_after).expect("below 2^31, as skipped gives");
         let end = [
-            self.last_sample.map(|t| t + self.period),
+            self.last_sample.map(|t| t + self.period * (1 + lost_after)),
             self.last_marker.map(|t| t + 1),
             Some(self.dio_end),
             Some(self.base + 1),
@@ -858,17 +902,26 @@ impl Open {
                 self.writer.gap(FIRST_DIO + i, never)?;
             }
         }
-        let ends = vec![end; 2 + self.pins.len()];
+        // The range is measured with each pair, so it is known to the last one's end, before the
+        // pairs lost after it.
+        let range_end = self.last_sample.map_or(end, |t| t + self.period);
+        let mut ends = vec![range_end; 2];
+        ends.resize(2 + self.pins.len(), end);
         let mut extra = BTreeMap::new();
-        extra.insert("pairs_lost_before".into(), self.lost_before.to_string());
-        extra.insert("pairs_lost_after".into(), self.lost_after.to_string());
         extra.insert("end_reason".into(), end_reason(self.reason));
         extra.insert("markers".into(), self.markers.to_string());
         extra.insert("marker_losses".into(), self.marker_losses.to_string());
+        // A stream that brought no pair has no sample for its losses to lie beside.
+        let lost_after = if self.last_sample.is_some() && self.lost_after > 0 {
+            BTreeMap::from([(V, self.lost_after), (I, self.lost_after)])
+        } else {
+            BTreeMap::new()
+        };
         let finish = Finish {
             extra: vec![extra],
             bundle: Some(Bundle::Generated { stem: stem.into() }),
             drop_gaps_past_end: false,
+            lost_after,
         };
         Ok(self.writer.finish(end - self.base, &ends, finish)?)
     }
@@ -888,6 +941,30 @@ fn pieces(mut input: impl Read, mut feed: impl FnMut(&[u8]) -> Result<()>) -> Re
     }
 }
 
+/// How much of a file's end [`finished_header`] reads first: a footer is a few kilobytes a
+/// channel.
+const TAIL: u64 = 1 << 18;
+/// The most it reads, for a footer that says it starts further back.
+const TAIL_MAX: u64 = 1 << 24;
+
+/// The header of the finished recording at `path`, from its footer; none for one a crash cut
+/// off, or one whose footer doesn't read.
+fn finished_header(path: &Path) -> Result<Option<escapement_tickwave_format::header::Header>> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut from = len.saturating_sub(TAIL);
+    loop {
+        file.seek(SeekFrom::Start(from))?;
+        let mut tail = Vec::new();
+        Read::take(&mut file, len - from).read_to_end(&mut tail)?;
+        match Footer::parse(&tail, len) {
+            Ok(footer) => return Ok(Some(footer.header)),
+            Err(DecodeError::NeedFrom(at)) if at < from && len - at <= TAIL_MAX => from = at,
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
 fn stem(path: &Path) -> String {
     path.file_stem()
         .map_or_else(|| "capture".into(), |s| s.to_string_lossy().into_owned())
@@ -895,12 +972,17 @@ fn stem(path: &Path) -> String {
 
 /// Writes the recording at `path` again with full-size blocks, as a recorder's one-second blocks
 /// are not, into a copy beside it, then renames the copy over it. `path` stays readable until
-/// then. A finished recording keeps its content id, which the Recutter checks. One a crash cut
-/// off is finished by repair's rules, with its markers bundled.
+/// then. A finished recording keeps its content id, which the Recutter checks, and each channel
+/// gets the overview its own rate calls for. One a crash cut off is finished by repair's rules,
+/// with its markers bundled and the overview it declared.
 pub fn compact(path: &Path) -> Result<()> {
+    let header = finished_header(path)?;
     let temp = temp_beside(path)?;
     let mut out = BufWriter::new(temp.as_file());
     let mut recutter = Recutter::new(write_options());
+    if let Some(header) = &header {
+        recutter.shifts(shifts_for(header));
+    }
     recutter.bundle(Bundle::Generated { stem: stem(path) });
     pieces(File::open(path)?, |bytes| {
         recutter.feed(bytes)?;
@@ -979,9 +1061,14 @@ impl FileWriter {
         Ok(ended)
     }
 
-    /// The recorder's clock, when no message came for a while.
+    /// The recorder's clock, when no message came for a while. No message comes to compress a
+    /// stalled stream's last blocks a slice at a time, so this compresses all of them.
     pub fn flush(&mut self) -> Result<()> {
-        self.write()
+        self.write()?;
+        while self.encoder.pending() {
+            self.take_output()?;
+        }
+        Ok(())
     }
 
     fn write(&mut self) -> Result<()> {
@@ -989,10 +1076,7 @@ impl FileWriter {
             self.encoder.flush()?;
             self.flushed = Instant::now();
         }
-        let bytes = self.encoder.take_output();
-        if !bytes.is_empty() {
-            self.file.write_all(&bytes)?;
-        }
+        self.take_output()?;
         if self
             .published
             .is_none_or(|at| at.elapsed() >= PUBLISH_EVERY)
@@ -1000,6 +1084,14 @@ impl FileWriter {
         {
             *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
             self.published = Some(Instant::now());
+        }
+        Ok(())
+    }
+
+    fn take_output(&mut self) -> Result<()> {
+        let bytes = self.encoder.take_output();
+        if !bytes.is_empty() {
+            self.file.write_all(&bytes)?;
         }
         Ok(())
     }
