@@ -18,17 +18,21 @@ ranges for the next capture alone: automatic switching, the default, or the high
 either, a pair read on the high range too near the amplifier's floor comes marked under range (the
 firmware's docs/host-interface.md, `0x90` mode 14).
 
-On an MCU-Link Pro, the identify, DIO, supply, energy and marker commands are also on Verge Aux, a
-second vendor interface that debuggers leave alone. `Bus::open_aux` claims it, and `aux::Aux` sends
-requests over it. `Aux` is a `VergeTransport`, so the same typed calls run on it while a debugger
-holds CMSIS-DAP. The probe also streams every energy pair through it: `stream` parses the messages
-and converts each pair as the firmware does, checked against the vectors the firmware's own
-converter writes.
+The identify and DIO commands are also on Verge Aux, a second vendor interface that debuggers leave
+alone. On an MCU-Link Pro, so are the supply, energy and marker commands. `Bus::open_aux` claims
+Verge Aux, and `aux::Aux` sends requests over it. `Aux` is a `VergeTransport`, so the same typed
+calls run on it while a debugger holds CMSIS-DAP. The probe also streams every energy pair through
+it: `stream` parses the messages and converts each pair as the firmware does, checked against the
+vectors the firmware's own converter writes.
 
-`pro::with_pro` runs a call on a Pro through Aux, or through CMSIS-DAP when another program holds
-Aux; `pro::open_stream` needs Aux, the only way to the stream. Both refuse a unit that is not a Pro
-running Verge, or whose firmware lacks the feature, with a `ProError` that says which.
-`record::Sink` writes pairs and DIO edges as CSV or as a sigrok session.
+`pro::with_pro` runs a call through Aux, or through CMSIS-DAP when another program holds Aux.
+`pro::open_aux` opens Aux alone, for a frontend that keeps it open beside a debugger.
+`pro::open_stream` opens it for the energy stream, which only Aux carries. All three refuse a unit
+that is not running Verge, whose board lacks the feature or whose firmware does, with a `ProError`
+that says which. The DIO pins are on the Pro and the standalone MCU-Link; the supply and energy
+capture are the Pro's. A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro
+without its energy circuit, streams its DIO pins alone (`start_dio_stream`). `record::Sink` writes
+pairs and DIO edges as CSV or as a sigrok session.
 
 The `capture` feature adds disk-backed captures, in SQLite. `capture::Recorder` takes stream
 messages without waiting for the disk, and fails rather than drop one when the disk falls behind.

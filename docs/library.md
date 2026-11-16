@@ -1,12 +1,14 @@
 # The verge-probe library
 
 verge-probe is the Rust library that verge and verge-gui are built on. A tool of your own can use it
-to find MCU-Links, debug a target through probe-rs with Verge's commands beside it, switch the Pro's
-target supply and DIO pins, run its SPI and I2C bridges, and read or record its energy capture.
+to find MCU-Links, debug a target through probe-rs with Verge's commands beside it, drive the DIO
+pins, switch the Pro's target supply, run its SPI and I2C bridges, and read or record its energy
+capture.
 
 Each example here is a whole program. `cargo test --doc` builds every one of them, so they stay in
-step with the library. [Host interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/host-interface.md)
-has the commands underneath, for a tool in another language.
+step with the library. [Host
+interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/host-interface.md) has
+the commands underneath, for a tool in another language.
 
 ## Adding it
 
@@ -122,13 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Nothing checks that the target supports the format you ask for. A TI target needs more than this
 before it answers: [cJTAG targets](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/cjtag-targets.md).
 
-## The Pro's supply and pins
+## The DIO pins and the Pro's supply
 
-On a Pro, the supply, DIO and energy commands also go through Verge Aux, the Pro's second vendor
-interface. A debugger leaves it alone, so a tool can use it while a debugger holds the probe.
-`pro::with_pro` runs your code on a Pro through Verge Aux, or through CMSIS-DAP when another program
-holds Verge Aux. It refuses a probe that isn't a Pro running Verge, or whose firmware lacks the
-feature, with an error that says which.
+The DIO commands also go through Verge Aux, a second vendor interface. On a Pro, so do the supply
+and energy commands. A debugger leaves Verge Aux alone, so a tool can use it while a debugger holds
+the probe. `pro::with_pro` runs your code through Verge Aux, or through CMSIS-DAP when another
+program holds Verge Aux. It refuses a probe that isn't running Verge, whose board lacks the feature
+or whose firmware does, with an error that says which. `pro::open_aux` opens Verge Aux alone, for a
+tool that keeps it open beside a debugger.
 
 ```rust,no_run
 use std::error::Error;
@@ -170,9 +173,12 @@ target's rail time to settle before you talk to the target.
 
 `access_dio(mask, outputs, levels)` changes the pins whose bits are set in `mask`: a bit set in
 `outputs` makes that pin an output, and the same bit in `levels` drives it high. A zero mask only
-reads. DIO0 to DIO2 change direction together, and DIO3 on its own, so the probe refuses a change
-that splits a group. Its `Refused` error carries the pins' state, which the refusal left unchanged.
-The pins are described in [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins).
+reads. On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. On a standalone
+MCU-Link, each pin changes direction on its own. `groups` in the state lists the pins that change
+together, and the probe refuses a change that splits a group. Its `Refused` error carries the pins'
+state, which the refusal left unchanged. The pins are described in [The
+Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) and [Probes
+and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins).
 
 The supply and the pins keep their state when your tool exits, until something changes them or the
 probe restarts. A pin left an output keeps the SPI bridge from running.
@@ -408,6 +414,14 @@ your tool stops before `finish`, `tickwave::compact` recovers what was written. 
 started keeps running when your tool fails, so the example stops it on every way out once the start
 has answered.
 
+A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro without its energy
+circuit, streams the pins alone. `start_dio_stream` starts it over
+`pro::open_aux(&bus, &unit, Feature::Dio)`, and `end_dio_stream` ends it. Its first message is a
+`Message::DioHeader`, its end says when it ended, and it has no pairs or markers. While its pins
+are quiet it sends a `Message::DioTime` every 200 ms: every edge before that time has arrived.
+`tickwave::FileWriter` records it as a `verge-dio` recording of the pins alone.
+`VergeInfo::supports_dio_stream` says whether the probe has it.
+
 To mark a moment in the recording, such as the start of a test, send `mark` while the stream runs.
 A tool debugging the target calls `mark` on its `VergeSession`. Another program uses `with_pro`,
 which goes through CMSIS-DAP while the recorder holds Verge Aux:
@@ -454,8 +468,8 @@ which says what went wrong:
 | `Malformed` | The reply doesn't follow the command's protocol. |
 | `Firmware` | The firmware refused or failed the command, with its reason. |
 
-`attach`, `with_pro`, `open_stream` and `monitor_energy` have error types of their own, which say
-which step failed.
+`attach`, `with_pro`, `open_aux`, `open_stream` and `monitor_energy` have error types of their
+own, which say which step failed.
 
 A refusal carries the state the firmware reported. The probe refuses a DIO change that splits a
 direction group, for one, and its error holds the pins as they stayed:
