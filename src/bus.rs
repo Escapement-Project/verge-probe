@@ -83,13 +83,15 @@ pub trait Bus {
     fn every_device(&self) -> Result<Vec<UsbDevice>, BusError>;
     /// Claims a probe's CMSIS-DAP v2 interface.
     fn open_dap(&self, device: &UsbDevice) -> Result<Self::Dap, BusError>;
-    /// Claims a Pro's Verge Aux interface.
+    /// Claims a unit's Verge Aux interface.
     fn open_aux(&self, device: &UsbDevice) -> Result<Self::Aux, BusError>;
-    /// Sends a control request with no data stage to the device itself, claiming no interface:
-    /// how the tool reaches ours once the SWD jumper has taken away the interface it would claim.
+    /// Sends a control request with no data stage to the device itself, claiming no interface
+    /// where the system allows: how the tool reaches ours once the SWD jumper has taken away the
+    /// interface it would claim, or while a debugger holds it.
     /// The outer error says the device could not be opened, the inner one that the request failed.
-    /// The request fails on Windows, where WinUSB sends control requests only through a claimed
-    /// interface.
+    /// On Windows, where WinUSB sends control requests only through a claimed interface, it goes
+    /// through the first of the device's vendor interfaces the tool can claim, and fails when
+    /// other programs hold them all.
     fn device_control_out(
         &self,
         device: &UsbDevice,

@@ -17,15 +17,20 @@ pub const END: u8 = 0xA2;
 pub const EDGES: u8 = 0xA3;
 pub const MARKS: u8 = 0xA4;
 pub const DIO_LOST: u8 = 0xA5;
+pub const DIO_TIME: u8 = 0xA6;
 /// The longest label a marker carries.
 pub const LABEL_MAX: usize = 32;
 
 const HEADER_BYTES: usize = 79;
 const ID_HEADER_BYTES: usize = 103;
+const DIO_HEADER_BYTES: usize = 10;
 const DIO_LOST_BYTES: usize = 19;
+const DIO_TIME_BYTES: usize = 10;
 const PAIRS_FIXED: usize = 16;
 const PAIR_BYTES: usize = 5;
 const END_BYTES: usize = 6;
+/// A DIO stream's end, which carries its time: no pair marks it.
+const DIO_END_BYTES: usize = 14;
 const EDGES_FIXED: usize = 12;
 const EDGE_BYTES: usize = 5;
 const MARKS_FIXED: usize = 3;
@@ -38,7 +43,7 @@ const MARK_BYTES: usize = 13;
 pub fn is_stream_message(bytes: &[u8]) -> bool {
     bytes
         .first()
-        .is_some_and(|&first| (PAIRS..=DIO_LOST).contains(&first))
+        .is_some_and(|&first| (PAIRS..=DIO_TIME).contains(&first))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -210,8 +215,26 @@ pub enum EndReason {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct End {
     pub reason: EndReason,
-    /// The last pair the capture took.
+    /// The last pair the capture took. 0 in a DIO stream.
     pub last_sequence: u32,
+    /// When a DIO stream ended, in ns since it started. A capture's stream has none: its last pair
+    /// marks its end.
+    #[serde(default)]
+    pub time_ns: Option<u64>,
+}
+
+/// The first message of a DIO stream (`0x90` mode 15): a board without energy capture reporting
+/// its DIO pins' edges alone, with no pairs. Times count from it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DioHeader {
+    /// The clock the probe times edges by, in Hz.
+    pub clock_hz: u32,
+    /// The DIO pins whose edges the stream reports, their levels as it started, and the edges'
+    /// time resolution.
+    pub dio_mask: u8,
+    pub dio_levels: u8,
+    pub edge_resolution_ns: u16,
 }
 
 /// One DIO edge.
@@ -289,6 +312,23 @@ impl DioLost {
     }
 }
 
+/// A quiet DIO stream's time: every edge stamped before `time_ns` has been sent. It comes after
+/// every edge and loss sent, and a loss found later starts after it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DioTime {
+    pub time_ns: u64,
+}
+
+impl DioTime {
+    /// The message's bytes, as the probe sends them.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![DIO_TIME, 0];
+        bytes.extend_from_slice(&self.time_ns.to_le_bytes());
+        bytes
+    }
+}
+
 /// One moment a debugging host marked with `0x94`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Marker {
@@ -346,6 +386,8 @@ pub enum Message {
     Edges(Edges),
     Markers(Markers),
     DioLost(DioLost),
+    DioHeader(DioHeader),
+    DioTime(DioTime),
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -370,6 +412,17 @@ fn points(bytes: &[u8], at: usize) -> Vec<CalibrationPoint> {
 pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
     let short = || StreamError::Short(bytes.len());
     match bytes.first() {
+        Some(&HEADER) if bytes.get(1) == Some(&5) => {
+            if bytes.len() < DIO_HEADER_BYTES {
+                return Err(short());
+            }
+            Ok(Message::DioHeader(DioHeader {
+                clock_hz: u32_at(bytes, 2),
+                dio_mask: bytes[6],
+                dio_levels: bytes[7],
+                edge_resolution_ns: u16_at(bytes, 8),
+            }))
+        }
         Some(&HEADER) => {
             let identified = match bytes.get(1) {
                 Some(3) => false,
@@ -458,6 +511,8 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                     other => EndReason::Other(other),
                 },
                 last_sequence: u32_at(bytes, 2),
+                time_ns: (bytes.len() >= DIO_END_BYTES)
+                    .then(|| u64::from_le_bytes(bytes[6..14].try_into().expect("eight bytes"))),
             }))
         }
         Some(&EDGES) => {
@@ -514,6 +569,14 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                 from_ns: u64::from_le_bytes(bytes[2..10].try_into().expect("eight bytes")),
                 to_ns: u64::from_le_bytes(bytes[10..18].try_into().expect("eight bytes")),
                 levels: bytes[18],
+            }))
+        }
+        Some(&DIO_TIME) => {
+            if bytes.len() < DIO_TIME_BYTES {
+                return Err(short());
+            }
+            Ok(Message::DioTime(DioTime {
+                time_ns: u64::from_le_bytes(bytes[2..10].try_into().expect("eight bytes")),
             }))
         }
         Some(&other) => Err(StreamError::Unknown(other)),

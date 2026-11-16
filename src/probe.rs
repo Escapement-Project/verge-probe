@@ -16,13 +16,14 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::protocol::{
-    self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
-    CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN, CAP_TARGET_POWER,
-    CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND, ENERGY_COMMAND,
-    I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, J8_COMMAND,
-    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND,
-    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ,
-    SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+    self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_DIO_STREAM, CAP_ENERGY_ACCUMULATOR,
+    CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN,
+    CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND,
+    ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER,
+    INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
+    LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
+    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND,
+    TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -1272,6 +1273,21 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_status(&self.send(ENERGY_COMMAND, &[6, dio_mask])?)
     }
 
+    /// Starts a DIO stream on a board without energy capture: the edges of the DIO pins in
+    /// `dio_mask`, with no pairs, on Verge Aux only (`0x90` mode 15). Its first message is a
+    /// [`crate::stream::DioHeader`], and its times count from it. A stream already running ends
+    /// first.
+    pub fn start_dio_stream(&mut self, dio_mask: u8) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(CAP_DIO_STREAM, "DIO streams")?;
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[15, dio_mask])?)
+    }
+
+    /// Ends a DIO stream: mode 7, on Verge Aux only. Its end message says when.
+    pub fn end_dio_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
+        self.require_capability(CAP_DIO_STREAM, "DIO streams")?;
+        parse_energy_status(&self.send(ENERGY_COMMAND, &[7])?)
+    }
+
     /// Ends the stream, leaving the capture running: mode 7, on Verge Aux only.
     pub fn end_energy_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
@@ -1339,13 +1355,13 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_calibration(&response)
     }
 
-    /// Hands selected J8 pins from the firmware marker to the host.
-    ///
-    /// Set `mask` to zero to return all four pins to the marker.
-    /// Returns the levels read from the four pins.
-    pub fn set_j8_pins(&mut self, mask: u8, levels: u8) -> Result<u8, CommandError<Refused>> {
+    /// Gives the standalone MCU-Link's J8 pins in `pins`, bit n DIOn, to the firmware's bench
+    /// marker, which drives them high while each command runs; the rest go back to DIO as inputs.
+    /// Zero, as at boot, gives all four to DIO. Returns the pins the marker holds. A bench command:
+    /// a pin the marker holds is an output, whatever is wired to it.
+    pub fn set_marker_pins(&mut self, pins: u8) -> Result<u8, CommandError<Refused>> {
         self.require_verge()?;
-        let response = self.send(J8_COMMAND, &[mask & 0x0F, levels & mask & 0x0F])?;
+        let response = self.send(J8_COMMAND, &[pins & 0x0F])?;
         expect_accepted(&response)?;
         Ok(response_byte(&response, 1)?)
     }
@@ -2556,7 +2572,7 @@ mod tests {
             commands: Vec::new(),
         };
         assert!(matches!(
-            VergeControl::new(&mut transport).set_j8_pins(0, 0),
+            VergeControl::new(&mut transport).set_marker_pins(0),
             Err(CommandError::Unsupported("Verge commands"))
         ));
         assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);

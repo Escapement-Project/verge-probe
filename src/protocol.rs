@@ -33,6 +33,7 @@ pub(crate) const CAP_DIO_AUX: u32 = 1 << 6;
 pub(crate) const CAP_MARKS: u32 = 1 << 7;
 pub(crate) const CAP_CAPTURE_ID: u32 = 1 << 8;
 pub(crate) const CAP_ENERGY_RANGES: u32 = 1 << 9;
+pub(crate) const CAP_DIO_STREAM: u32 = 1 << 10;
 pub(crate) const CAP_SPI: u32 = 1 << 3;
 pub(crate) const CAP_I2C: u32 = 1 << 4;
 pub(crate) const SPI_SOURCE_HZ: u32 = 96_000_000;
@@ -146,6 +147,12 @@ impl VergeInfo {
         self.extended_capabilities & CAP_ENERGY_RANGES != 0
     }
 
+    /// Whether the probe streams its DIO pins' edges alone (`0x90` mode 15): a board with the pins
+    /// and no energy capture, whose stream would report them instead.
+    pub fn supports_dio_stream(&self) -> bool {
+        self.extended_capabilities & CAP_DIO_STREAM != 0
+    }
+
     /// Whether the firmware can switch the target supply.
     pub fn supports_target_power(&self) -> bool {
         self.capabilities & CAP_TARGET_POWER != 0
@@ -256,6 +263,7 @@ impl VergeInfo {
                 (CAP_MARKS, "markers"),
                 (CAP_CAPTURE_ID, "capture identity"),
                 (CAP_ENERGY_RANGES, "energy range setting"),
+                (CAP_DIO_STREAM, "DIO streams"),
             ]
             .into_iter()
             .filter(|(bit, _)| self.extended_capabilities & bit != 0)

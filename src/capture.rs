@@ -31,6 +31,8 @@ pub enum CaptureError {
     Restarted,
     #[error("a stream of {0} pairs a second, which a capture cannot hold")]
     Rate(f64),
+    #[error("a DIO stream, which has no pairs: record it as a tickwave recording")]
+    DioStream,
     #[error("the stream's times went back")]
     Timestamps,
     #[error("a time past what a capture holds")]

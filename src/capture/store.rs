@@ -827,6 +827,7 @@ impl CaptureWriter {
     }
     pub fn ingest(&mut self, message: Message) -> Result<bool> {
         match &message {
+            Message::DioHeader(_) | Message::DioTime(_) => return Err(CaptureError::DioStream),
             Message::Header(header) => {
                 ensure(self.header.is_none(), CaptureError::Restarted)?;
                 // 1 to 100,000 pairs a second, as the probe takes.
@@ -2120,6 +2121,7 @@ mod tests {
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: 399,
+                time_ns: None,
             }))
             .unwrap();
         writer.finish().unwrap();
@@ -2263,6 +2265,7 @@ mod tests {
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: first.wrapping_add(999),
+                time_ns: None,
             }))
             .unwrap();
         writer.finish().unwrap();
@@ -2370,6 +2373,7 @@ mod tests {
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: 5,
+                time_ns: None,
             }))
             .unwrap();
         writer.finish().unwrap();

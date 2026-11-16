@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::capture::{Archive, CaptureWriter, Interval};
-use crate::stream::{DioLost, Edge, Edges, End, Marker, Pair};
+use crate::stream::{DioHeader, DioLost, DioTime, Edge, Edges, End, Marker, Pair};
 use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::header::ChannelKind;
 use escapement_tickwave_format::model::{Break, sample_tick};
@@ -223,8 +223,65 @@ fn stream(shape: Shape) -> Vec<Message> {
         out.push(Message::End(End {
             reason: EndReason::Stopped,
             last_sequence: sequence.wrapping_sub(1).wrapping_add(rng.below(3) as u32),
+            time_ns: None,
         }));
     }
+    out
+}
+
+/// A DIO stream as the probe sends one (`0x90` mode 15): edges, some at one time, and loss reports
+/// on the pins of `mask`, in time order, then an end past the last.
+fn dio_stream(seed: u64, mask: u8, messages: usize) -> Vec<Message> {
+    let clock = 150_000_000;
+    let ns = |count: u64| (u128::from(count) * 1_000_000_000 / u128::from(clock)) as u64;
+    let mut rng = Rng(seed | 1);
+    let mut levels = 0b0110 & mask;
+    let mut out = vec![Message::DioHeader(DioHeader {
+        clock_hz: clock,
+        dio_mask: mask,
+        dio_levels: levels,
+        edge_resolution_ns: 7,
+    })];
+    let mut at = 0;
+    for _ in 0..messages {
+        at += 1 + rng.below(1 << 24);
+        if rng.one_in(8) {
+            let to = at + 1 + rng.below(1 << 20);
+            levels = rng.below(16) as u8 & mask;
+            out.push(Message::DioLost(DioLost {
+                from_ns: ns(at),
+                to_ns: ns(to),
+                levels,
+            }));
+            at = to;
+            continue;
+        }
+        let mut edges = Vec::new();
+        for _ in 0..1 + rng.below(20) {
+            let pin = 1 << rng.below(4);
+            if pin & mask != 0 {
+                levels ^= pin;
+                edges.push(Edge {
+                    time_ns: ns(at),
+                    levels,
+                });
+            }
+            at += rng.below(1 << 16);
+        }
+        if !edges.is_empty() {
+            out.push(Message::Edges(Edges::new(0, edges)));
+        }
+        // A quiet stretch: the probe says how far it has got, after everything it sent.
+        if rng.one_in(3) {
+            at += 1 + rng.below(1 << 24);
+            out.push(Message::DioTime(DioTime { time_ns: ns(at) }));
+        }
+    }
+    out.push(Message::End(End {
+        reason: EndReason::Asked,
+        last_sequence: 0,
+        time_ns: Some(ns(at + rng.below(1 << 24))),
+    }));
     out
 }
 
@@ -878,6 +935,7 @@ fn an_end_reporting_more_lost_pairs_than_a_recording_holds_is_refused_and_the_re
     let end = Message::End(End {
         reason: EndReason::Stopped,
         last_sequence: next.wrapping_add(0x7fff_fffe),
+        time_ns: None,
     });
     assert!(matches!(
         encoder.ingest(&end),
@@ -1005,6 +1063,7 @@ fn an_export_from_where_a_dio_loss_ends_knows_its_first_samples_dio() {
             Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: sequence + 9,
+                time_ns: None,
             }),
         ];
         let recording =
@@ -1180,6 +1239,7 @@ fn an_export_of_a_file_whose_markers_dont_resolve_is_refused() {
         Message::End(End {
             reason: EndReason::Stopped,
             last_sequence: 10,
+            time_ns: None,
         }),
     ];
     let mut file = encode(&messages);
@@ -1236,6 +1296,7 @@ fn an_export_reaches_the_markers_and_pins_outside_the_pairs() {
         Message::End(End {
             reason: EndReason::Stopped,
             last_sequence: 14,
+            time_ns: None,
         }),
     ];
     let unpaired = [
@@ -1244,6 +1305,7 @@ fn an_export_reaches_the_markers_and_pins_outside_the_pairs() {
         Message::End(End {
             reason: EndReason::Stopped,
             last_sequence: 0,
+            time_ns: None,
         }),
     ];
     let dir = tempfile::tempdir().unwrap();
@@ -1358,14 +1420,16 @@ fn exports_from_a_recording_match_the_archives() {
     assert!(rows > 100_000 && members > 100 && selections > 80);
 }
 
-/// A value a corrupt or foreign stream could carry: the ends of the range as often as the middle.
+/// A value a corrupt or foreign stream could carry: the ends of the range as often as the middle,
+/// and a time of about 1.9 years, near the furthest a recording takes (2^53 ticks at 150 MHz).
 fn extreme(rng: &mut Rng) -> u64 {
-    match rng.below(6) {
+    match rng.below(7) {
         0 => 0,
         1 => 1,
         2 => u64::MAX,
         3 => u64::MAX / 2,
         4 => i64::MAX as u64,
+        5 => 60_000_000_000_000_000,
         _ => rng.next(),
     }
 }
@@ -1402,18 +1466,30 @@ fn mutate(message: &mut Message, rng: &mut Rng) {
                 marker.number = extreme(rng) as u32;
             }
         }
-        Message::End(end) => end.last_sequence = extreme(rng) as u32,
+        Message::End(end) => {
+            end.last_sequence = extreme(rng) as u32;
+            end.time_ns = rng.one_in(2).then(|| extreme(rng));
+        }
+        Message::DioHeader(header) => {
+            header.clock_hz = extreme(rng) as u32;
+            header.dio_mask = rng.next() as u8;
+            header.dio_levels = rng.next() as u8;
+        }
+        Message::DioTime(time) => time.time_ns = extreme(rng),
     }
 }
 
 /// Whatever a corrupt transfer, a foreign firmware or a message left from an earlier stream hands
-/// the recorder comes back as an error, never a panic: random bytes of every kind through
-/// `stream::parse` and on into the Encoder, and real streams with their fields set to anything,
-/// through to the finish. Each failure names its seed.
+/// the recorder comes back as an error, never a panic or a hang: random bytes of every kind through
+/// `stream::parse` and on into the Encoder after a capture's or a DIO stream's header, and real
+/// streams of both kinds with their fields, headers included, set to anything, through to the
+/// finish. Each failure names its seed, as does a case that runs too long.
 #[test]
 fn nothing_from_the_probe_panics_the_recorder() {
     use crate::stream::{self, parse};
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    // Far past what a case takes, about 7 ms; the hang a5d9514 fixed took hours.
+    const CASE_LIMIT: Duration = Duration::from_secs(5);
     let shape = |seed: u64| Shape {
         seed,
         rate: [1_000, 10_000, 100_000, 7][seed as usize % 4],
@@ -1509,6 +1585,45 @@ fn nothing_from_the_probe_panics_the_recorder() {
         encoder.ingest(&edge_at(minute)).is_ok(),
         "an edge a minute ahead"
     );
+    // A DIO stream has no pairs to bound its stamps by. The furthest edge a recording can end
+    // after, with its length one past it below 2^53 ticks, finishes as fast as a near one.
+    let started = Instant::now();
+    let mut encoder = Encoder::new(Context::default());
+    encoder.ingest(&dio_stream(1, 0x0f, 0)[0]).unwrap();
+    let far = ((1u128 << 53) - 2) * 1_000_000_000 / 150_000_000;
+    encoder
+        .ingest(&Message::Edges(Edges::new(
+            0,
+            vec![Edge {
+                time_ns: far as u64,
+                levels: 1,
+            }],
+        )))
+        .unwrap();
+    encoder.flush().unwrap();
+    encoder.finish("far").unwrap();
+    assert!(started.elapsed() < CASE_LIMIT, "{:?}", started.elapsed());
+    // A tick further on is refused as it comes, edge or DIO time, and what came before finishes.
+    let past = (((1u128 << 53) - 1) * 1_000_000_000 / 150_000_000) as u64;
+    for message in [
+        Message::Edges(Edges::new(
+            0,
+            vec![Edge {
+                time_ns: past,
+                levels: 1,
+            }],
+        )),
+        Message::DioTime(DioTime { time_ns: past }),
+    ] {
+        let mut encoder = Encoder::new(Context::default());
+        encoder.ingest(&dio_stream(1, 0x0f, 0)[0]).unwrap();
+        encoder
+            .ingest(&Message::DioTime(DioTime { time_ns: 1_000 }))
+            .unwrap();
+        assert!(matches!(encoder.ingest(&message), Err(Error::Timestamps)));
+        encoder.flush().unwrap();
+        encoder.finish("past").unwrap();
+    }
     let kinds = [
         stream::PAIRS,
         stream::HEADER,
@@ -1516,15 +1631,22 @@ fn nothing_from_the_probe_panics_the_recorder() {
         stream::EDGES,
         stream::MARKS,
         stream::DIO_LOST,
+        stream::DIO_TIME,
         0x00,
         0xff,
     ];
     let mut parsed = 0;
     for seed in 1..=300u64 {
+        let started = Instant::now();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
             let mut encoder = Encoder::new(Context::default());
-            let _ = encoder.ingest(&Message::Header(header(shape(seed))));
+            let first = if seed.is_multiple_of(2) {
+                Message::Header(header(shape(seed)))
+            } else {
+                dio_stream(seed, 0x0f, 0).swap_remove(0)
+            };
+            let _ = encoder.ingest(&first);
             let mut parsed = 0;
             for _ in 0..200 {
                 let len = rng.below(600) as usize;
@@ -1543,7 +1665,7 @@ fn nothing_from_the_probe_panics_the_recorder() {
                             let e = ((len - 12) / 5).clamp(1, 99) as u16;
                             bytes[10..12].copy_from_slice(&e.to_le_bytes());
                         }
-                        Some(&stream::HEADER) if len >= 2 => bytes[1] = 3 + rng.below(2) as u8,
+                        Some(&stream::HEADER) if len >= 2 => bytes[1] = 3 + rng.below(3) as u8,
                         _ => {}
                     }
                 }
@@ -1560,14 +1682,22 @@ fn nothing_from_the_probe_panics_the_recorder() {
             Ok(n) => parsed += n,
             Err(_) => panic!("random bytes, seed {seed}"),
         }
+        let took = started.elapsed();
+        assert!(took < CASE_LIMIT, "random bytes, seed {seed}: {took:?}");
     }
     assert!(parsed > 10_000, "only {parsed} random messages parsed");
-    for seed in 1..=200u64 {
+    for seed in 1..=300u64 {
+        let started = Instant::now();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut rng = Rng(seed.wrapping_mul(0xbf58_476d_1ce4_e5b9) | 1);
-            let mut messages = stream(shape(seed));
-            for message in messages.iter_mut().skip(1) {
-                if rng.one_in(4) {
+            let mut messages = if seed.is_multiple_of(3) {
+                dio_stream(seed, [0x0f, 0x01, 0x0a][(seed / 3) as usize % 3], 40)
+            } else {
+                stream(shape(seed))
+            };
+            // The header less often, so that most streams get past it.
+            for (i, message) in messages.iter_mut().enumerate() {
+                if rng.one_in(if i == 0 { 8 } else { 4 }) {
                     mutate(message, &mut rng);
                 }
             }
@@ -1582,9 +1712,263 @@ fn nothing_from_the_probe_panics_the_recorder() {
             for message in &messages {
                 let _ = encoder.ingest(message);
                 let _ = encoder.take_output();
+                let _ = encoder.flush();
             }
             let _ = encoder.finish("mutated");
         }));
         assert!(outcome.is_ok(), "mutated stream, seed {seed}");
+        let took = started.elapsed();
+        assert!(took < CASE_LIMIT, "mutated stream, seed {seed}: {took:?}");
+    }
+}
+
+/// A DIO stream's recording holds its pins alone, under `verge-dio`: no V, I, flags or power,
+/// each pin's edges where the stream put them, a loss as a gap on every pin, and a length that
+/// reaches the end message's time past the last edge. The FileWriter's compaction keeps it.
+#[test]
+fn a_dio_streams_recording_holds_its_pins_alone() {
+    let clock = 150_000_000;
+    let ns = |count: u64| (u128::from(count) * 1_000_000_000 / u128::from(clock)) as u64;
+    let edges = |at: u64, levels: u8| {
+        Message::Edges(Edges::new(
+            0,
+            vec![Edge {
+                time_ns: ns(at),
+                levels,
+            }],
+        ))
+    };
+    let messages = vec![
+        Message::DioHeader(DioHeader {
+            clock_hz: clock,
+            dio_mask: 0b0101,
+            dio_levels: 0b1001,
+            edge_resolution_ns: 7,
+        }),
+        // DIO0 falls and DIO2 rises; then DIO0 rises; DIO1 and DIO3 are not reported.
+        edges(1000, 0b0110),
+        edges(2000, 0b0101),
+        Message::DioLost(DioLost {
+            from_ns: ns(3000),
+            to_ns: ns(4000),
+            levels: 0b0000,
+        }),
+        edges(5000, 0b0001),
+        Message::End(End {
+            reason: EndReason::Asked,
+            last_sequence: 0,
+            time_ns: Some(ns(10_000)),
+        }),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dio.tickwave");
+    write_with_file_writer(&path, &messages, true);
+    for file in [encode(&messages), std::fs::read(&path).unwrap()] {
+        let d = decode(&file);
+        let names: Vec<&str> = d.header.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["DIO0", "DIO2"]);
+        assert!(d.header.derived.is_empty());
+        assert_eq!(
+            d.header.sources[0].format,
+            SourceFormat::Other(DIO_FORMAT.into())
+        );
+        assert_eq!(d.header.length, 10_000);
+        assert_eq!(d.edges, [vec![1000, 2000, 5000], vec![1000]]);
+        let lost = Gap {
+            from: 3000,
+            to: 4000,
+            level: false,
+        };
+        assert_eq!(d.gaps, [vec![lost], vec![lost]]);
+        assert_eq!(level_at(&d, 0, 0), Some(true));
+        assert_eq!(level_at(&d, 1, 9_999), Some(false));
+    }
+}
+
+/// A DIO stream reports at least one pin, sends no pairs, and its times never go back.
+#[test]
+fn a_dio_stream_refuses_what_it_cannot_record() {
+    let header = |mask| {
+        Message::DioHeader(DioHeader {
+            clock_hz: 150_000_000,
+            dio_mask: mask,
+            dio_levels: 0,
+            edge_resolution_ns: 7,
+        })
+    };
+    let mut encoder = Encoder::new(Context::default());
+    assert!(matches!(encoder.ingest(&header(0)), Err(Error::NoPins)));
+    let mut encoder = Encoder::new(Context::default());
+    encoder.ingest(&header(1)).unwrap();
+    assert!(matches!(
+        encoder.ingest(&Message::Pairs(Pairs {
+            flags: 0,
+            first_sequence: 1,
+            time_ns: 0,
+            pairs: vec![Pair {
+                voltage_code: 0,
+                current_code: 0,
+                low: false,
+                under_range: false
+            }],
+        })),
+        Err(Error::DioPairs)
+    ));
+    let mut encoder = Encoder::new(Context::default());
+    encoder.ingest(&header(1)).unwrap();
+    let edge = |ns, levels| {
+        Message::Edges(Edges::new(
+            0,
+            vec![Edge {
+                time_ns: ns,
+                levels,
+            }],
+        ))
+    };
+    encoder.ingest(&edge(2_000, 1)).unwrap();
+    assert!(matches!(
+        encoder.ingest(&edge(1_000, 0)),
+        Err(Error::Timestamps)
+    ));
+    // Edges stamped together come in one message, so a later one can't share its time.
+    assert!(matches!(
+        encoder.ingest(&edge(2_000, 0)),
+        Err(Error::Timestamps)
+    ));
+    assert!(matches!(encoder.ingest(&header(1)), Err(Error::Restarted)));
+    // A DIO time comes after everything sent; an edge can come at it.
+    let time = |ns| Message::DioTime(DioTime { time_ns: ns });
+    let mut encoder = Encoder::new(Context::default());
+    encoder.ingest(&header(1)).unwrap();
+    encoder.ingest(&edge(2_000, 1)).unwrap();
+    assert!(matches!(
+        encoder.ingest(&time(2_000)),
+        Err(Error::Timestamps)
+    ));
+    let mut encoder = Encoder::new(Context::default());
+    encoder.ingest(&header(1)).unwrap();
+    encoder.ingest(&edge(2_000, 1)).unwrap();
+    // 2,001 ns is the tick after the edge's: the promise.
+    encoder.ingest(&time(2_001)).unwrap();
+    encoder.ingest(&time(2_007)).unwrap();
+    encoder.ingest(&edge(2_007, 0)).unwrap();
+    assert!(matches!(
+        encoder.ingest(&time(2_000)),
+        Err(Error::Timestamps)
+    ));
+    // A loss that spans nothing gives the levels from its time on, and an edge after it comes
+    // later: 7 ns is one count.
+    for (edge_ns, taken) in [(3_000, false), (3_007, true)] {
+        let mut encoder = Encoder::new(Context::default());
+        encoder.ingest(&header(1)).unwrap();
+        encoder
+            .ingest(&Message::DioLost(DioLost {
+                from_ns: 3_000,
+                to_ns: 3_000,
+                levels: 1,
+            }))
+            .unwrap();
+        let outcome = encoder.ingest(&edge(edge_ns, 0));
+        assert_eq!(outcome.is_ok(), taken, "edge at {edge_ns} ns: {outcome:?}");
+        assert!(taken || matches!(outcome, Err(Error::Timestamps)));
+    }
+}
+
+/// A crash keeps every edge and loss the stream sent before the last flush, the latest included
+/// however long the pins stay quiet after it, and the quiet the probe's last DIO time covers; a file
+/// cut anywhere recovers to a prefix.
+#[test]
+fn a_dio_recording_cut_off_keeps_its_latest_edge_and_recovers_to_a_prefix() {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Last {
+        Edges,
+        Loss,
+        Quiet,
+    }
+    for (seed, mask, last) in [
+        (3, 0x0f, Last::Edges),
+        (8, 0x0a, Last::Loss),
+        (5, 0x0f, Last::Quiet),
+    ] {
+        let mut messages = dio_stream(seed, mask, 40);
+        // The recorder stops without an end, after its clock's flush.
+        messages.pop();
+        let after = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Edges(e) => e.edges.last().map(|e| e.time_ns),
+                Message::DioLost(l) => Some(l.to_ns),
+                Message::DioTime(t) => Some(t.time_ns),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+        messages.retain(|m| last != Last::Edges || !matches!(m, Message::DioTime(_)));
+        match last {
+            Last::Edges => {}
+            Last::Loss => messages.push(Message::DioLost(DioLost {
+                from_ns: after + 1_000,
+                to_ns: after + 2_000,
+                levels: 0b0010,
+            })),
+            // Five seconds of quiet pins.
+            Last::Quiet => messages.push(Message::DioTime(DioTime {
+                time_ns: after + 5_000_000_000,
+            })),
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dio.tickwave");
+        let mut writer = FileWriter::create(&path, Context::default())
+            .unwrap()
+            .flushing_always();
+        for message in &messages {
+            writer.ingest(message).unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut whole = messages.clone();
+        whole.push(Message::End(End {
+            reason: EndReason::Asked,
+            last_sequence: 0,
+            time_ns: None,
+        }));
+        let all = decode(&encode(&whole));
+        compact(&path).unwrap();
+        let recovered = decode(&std::fs::read(&path).unwrap());
+        assert_eq!(recovered.edges, all.edges, "seed {seed}");
+        assert_eq!(recovered.gaps, all.gaps, "seed {seed}");
+        if last == Last::Quiet {
+            let quiet_to = (after + 5_000_000_000) as i64 * 150 / 1000;
+            assert!(
+                recovered.header.length >= quiet_to,
+                "seed {seed}: {}",
+                recovered.header.length
+            );
+        }
+        for cut in (1..16).map(|k| bytes.len() * k / 16) {
+            let path = dir.path().join(format!("cut-{cut}.tickwave"));
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            match compact(&path) {
+                Ok(()) => {}
+                // Too little for a declaration, or nothing after it.
+                Err(Error::Recut(_)) if cut < bytes.len() / 4 => continue,
+                Err(error) => panic!("seed {seed}, cut at {cut} of {}: {error}", bytes.len()),
+            }
+            let cut_off = decode(&std::fs::read(&path).unwrap());
+            for (c, edges) in cut_off.edges.iter().enumerate() {
+                assert_eq!(
+                    edges[..],
+                    all.edges[c][..edges.len()],
+                    "seed {seed}, cut at {cut}"
+                );
+                let gaps = &cut_off.gaps[c];
+                assert_eq!(
+                    gaps[..],
+                    all.gaps[c][..gaps.len()],
+                    "seed {seed}, cut at {cut}"
+                );
+            }
+        }
     }
 }

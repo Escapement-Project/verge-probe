@@ -29,6 +29,7 @@ pub const STOCK_BOOTLOADER_ACCEPTED: [u8; 3] = [0x81, 0x00, 0x01];
 pub const REBOOT_REQUEST_TYPE: u8 = 0x40;
 pub const REBOOT_REQUEST: u8 = 0x03;
 pub const REBOOT_TO_BOOTLOADER: u16 = 1;
+pub const REBOOT_RESTART: u16 = 0;
 
 /// `DAP_Info` fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

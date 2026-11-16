@@ -1,10 +1,11 @@
-//! Opening a selected Pro without competing with its debugger.
+//! Opening a selected Pro, or a standalone MCU-Link for its DIO pins, without competing with its
+//! debugger.
 
 use crate::aux::{Aux, AuxError, AuxLink};
 use crate::bus::BusError;
 use crate::dap::LinkError;
 use crate::stream::Message;
-use crate::{Bus, CommandError, DapTransport, Unit, VergeControl, VergeInfo, VergeTransport, dap};
+use crate::{Bus, CommandError, DapTransport, Unit, VergeControl, VergeInfo, VergeTransport};
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ impl ProLink for DapTransport<'_> {
     }
 }
 
-/// What a Pro offers that a frontend reaches.
+/// What a unit running Verge offers that a frontend reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     Supply,
@@ -48,6 +49,15 @@ impl Feature {
             Self::Energy => "energy measurement",
             Self::Dio => "DIO pins",
         }
+    }
+    /// Whether `board` has it: DIO pins on the Pro and the standalone MCU-Link, the rest on the
+    /// Pro alone.
+    #[must_use]
+    pub fn on(self, board: crate::BoardKind) -> bool {
+        matches!(
+            (self, board),
+            (_, crate::BoardKind::Pro) | (Self::Dio, crate::BoardKind::Plain)
+        )
     }
     fn offered(self, info: &VergeInfo) -> bool {
         match self {
@@ -78,6 +88,8 @@ pub enum ProError {
     },
     #[error("{name} is not an MCU-Link Pro, so it has no {feature}")]
     NotPro { name: String, feature: Feature },
+    #[error("{name} has no DIO pins: only an MCU-Link Pro and a standalone MCU-Link have them")]
+    NoDio { name: String },
     #[error(
         "{name} reports no energy measurement: its HW_VER_5 strap says the circuit is not fitted"
     )]
@@ -88,7 +100,7 @@ pub enum ProError {
         firmware: String,
         feature: Feature,
     },
-    #[error("{name} has no Verge Aux, which recording needs: update the firmware first")]
+    #[error("{name} has no Verge Aux: update the firmware first")]
     NoAux { name: String },
     #[error("{name} has DIO disabled: remove J15 and restart the probe")]
     DioDisabled { name: String },
@@ -121,7 +133,8 @@ fn name(unit: &Unit) -> String {
     unit.serial().unwrap_or("the unit").to_owned()
 }
 
-/// Refuses, in a sentence that says why, a unit that is not a Pro running Verge.
+/// Refuses, in a sentence that says why, a unit running Verge on a board without `feature`, or
+/// not running Verge.
 pub fn validate(unit: &Unit, feature: Feature) -> Result<(), ProError> {
     let name = name(unit);
     if let crate::detect::State::Unreadable { reason, .. } = &unit.state {
@@ -137,14 +150,13 @@ pub fn validate(unit: &Unit, feature: Feature) -> Result<(), ProError> {
             feature,
         });
     };
-    if ours
-        .board
-        .map(crate::BoardKind::number)
-        .is_some_and(|board| board != dap::Ours::BOARD_MCU_LINK_PRO)
-    {
-        return Err(ProError::NotPro { name, feature });
+    match ours.board {
+        Some(board) if !feature.on(board) => Err(match feature {
+            Feature::Dio => ProError::NoDio { name },
+            _ => ProError::NotPro { name, feature },
+        }),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Refuses a Pro whose firmware does not offer `feature`.
@@ -164,7 +176,9 @@ pub fn check_offered<T: VergeTransport + ?Sized>(
             name: name.to_owned(),
         })?;
     if feature == Feature::Dio {
-        if info.version >= 6 && !info.supports_dio() {
+        // Only the Pro has a jumper that turns them off; a standalone MCU-Link without them runs a
+        // build from before they were its.
+        if info.board == Some(crate::BoardKind::Pro) && info.version >= 6 && !info.supports_dio() {
             return Err(ProError::DioDisabled {
                 name: name.to_owned(),
             });
@@ -244,7 +258,13 @@ pub fn with_pro<B: Bus, T, E: From<ProError>>(
 
 /// Verge Aux on `unit`, checked to offer energy measurement: the only way to its stream.
 pub fn open_stream<B: Bus>(bus: &B, unit: &Unit) -> Result<Aux<B::Aux>, ProError> {
-    validate(unit, Feature::Energy)?;
+    open_aux(bus, unit, Feature::Energy)
+}
+
+/// Verge Aux on `unit`, checked to offer `feature`. A frontend that holds it leaves CMSIS-DAP to a
+/// debugger.
+pub fn open_aux<B: Bus>(bus: &B, unit: &Unit, feature: Feature) -> Result<Aux<B::Aux>, ProError> {
+    validate(unit, feature)?;
     let name = name(unit);
     if !unit.device.aux {
         return Err(ProError::NoAux { name });
@@ -260,6 +280,44 @@ pub fn open_stream<B: Bus>(bus: &B, unit: &Unit) -> Result<Aux<B::Aux>, ProError
         name: name.clone(),
         source,
     })?;
-    check_offered(&name, &mut VergeControl::new(&mut aux), Feature::Energy)?;
+    check_offered(&name, &mut VergeControl::new(&mut aux), feature)?;
     Ok(aux)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dap::Ours;
+    use crate::sim::SimBus;
+
+    fn unit(board: u8) -> Unit {
+        let bus = SimBus::default();
+        let unit = bus.add_ours("26ea505");
+        bus.set_board(unit, board);
+        crate::detect::detect(&bus).unwrap().remove(0)
+    }
+
+    /// DIO pins on the Pro and the standalone MCU-Link, the supply and energy on the Pro alone, and
+    /// each refusal saying which.
+    #[test]
+    fn each_board_offers_its_own_features() {
+        for feature in [Feature::Dio, Feature::Supply, Feature::Energy] {
+            assert!(
+                validate(&unit(Ours::BOARD_MCU_LINK_PRO), feature).is_ok(),
+                "{feature}"
+            );
+        }
+        let plain = unit(Ours::BOARD_MCU_LINK);
+        assert!(validate(&plain, Feature::Dio).is_ok());
+        for feature in [Feature::Supply, Feature::Energy] {
+            assert!(
+                matches!(validate(&plain, feature), Err(ProError::NotPro { .. })),
+                "{feature}"
+            );
+        }
+        assert!(matches!(
+            validate(&unit(Ours::BOARD_ON_BOARD), Feature::Dio),
+            Err(ProError::NoDio { .. })
+        ));
+    }
 }

@@ -273,7 +273,8 @@ fn messages_parse_as_the_probe_lays_them_out() {
         stream::parse(&[stream::END, 3, 7, 0, 0, 0]).unwrap(),
         Message::End(stream::End {
             reason: stream::EndReason::Restarted,
-            last_sequence: 7
+            last_sequence: 7,
+            time_ns: None,
         })
     );
     assert_eq!(
@@ -339,8 +340,9 @@ fn messages_parse_as_the_probe_lays_them_out() {
         (parsed.rearm_between_pairs, parsed.previous_shunt_nanoamps),
         (false, None)
     );
-    // Formats 1 and 2 weighed pairs by a rate rounded down: refused, not misread.
-    for format in [1, 2, 5] {
+    // Formats 1 and 2 weighed pairs by a rate rounded down: refused, not misread. So is one
+    // past what this reads.
+    for format in [1, 2, 6] {
         let mut other = header.clone();
         other[1] = format;
         assert_eq!(
@@ -348,6 +350,29 @@ fn messages_parse_as_the_probe_lays_them_out() {
             Err(stream::StreamError::Format(format))
         );
     }
+    // A DIO stream's header, format 5, and its end, which says when.
+    let mut dio = vec![0xA1, 5];
+    dio.extend_from_slice(&150_000_000u32.to_le_bytes());
+    dio.extend_from_slice(&[0b0101, 0b0001, 7, 0]);
+    let Message::DioHeader(parsed) = stream::parse(&dio).unwrap() else {
+        panic!("DIO header")
+    };
+    assert_eq!(
+        (
+            parsed.clock_hz,
+            parsed.dio_mask,
+            parsed.dio_levels,
+            parsed.edge_resolution_ns
+        ),
+        (150_000_000, 0b0101, 0b0001, 7)
+    );
+    assert_eq!(stream::parse(&dio[..9]), Err(stream::StreamError::Short(9)));
+    let mut end = vec![stream::END, 1, 0, 0, 0, 0];
+    end.extend_from_slice(&2_500_000_000u64.to_le_bytes());
+    let Message::End(end) = stream::parse(&end).unwrap() else {
+        panic!("end")
+    };
+    assert_eq!((end.last_sequence, end.time_ns), (0, Some(2_500_000_000)));
     assert!(stream::is_stream_message(&pairs) && !stream::is_stream_message(&[0x90, 0]));
 
     let mut edges = vec![stream::EDGES, 1];
@@ -405,6 +430,19 @@ fn messages_parse_as_the_probe_lays_them_out() {
         Err(stream::StreamError::Short(18))
     );
 
+    // DIO time: a quiet DIO stream's time.
+    let mut time = vec![stream::DIO_TIME, 0];
+    time.extend_from_slice(&(u64::from(u32::MAX) + 9).to_le_bytes());
+    let Message::DioTime(message) = stream::parse(&time).unwrap() else {
+        panic!("not a DIO time message");
+    };
+    assert_eq!(message.time_ns, u64::from(u32::MAX) + 9);
+    assert!(stream::is_stream_message(&time) && message.to_bytes() == time);
+    assert_eq!(
+        stream::parse(&time[..9]),
+        Err(stream::StreamError::Short(9))
+    );
+
     // Markers: count, then each marker's time, number, label length and label.
     let mut marks = vec![stream::MARKS, 1, 2];
     marks.extend_from_slice(&(u64::from(u32::MAX) + 5).to_le_bytes());
@@ -442,7 +480,7 @@ fn messages_parse_as_the_probe_lays_them_out() {
             "{length} bytes"
         );
     }
-    assert!(!stream::is_stream_message(&[0xA6]));
+    assert!(!stream::is_stream_message(&[stream::DIO_TIME + 1]));
 }
 
 /// Step 5 in the samples: a pair at a range switch keeps its time and voltage, takes the next

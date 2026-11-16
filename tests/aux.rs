@@ -40,20 +40,28 @@ fn rate(rate: u32) -> Vec<u8> {
     request
 }
 
+/// A Pro and a standalone MCU-Link running Verge offer it; an on-board MCU-Link does not.
 #[test]
-fn only_a_pro_running_verge_offers_it() {
+fn a_pro_and_a_standalone_mcu_link_offer_it() {
     let bus = SimBus::default();
     let device = pro(&bus);
     assert!(device.aux);
-    let plain = bus.add_ours("26ea505");
-    bus.set_board(plain, Ours::BOARD_MCU_LINK);
-    let plain = detect(&bus)
-        .unwrap()
-        .into_iter()
-        .find(|unit| !unit.device.aux)
-        .unwrap()
-        .device;
-    assert!(bus.open_aux(&plain).is_err());
+    for board in [Ours::BOARD_MCU_LINK, Ours::BOARD_ON_BOARD] {
+        let unit = bus.add_ours("26ea505");
+        bus.set_board(unit, board);
+    }
+    let units = detect(&bus).unwrap();
+    let board = |unit: &escapement_verge_probe::Unit| unit.verge().and_then(|ours| ours.board);
+    for unit in &units {
+        let offers = board(unit) != Some(escapement_verge_probe::BoardKind::OnBoard);
+        assert_eq!(unit.device.aux, offers, "{:?}", board(unit));
+        assert_eq!(
+            bus.open_aux(&unit.device).is_ok(),
+            offers,
+            "{:?}",
+            board(unit)
+        );
+    }
 }
 
 /// The typed commands run over it as over CMSIS-DAP, and one capture answers on both.

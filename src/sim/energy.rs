@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use crate::protocol::{ENERGY_COMMAND, MARK_COMMAND, TARGET_POWER_COMMAND};
-use crate::stream::{DioLost, Edge, Edges, LABEL_MAX, Marker, Markers};
+use crate::stream::{DioLost, DioTime, Edge, Edges, LABEL_MAX, Marker, Markers};
 
 const DAP_OK: u8 = 0x00;
 const DAP_ERROR: u8 = 0xFF;
@@ -58,6 +58,17 @@ pub struct SimEnergy {
     pub dio_held: u8,
     /// Verge Aux's stream of the capture.
     pub stream: Option<Stream>,
+    /// A DIO stream (`0x90` mode 15) on a board without energy capture: when it started, and the
+    /// pins it reports.
+    pub dio_stream: Option<(Duration, u8)>,
+    /// Input pins something attached toggles every 50 ms, which a DIO stream reports; a restart
+    /// keeps them.
+    pub dio_toggle: u8,
+    /// How far into the DIO stream its toggles have gone, and the input pins they left flipped.
+    toggled_at: Duration,
+    toggled: u8,
+    /// The DIO stream's latest time, in µs: a later message comes after it, as the probe's do.
+    dio_stamped: Option<u64>,
     /// `0x90` mode 14: the next start holds the high range, and clears this.
     pub high_range_next: bool,
     /// Stream messages an event produced ahead of the next read: the last pairs of a capture a
@@ -77,8 +88,14 @@ pub struct Stream {
 
 /// The pin the target marks its waking time on.
 const MARKER: u8 = 1 << 3;
+/// How often `dio_toggle`'s pins change.
+const TOGGLE_EVERY: Duration = Duration::from_millis(50);
+/// How long a DIO stream stays quiet before it sends its time, as the probe's does.
+const QUIET_FOR_US: u64 = 200_000;
 /// The resolution a stream header gives for edges, as the Pro's 96 MHz stamping clock's.
 const EDGE_RESOLUTION_NS: u16 = 11;
+/// A DIO stream's clock: the simulator times its edges to the microsecond.
+const DIO_CLOCK_HZ: u32 = 1_000_000;
 
 const FULL_SCALE_MV: u32 = 3_000;
 const PAIRS_A_MESSAGE: u64 = 99;
@@ -123,6 +140,24 @@ impl Capture {
 
 impl SimEnergy {
     pub fn set_dio(&mut self, outputs: u8, levels: u8, held: u8, now: Duration) {
+        if let Some((since, pins)) = self.dio_stream {
+            let toggles = self.dio_toggles(now);
+            self.outbox.extend(toggles);
+            let before = self.dio_read();
+            self.dio_outputs = outputs;
+            self.dio_levels = levels;
+            self.dio_held = held;
+            let after = self.dio_read();
+            if (before ^ after) & pins != 0 {
+                let at = self.dio_stamp(now.saturating_sub(since).as_micros() as u64);
+                let edge = Edge {
+                    time_ns: at * 1000,
+                    levels: after & pins,
+                };
+                self.outbox.push(Edges::new(0, vec![edge]).to_bytes());
+            }
+            return;
+        }
         let elapsed = self.capture.map_or(0, |capture| {
             now.saturating_sub(capture.since).as_micros() as u64
         });
@@ -151,7 +186,98 @@ impl SimEnergy {
 
     /// What a restart leaves: supply off, no capture, no total.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            dio_toggle: self.dio_toggle,
+            ..Self::default()
+        };
+    }
+
+    /// The pins as the probe reads them without an energy capture: what drives or holds each, with
+    /// `dio_toggle`'s inputs flipped as far as they have gone in a DIO stream.
+    fn dio_read(&self) -> u8 {
+        let driven = (self.dio_held & !self.dio_outputs) | (self.dio_levels & self.dio_outputs);
+        driven ^ (self.toggled & !self.dio_outputs)
+    }
+
+    /// The pins `dio_toggle`'s toggles have flipped, inputs or not.
+    pub(super) fn toggled(&self) -> u8 {
+        self.toggled
+    }
+
+    /// A DIO stream's time for something at `micros`: after the latest, as a later interrupt
+    /// stamps later.
+    fn dio_stamp(&mut self, micros: u64) -> u64 {
+        let at = self.dio_stamped.map_or(micros, |last| micros.max(last + 1));
+        self.dio_stamped = Some(at);
+        at
+    }
+
+    /// A DIO stream's time once nothing has been stamped for 200 ms: now, after all it sent. As
+    /// the probe's, none while edges wait to be sent, and none for a stream of no pins.
+    fn dio_time(&mut self, now: Duration) -> Option<Vec<u8>> {
+        let (since, pins) = self.dio_stream?;
+        let elapsed = now.saturating_sub(since);
+        let micros = elapsed.as_micros() as u64;
+        let toggles_due = self.dio_toggle & pins != 0 && self.toggled_at + TOGGLE_EVERY <= elapsed;
+        if pins == 0 || toggles_due || micros < self.dio_stamped.unwrap_or(0) + QUIET_FOR_US {
+            return None;
+        }
+        let at = self.dio_stamp(micros);
+        Some(DioTime { time_ns: at * 1000 }.to_bytes())
+    }
+
+    /// The edges of the pins `dio_toggle` names, up to `now` into a DIO stream. What is attached
+    /// keeps toggling while the probe drives a pin, which reads its drive meanwhile. With
+    /// `lose_next_edges`, the first is lost: a DIO lost message from just after the latest time,
+    /// or the header's, stands for it.
+    fn dio_toggles(&mut self, now: Duration) -> Vec<Vec<u8>> {
+        let Some((since, pins)) = self.dio_stream else {
+            return Vec::new();
+        };
+        let toggle = self.dio_toggle & pins;
+        let mut out = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
+        // At most 99 a call, and each message spans what its 32-bit offsets hold, as the probe's.
+        let mut sent = 0;
+        while toggle != 0
+            && sent < 99
+            && self.toggled_at + TOGGLE_EVERY <= now.saturating_sub(since)
+        {
+            self.toggled_at += TOGGLE_EVERY;
+            self.toggled ^= toggle;
+            if toggle & !self.dio_outputs == 0 {
+                continue;
+            }
+            let from = self.dio_stamped.map_or(1, |last| last + 1);
+            let at = self.dio_stamp(self.toggled_at.as_micros() as u64);
+            let levels = self.dio_read() & pins;
+            if std::mem::take(&mut self.lose_next_edges) {
+                out.push(
+                    DioLost {
+                        from_ns: from * 1000,
+                        to_ns: at * 1000,
+                        levels,
+                    }
+                    .to_bytes(),
+                );
+                continue;
+            }
+            if edges
+                .first()
+                .is_some_and(|first| at * 1000 - first.time_ns > u64::from(u32::MAX))
+            {
+                out.push(Edges::new(0, std::mem::take(&mut edges)).to_bytes());
+            }
+            edges.push(Edge {
+                time_ns: at * 1000,
+                levels,
+            });
+            sent += 1;
+        }
+        if !edges.is_empty() {
+            out.push(Edges::new(0, edges).to_bytes());
+        }
+        out
     }
 
     /// Supply on and a capture running since `now` at `rate`.
@@ -546,6 +672,8 @@ impl SimEnergy {
     /// stopped, failed or been restarted.
     pub fn stream_messages(&mut self, now: Duration) -> Vec<Vec<u8>> {
         let mut messages = std::mem::take(&mut self.outbox);
+        messages.extend(self.dio_toggles(now));
+        messages.extend(self.dio_time(now));
         let Some(mut stream) = self.stream else {
             return messages;
         };
@@ -715,7 +843,7 @@ impl SimEnergy {
         if self.capture_id.as_ref().map(|id| id.as_bytes().as_slice()) != Some(bytes) {
             return vec![vec![ENERGY_COMMAND, DAP_OK, 8]];
         }
-        self.stop_stream(pro, now)
+        self.stop_stream(now)
     }
 
     /// `0x94` (`request` after the command byte): a marker stamped `now` goes into the stream, after
@@ -752,17 +880,55 @@ impl SimEnergy {
         vec![MARK_COMMAND, DAP_OK, result]
     }
 
-    /// `0x90` mode 7: the stream stops, the capture carries on. The reply, then the end.
-    pub fn stop_stream(&mut self, pro: bool, now: Duration) -> Vec<Vec<u8>> {
+    /// `0x90` mode 7: the stream stops, the capture carries on. The reply, then the end. A board
+    /// without energy capture answers it too: it ends a DIO stream there.
+    pub fn stop_stream(&mut self, now: Duration) -> Vec<Vec<u8>> {
         let mut messages = self.stream_messages(now);
-        messages.push(vec![
-            ENERGY_COMMAND,
-            DAP_OK,
-            if pro { OK } else { UNAVAILABLE },
-        ]);
+        messages.push(vec![ENERGY_COMMAND, DAP_OK, OK]);
         if let Some(stream) = self.stream.take() {
             messages.push(Self::end(ASKED, stream.next));
         }
+        messages.extend(self.end_dio_stream(now));
+        messages
+    }
+
+    /// A DIO stream's end, which says when: no pair marks it.
+    fn end_dio_stream(&mut self, now: Duration) -> Option<Vec<u8>> {
+        let (since, _) = self.dio_stream.take()?;
+        let mut end = Self::end(ASKED, 0);
+        let at = (now.saturating_sub(since).as_micros() as u64).max(self.dio_stamped.unwrap_or(0));
+        end.extend_from_slice(&(at * 1000).to_le_bytes());
+        Some(end)
+    }
+
+    /// `0x90` mode 15: a DIO stream of `pins`, where the board has DIO pins and no energy capture.
+    /// It ends one already running. The reply, then the header.
+    pub fn start_dio_stream(
+        &mut self,
+        energy: bool,
+        dio: bool,
+        now: Duration,
+        pins: u8,
+    ) -> Vec<Vec<u8>> {
+        let mut messages = self.stream_messages(now);
+        if energy || !dio {
+            messages.push(vec![ENERGY_COMMAND, DAP_OK, UNAVAILABLE]);
+            return messages;
+        }
+        // The end goes with the queue the reply drops.
+        let _ = self.end_dio_stream(now);
+        let pins = pins & 0x0F;
+        messages.push(vec![ENERGY_COMMAND, DAP_OK, OK]);
+        let mut header = vec![0xA1, 5];
+        header.extend_from_slice(&DIO_CLOCK_HZ.to_le_bytes());
+        self.toggled_at = Duration::ZERO;
+        self.toggled = 0;
+        self.dio_stamped = None;
+        header.extend_from_slice(&[pins, self.dio_read() & pins]);
+        let resolution: u16 = if pins == 0 { 0 } else { 1000 };
+        header.extend_from_slice(&resolution.to_le_bytes());
+        messages.push(header);
+        self.dio_stream = Some((now, pins));
         messages
     }
 }
@@ -784,5 +950,201 @@ mod identity_tests {
         let status = energy.energy(true, Duration::from_secs(1), &[12]);
         assert_eq!(&status[..4], &[0x90, 0, 0, 1]);
         assert_eq!(&status[8..], token.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod dio_stream_tests {
+    use super::*;
+    use crate::stream::{Message, is_stream_message, parse};
+
+    /// A DIO stream's messages after its header, parsed.
+    fn parsed(messages: &[Vec<u8>]) -> Vec<Message> {
+        messages
+            .iter()
+            .filter(|m| is_stream_message(m))
+            .map(|m| parse(m).unwrap())
+            .filter(|m| !matches!(m, Message::DioHeader(_)))
+            .collect()
+    }
+
+    /// Each edges message's edges, as (µs, levels).
+    fn edges(messages: &[Message]) -> Vec<(u64, u8)> {
+        messages
+            .iter()
+            .flat_map(|m| match m {
+                Message::Edges(message) => message
+                    .edges
+                    .iter()
+                    .map(|e| (e.time_ns / 1000, e.levels))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// What a DIO stream sends in a later message comes after the last one's time, as the probe
+    /// stamps a later interrupt later. Here: an edge, a lost toggle, which starts just after that
+    /// edge, a pin driven three times in one microsecond, and the toggle due in the next one,
+    /// which comes after them. The end comes no earlier than the last edge.
+    #[test]
+    fn a_dio_streams_later_messages_come_after_the_last_ones_time() {
+        let mut energy = SimEnergy {
+            dio_toggle: 0b0010,
+            ..SimEnergy::default()
+        };
+        let start = Duration::from_secs(1);
+        let mut messages = energy.start_dio_stream(false, true, start, 0x0F);
+        energy.set_dio(0b0001, 0b0001, 0, start + Duration::from_millis(10));
+        energy.lose_next_edges = true;
+        let at = start + 2 * TOGGLE_EVERY - Duration::from_micros(1);
+        for level in [0b0000, 0b0001, 0b0000] {
+            energy.set_dio(0b0001, level, 0, at);
+        }
+        messages.extend(energy.stream_messages(start + 2 * TOGGLE_EVERY));
+        messages.extend(energy.end_dio_stream(start + 2 * TOGGLE_EVERY));
+        let messages = parsed(&messages);
+        let (mut last, mut lost) = (None::<u64>, Vec::new());
+        for message in &messages {
+            let (first, latest) = match message {
+                Message::Edges(message) => (
+                    message.edges[0].time_ns,
+                    message.edges.last().unwrap().time_ns,
+                ),
+                Message::DioLost(loss) => {
+                    lost.push((loss.from_ns / 1000, loss.to_ns / 1000));
+                    (loss.from_ns, loss.to_ns)
+                }
+                Message::End(end) => {
+                    assert!(end.time_ns >= last, "{end:?} before {last:?}");
+                    continue;
+                }
+                other => panic!("{other:?}"),
+            };
+            assert!(
+                last.is_none_or(|last| first > last),
+                "{first} after {last:?}"
+            );
+            last = Some(latest);
+        }
+        assert_eq!(lost, [(10_001, 50_000)]);
+        let times: Vec<u64> = edges(&messages).iter().map(|&(t, _)| t).collect();
+        assert_eq!(times, [10_000, 99_999, 100_000, 100_001, 100_002]);
+    }
+
+    /// A stream's first loss starts after its header's time, as the probe's do: a pin that starts
+    /// high is known high at the start.
+    #[test]
+    fn a_dio_streams_first_loss_starts_after_its_header() {
+        let mut energy = SimEnergy {
+            dio_toggle: 0b0010,
+            lose_next_edges: true,
+            ..SimEnergy::default()
+        };
+        let start = Duration::from_secs(1);
+        let mut messages = energy.start_dio_stream(false, true, start, 0x0F);
+        messages.extend(energy.stream_messages(start + TOGGLE_EVERY));
+        let Some(Message::DioLost(loss)) = parsed(&messages).into_iter().next() else {
+            panic!("no loss");
+        };
+        assert!(loss.from_ns > 0 && loss.from_ns <= loss.to_ns, "{loss:?}");
+    }
+
+    /// Without an energy capture there is no wake marker: a Pro's supply turned on leaves its DIO
+    /// pins as what holds them.
+    #[test]
+    fn a_dio_stream_has_no_wake_marker() {
+        let mut energy = SimEnergy {
+            supply_on: true,
+            ..SimEnergy::default()
+        };
+        let messages = energy.start_dio_stream(false, true, Duration::from_secs(1), 0x0F);
+        let Some(Message::DioHeader(header)) = messages
+            .iter()
+            .filter(|m| is_stream_message(m))
+            .map(|m| parse(m).unwrap())
+            .next()
+        else {
+            panic!("no header");
+        };
+        assert_eq!(header.dio_levels, 0);
+    }
+
+    /// A DIO stream quiet for 200 ms sends its time, now, and again 200 ms after that; any
+    /// message stamped meanwhile starts the quiet again.
+    #[test]
+    fn a_quiet_dio_stream_sends_its_time() {
+        let mut energy = SimEnergy::default();
+        let start = Duration::from_secs(1);
+        energy.start_dio_stream(false, true, start, 0x0F);
+        let times = |messages: &[Vec<u8>]| -> Vec<u64> {
+            parsed(messages)
+                .iter()
+                .filter_map(|m| match m {
+                    Message::DioTime(time) => Some(time.time_ns / 1000),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_micros(199_999))),
+            [0u64; 0]
+        );
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_millis(200))),
+            [200_000]
+        );
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_millis(399))),
+            [0u64; 0]
+        );
+        energy.set_dio(0b0001, 0b0001, 0, start + Duration::from_millis(390));
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_millis(589))),
+            [0u64; 0]
+        );
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_millis(590))),
+            [590_000]
+        );
+
+        // A stream of no pins says nothing.
+        let mut energy = SimEnergy::default();
+        energy.start_dio_stream(false, true, start, 0);
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_secs(1))),
+            [0u64; 0]
+        );
+        // Six seconds of toggles are more than one call sends: the time waits for the rest.
+        let mut energy = SimEnergy {
+            dio_toggle: 0b0010,
+            ..SimEnergy::default()
+        };
+        energy.start_dio_stream(false, true, start, 0x0F);
+        assert_eq!(
+            times(&energy.stream_messages(start + Duration::from_secs(6))),
+            [0u64; 0]
+        );
+    }
+
+    /// A toggling pin a host drives reads its drive. What is attached keeps toggling meanwhile, so
+    /// the pin shows where that has got to once the host lets go, with no toggles replayed.
+    #[test]
+    fn a_toggled_pin_driven_reads_its_drive() {
+        let mut energy = SimEnergy {
+            dio_toggle: 0b0010,
+            ..SimEnergy::default()
+        };
+        let start = Duration::from_secs(1);
+        let mut messages = energy.start_dio_stream(false, true, start, 0x0F);
+        energy.set_dio(0b0010, 0b0000, 0, start + Duration::from_millis(70));
+        energy.set_dio(0, 0, 0, start + Duration::from_millis(1170));
+        messages.extend(energy.stream_messages(start + Duration::from_millis(1180)));
+        // High at the toggle at 50 ms, driven low at 70 ms, then 22 toggles while driven leave it
+        // high when let go at 1,170 ms.
+        assert_eq!(
+            edges(&parsed(&messages)),
+            [(50_000, 0b0010), (70_000, 0b0000), (1_170_000, 0b0010)]
+        );
     }
 }

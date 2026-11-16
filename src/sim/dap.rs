@@ -8,9 +8,9 @@ use super::{Event, Mode, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
 use crate::daplink_rs;
 use crate::protocol::{
-    CAP_CALIBRATED_ENERGY, CAP_CAPTURE_ID, CAP_DIO_AUX, CAP_ENERGY_ACCUMULATOR, CAP_ENERGY_CAPTURE,
-    CAP_ENERGY_RANGES, CAP_MARKS, CAP_TARGET_POWER, ENERGY_COMMAND, MARK_COMMAND,
-    TARGET_POWER_COMMAND,
+    CAP_CALIBRATED_ENERGY, CAP_CAPTURE_ID, CAP_DIO_AUX, CAP_DIO_STREAM, CAP_ENERGY_ACCUMULATOR,
+    CAP_ENERGY_CAPTURE, CAP_ENERGY_RANGES, CAP_MARKS, CAP_TARGET_POWER, ENERGY_COMMAND,
+    MARK_COMMAND, TARGET_POWER_COMMAND,
 };
 
 /// Each command costs this much simulated time.
@@ -18,20 +18,34 @@ const COMMAND_TIME: Duration = Duration::from_micros(250);
 /// How long a write waits for an OUT endpoint the probe keeps shut: usb.rs's command timeout.
 const AUX_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The Pro's DIO pins and the groups that change direction together, as the firmware reports them.
+/// The DIO pins, and the groups that change direction together, as the firmware reports them: the
+/// Pro's on J19, and the standalone MCU-Link's on J8, each pin on its own.
 const DIO_PINS: u8 = 0x0F;
-const DIO_GROUPS: [u8; 2] = [0x07, 0x08];
+const PRO_GROUPS: [u8; 2] = [0x07, 0x08];
+const J8_GROUPS: [u8; 4] = [0x01, 0x02, 0x04, 0x08];
 
-/// Ours' answer to the DIO command: a Pro sets its pins as a group or not at all, and any other
-/// board has none. An input reads what is attached holds it at.
+/// The groups of a unit with DIO pins: a Pro without J15, or a standalone MCU-Link.
+fn dio_groups(u: &SimUnit) -> Option<&'static [u8]> {
+    match u.board {
+        Some(dap::Ours::BOARD_MCU_LINK_PRO) if !u.dio_disabled => Some(&PRO_GROUPS),
+        Some(dap::Ours::BOARD_MCU_LINK) => Some(&J8_GROUPS),
+        _ => None,
+    }
+}
+
+/// Ours' answer to the DIO command: a unit sets its pins a group at a time or not at all, and a
+/// board without them has none. An input reads what is attached holds it at.
 fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8, now: Duration) -> Vec<u8> {
-    let pro = u.board == Some(dap::Ours::BOARD_MCU_LINK_PRO) && !u.dio_disabled;
+    let groups = dio_groups(u);
+    // Pins a bench tool's command marker holds are not DIO pins.
+    let pins = DIO_PINS & !u.marker_pins;
     let next = (u.dio_outputs & !mask) | (outputs & mask);
-    let accepted = pro
-        && mask & !DIO_PINS == 0
-        && DIO_GROUPS
-            .iter()
-            .all(|&group| next & group == 0 || next & group == group);
+    let accepted = groups.is_some_and(|groups| {
+        mask & !pins == 0
+            && groups
+                .iter()
+                .all(|&group| next & group == 0 || next & group == group)
+    });
     if accepted {
         u.dio_outputs = next;
         u.dio_levels = (u.dio_levels & !mask) | (levels & mask);
@@ -43,11 +57,12 @@ fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8, now: Duration) 
         if accepted { dap::DAP_OK } else { 0xFF },
         u.dio_outputs,
         u.dio_levels,
-        (u.dio_levels & u.dio_outputs) | (u.dio_held & !u.dio_outputs),
+        ((u.dio_levels & u.dio_outputs) | (u.dio_held & !u.dio_outputs))
+            ^ (u.energy.toggled() & !u.dio_outputs),
     ];
-    if pro {
-        reply.extend_from_slice(&[DIO_PINS, DIO_GROUPS.len() as u8]);
-        reply.extend_from_slice(&DIO_GROUPS);
+    if let Some(groups) = groups {
+        reply.extend_from_slice(&[pins, groups.len() as u8]);
+        reply.extend_from_slice(groups);
     } else {
         reply.extend_from_slice(&[0, 0]);
     }
@@ -143,16 +158,15 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                     (world.ours.1.format, world.ours.1.flags)
                 };
                 let pro = board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
-                let flags = if pro {
-                    recorded_flags
-                        | CAP_TARGET_POWER
-                        | if world.units[unit].dio_disabled {
-                            0
-                        } else {
-                            dap::Ours::FLAG_DIO
-                        }
+                let energy = pro && !world.units[unit].no_energy;
+                let dio = dio_groups(&world.units[unit]).is_some();
+                let flags = recorded_flags
+                    | if pro { CAP_TARGET_POWER } else { 0 }
+                    | if dio { dap::Ours::FLAG_DIO } else { 0 };
+                let dio_aux = if dio && world.units[unit].dio_aux {
+                    CAP_DIO_AUX | if energy { 0 } else { CAP_DIO_STREAM }
                 } else {
-                    recorded_flags
+                    0
                 };
                 let mut reply = vec![dap::VENDOR_IDENTIFY];
                 reply.extend_from_slice(dap::IDENTIFY_MAGIC);
@@ -161,23 +175,19 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 if let Some(board) = board {
                     reply.push(board);
                     reply.extend_from_slice(&0u32.to_le_bytes());
-                    let extended = if pro {
-                        CAP_ENERGY_CAPTURE
-                            | CAP_ENERGY_ACCUMULATOR
-                            | CAP_CALIBRATED_ENERGY
-                            | if world.units[unit].dio_aux && !world.units[unit].dio_disabled {
-                                CAP_DIO_AUX
-                            } else {
-                                0
-                            }
-                            | if world.units[unit].marks {
-                                CAP_MARKS | CAP_CAPTURE_ID | CAP_ENERGY_RANGES
-                            } else {
-                                0
-                            }
-                    } else {
-                        0
-                    };
+                    let extended = dio_aux
+                        | if energy {
+                            CAP_ENERGY_CAPTURE
+                                | CAP_ENERGY_ACCUMULATOR
+                                | CAP_CALIBRATED_ENERGY
+                                | if world.units[unit].marks {
+                                    CAP_MARKS | CAP_CAPTURE_ID | CAP_ENERGY_RANGES
+                                } else {
+                                    0
+                                }
+                        } else {
+                            0
+                        };
                     reply.extend_from_slice(&extended.to_le_bytes());
                 }
                 reply
@@ -216,9 +226,10 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         }
         [ENERGY_COMMAND, request @ ..] => match &firmware {
             SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
-                let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let energy = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+                    && !world.units[unit].no_energy;
                 let now = world.now;
-                world.units[unit].energy.energy(pro, now, request)
+                world.units[unit].energy.energy(energy, now, request)
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
@@ -226,9 +237,10 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             SimFirmware::Ours { .. }
                 if world.units[unit].board.is_some() && world.units[unit].marks =>
             {
-                let pro = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+                let energy = world.units[unit].board == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+                    && !world.units[unit].no_energy;
                 let now = world.now;
-                world.units[unit].energy.mark(pro, now, request)
+                world.units[unit].energy.mark(energy, now, request)
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
@@ -369,7 +381,8 @@ impl crate::aux::AuxLink for SimAux {
             .push(format!("{location}: AUX {}", hex::encode(request)));
         let now = world.now;
         let unit = &mut world.units[self.unit];
-        let pro = unit.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+        // Energy capture, which a Pro has unless its strap says the circuit is not fitted.
+        let pro = unit.board == Some(dap::Ours::BOARD_MCU_LINK_PRO) && !unit.no_energy;
         unit.energy.dio_outputs = unit.dio_outputs;
         unit.energy.dio_levels = unit.dio_levels;
         unit.energy.dio_held = unit.dio_held;
@@ -387,7 +400,12 @@ impl crate::aux::AuxLink for SimAux {
                     .start_stream(pro, now, rate.try_into().expect("four bytes"), *pins)
             }
             [ENERGY_COMMAND, 6, pins] => unit.energy.stream_running(pro, now, *pins),
-            [ENERGY_COMMAND, 7] => unit.energy.stop_stream(pro, now),
+            [ENERGY_COMMAND, 7] => unit.energy.stop_stream(now),
+            [ENERGY_COMMAND, 15, pins] => {
+                let dio = dio_groups(unit).is_some();
+                unit.energy
+                    .start_dio_stream(pro, dio, now, *pins & !unit.marker_pins)
+            }
             [dap::VENDOR_DIO, ..] if !unit.dio_aux => vec![vec![dap::ID_DAP_INVALID]],
             [dap::VENDOR_DIO, ..]
             | [dap::VENDOR_IDENTIFY, ..]
@@ -400,7 +418,7 @@ impl crate::aux::AuxLink for SimAux {
             }
             _ => vec![vec![dap::ID_DAP_INVALID]],
         };
-        if matches!(request.get(..2), Some([ENERGY_COMMAND, 9 | 10]))
+        if matches!(request.get(..2), Some([ENERGY_COMMAND, 9 | 10 | 15]))
             && messages.first().and_then(|reply| reply.get(2)) == Some(&0)
         {
             world.units[self.unit].aux_in.clear();
@@ -433,7 +451,8 @@ impl crate::aux::AuxLink for SimAux {
                 }
                 // Without a stream nothing will come, and waiting for it would move every
                 // scenario's capture on.
-                if waited >= timeout || world.units[self.unit].energy.stream.is_none() {
+                let energy = &world.units[self.unit].energy;
+                if waited >= timeout || (energy.stream.is_none() && energy.dio_stream.is_none()) {
                     return Err(LinkError::Timeout);
                 }
                 let step = WAIT_STEP.min(timeout - waited);

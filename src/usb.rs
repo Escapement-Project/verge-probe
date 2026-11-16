@@ -260,16 +260,13 @@ impl Bus for UsbBus {
         value: u16,
         index: u16,
     ) -> Result<Result<(), LinkError>, BusError> {
-        let usb = self
-            .find(device)?
-            .open()
-            .wait()
-            .map_err(|error| BusError::Open {
-                device: device.to_string(),
-                reason: error.to_string(),
-            })?;
+        let info = self.find(device)?;
+        let usb = info.open().wait().map_err(|error| BusError::Open {
+            device: device.to_string(),
+            reason: error.to_string(),
+        })?;
         Ok(control_out(request_type, request, value, index)
-            .and_then(|control| to_device(&usb, control)))
+            .and_then(|control| to_device(&usb, &info, control)))
     }
 
     fn open_isp(&self, device: &UsbDevice) -> Result<HidRom, BusError> {
@@ -374,17 +371,47 @@ fn control_out(
 }
 
 #[cfg(not(windows))]
-fn to_device(usb: &nusb::Device, control: ControlOut<'_>) -> Result<(), LinkError> {
+fn to_device(
+    usb: &nusb::Device,
+    _info: &nusb::DeviceInfo,
+    control: ControlOut<'_>,
+) -> Result<(), LinkError> {
     usb.control_out(control, COMMAND_TIMEOUT)
         .wait()
         .map_err(link_error)
 }
 
+/// WinUSB sends a control request only through an interface the tool has claimed, and one to the
+/// device goes through any of them: Verge Aux first, since a debugger holds CMSIS-DAP.
 #[cfg(windows)]
-fn to_device(_usb: &nusb::Device, _control: ControlOut<'_>) -> Result<(), LinkError> {
-    Err(LinkError::Usb(
-        "on Windows a control request reaches a device only through an interface the tool has claimed".into(),
-    ))
+fn to_device(
+    usb: &nusb::Device,
+    info: &nusb::DeviceInfo,
+    control: ControlOut<'_>,
+) -> Result<(), LinkError> {
+    let mut vendor: Vec<_> = info
+        .interfaces()
+        .filter(|interface| interface.class() == USB_CLASS_VENDOR)
+        .collect();
+    vendor.sort_by_key(|interface| interface.interface_string() != Some(aux::INTERFACE_NAME));
+    let mut refused = None;
+    for interface in vendor {
+        match usb.claim_interface(interface.interface_number()).wait() {
+            Ok(claimed) => {
+                return claimed
+                    .control_out(control, COMMAND_TIMEOUT)
+                    .wait()
+                    .map_err(link_error);
+            }
+            Err(error) => refused = Some(error),
+        }
+    }
+    Err(LinkError::Usb(match refused {
+        None => "on Windows a control request reaches a device only through a vendor interface, and this one has none".into(),
+        Some(error) => format!(
+            "on Windows a control request reaches a device only through an interface the tool can claim, and none could be claimed: {error}"
+        ),
+    }))
 }
 
 impl DapLink for NusbDap {

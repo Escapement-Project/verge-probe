@@ -27,7 +27,7 @@ use crate::probe::CalibrationPoint;
 use crate::record::temp_beside;
 use crate::stream::skipped;
 use crate::stream::{
-    Converter, CurrentRange, End, EndReason, Header, Markers, Message, Pairs, Sample,
+    Converter, CurrentRange, DioHeader, End, EndReason, Header, Markers, Message, Pairs, Sample,
 };
 
 /// tickwave's format crate, for reading what this writes.
@@ -43,6 +43,11 @@ pub const FIRST_DIO: usize = 4;
 /// The generator name markers carry as annotations.
 pub const GENERATOR: &str = "verge";
 pub const FORMAT: &str = "verge-energy";
+/// A DIO stream's recording (`0x90` mode 15): the pins alone, channel `k` the `k`th pin reported.
+pub const DIO_FORMAT: &str = "verge-dio";
+/// A DIO recording's overview, 2^23 ticks a bucket, about 56 ms at 150 MHz: no pair period
+/// gives the pins a rate while the recording runs. [`compact`] gives each pin its own.
+const DIO_OVERVIEW_SHIFT: u8 = 23;
 
 mod export;
 pub use export::export;
@@ -75,6 +80,10 @@ pub enum Error {
     Record(#[from] crate::record::RecordError),
     #[error("the recording isn't an energy capture Verge recorded")]
     NotVerge,
+    #[error("the DIO stream reports no pins")]
+    NoPins,
+    #[error("a DIO stream sent pairs")]
+    DioPairs,
     #[error("cancelled")]
     Cancelled,
 }
@@ -345,6 +354,8 @@ struct Open {
 pub struct Encoder {
     context: Context,
     open: Option<Open>,
+    /// A DIO stream's recording, in place of `open`.
+    dio: Option<DioOpen>,
     ended: bool,
 }
 
@@ -354,6 +365,7 @@ impl Encoder {
         Self {
             context,
             open: None,
+            dio: None,
             ended: false,
         }
     }
@@ -363,15 +375,22 @@ impl Encoder {
         if self.ended {
             return Ok(true);
         }
+        if let Message::Header(_) | Message::DioHeader(_) = message
+            && (self.open.is_some() || self.dio.is_some())
+        {
+            return Err(Error::Restarted);
+        }
+        if let Some(dio) = self.dio.as_mut() {
+            self.ended = dio.ingest(message)?;
+            return Ok(self.ended);
+        }
         match message {
-            Message::Header(header) => {
-                if self.open.is_some() {
-                    return Err(Error::Restarted);
-                }
-                self.open = Some(Open::new(header, &self.context)?);
-            }
+            Message::DioHeader(header) => self.dio = Some(DioOpen::new(header, &self.context)?),
+            Message::Header(header) => self.open = Some(Open::new(header, &self.context)?),
             // Nothing before the header can be converted or placed.
             _ if self.open.is_none() => {}
+            // A DIO stream's alone: a capture's pairs say how far it has got.
+            Message::DioTime(_) => {}
             Message::Pairs(pairs) => self.open.as_mut().unwrap().pairs(pairs)?,
             Message::Edges(edges) => {
                 let open = self.open.as_mut().unwrap();
@@ -414,6 +433,9 @@ impl Encoder {
     /// The recording's bytes since the last call. Each call also compresses a slice of the
     /// blocks closed so far, which reach the output over the calls after their close.
     pub fn take_output(&mut self) -> Vec<u8> {
+        if let Some(dio) = self.dio.as_mut() {
+            return dio.writer.take_output();
+        }
         self.open
             .as_mut()
             .map_or_else(Vec::new, |open| open.writer.take_output())
@@ -424,12 +446,19 @@ impl Encoder {
     #[must_use]
     pub fn pending(&self) -> bool {
         self.open.as_ref().is_some_and(|open| open.writer.pending())
+            || self.dio.as_ref().is_some_and(|dio| dio.writer.pending())
     }
 
     /// Closes every channel's open block at the latest promise, so a crash loses only what came
     /// after once the output is in the file. Nothing when nothing was promised since the last
     /// flush.
     pub fn flush(&mut self) -> Result<()> {
+        if let Some(dio) = self.dio.as_mut()
+            && dio.promised > dio.flushed
+        {
+            dio.writer.flush(dio.promised)?;
+            dio.flushed = dio.promised;
+        }
         if let Some(open) = self.open.as_mut()
             && open.promised > open.flushed
         {
@@ -443,18 +472,24 @@ impl Encoder {
     /// [`Encoder::take_output`]'s bytes are in the file.
     #[must_use]
     pub fn snapshot(&self) -> Option<Snapshot> {
+        if let Some(dio) = self.dio.as_ref() {
+            return Some(dio.writer.snapshot());
+        }
         self.open.as_ref().map(|open| open.writer.snapshot())
     }
 
     /// Whether the header has come, so that there is a recording to finish.
     #[must_use]
     pub fn started(&self) -> bool {
-        self.open.is_some()
+        self.open.is_some() || self.dio.is_some()
     }
 
     /// Ends the recording, after the end message or without one, as when the stream stopped.
     /// `stem` names the file `<stem>.tickwave`, for the bundled markers. `None` without a header.
     pub fn finish(mut self, stem: &str) -> Result<Option<Finished>> {
+        if let Some(dio) = self.dio.take() {
+            return dio.finish(stem).map(Some);
+        }
         let Some(mut open) = self.open.take() else {
             return Ok(None);
         };
@@ -462,6 +497,199 @@ impl Encoder {
             open.close()?;
         }
         open.finish(stem).map(Some)
+    }
+}
+
+/// A DIO stream's recording: a digital channel for each pin it reports, from the levels its header
+/// gives. Ticks count from the header, as the stream's times do.
+struct DioOpen {
+    writer: Writer,
+    clock_hz: u32,
+    /// Each channel's pin, in channel order.
+    pins: Vec<u8>,
+    mask: u8,
+    levels: u8,
+    /// The latest tick placed: one past an edge or a gap's `to`, or a DIO time.
+    end: i64,
+    /// The end message's time, which reaches past the last edge.
+    ended_at: Option<i64>,
+    reason: Option<EndReason>,
+    promised: i64,
+    flushed: i64,
+}
+
+impl DioOpen {
+    fn new(header: &DioHeader, context: &Context) -> Result<Self> {
+        // The tick conversion needs a count longer than 2 ns.
+        if header.clock_hz == 0 || header.clock_hz >= 500_000_000 {
+            return Err(Error::Timestamps);
+        }
+        let pins: Vec<u8> = (0..4).filter(|k| header.dio_mask & (1 << k) != 0).collect();
+        if pins.is_empty() {
+            return Err(Error::NoPins);
+        }
+        let timebase = Ratio::integer(u64::from(header.clock_hz)).expect("a non-zero clock");
+        let channels = pins
+            .iter()
+            .map(|&k| digital(&format!("DIO{k}"), header.dio_levels & (1 << k) != 0))
+            .collect();
+        let mut source = SourceHeader::new(SourceFormat::Other(DIO_FORMAT.into()), timebase);
+        source.begin_s = Some(0.0);
+        source.instrument = context.instrument.clone();
+        source.software = context.software.clone();
+        source.converter =
+            Some(concat!("escapement-verge-probe ", env!("CARGO_PKG_VERSION")).into());
+        let mut extra = BTreeMap::new();
+        extra.insert("stream_format".into(), "5".into());
+        extra.insert("clock_hz".into(), header.clock_hz.to_string());
+        extra.insert("dio_mask".into(), header.dio_mask.to_string());
+        extra.insert("dio_levels".into(), header.dio_levels.to_string());
+        extra.insert(
+            "edge_resolution_ns".into(),
+            header.edge_resolution_ns.to_string(),
+        );
+        if let Some(started) = &context.started_utc {
+            extra.insert("started_utc".into(), started.clone());
+        }
+        source.extra = extra;
+        let declaration = Declaration {
+            timebase,
+            channels,
+            derived: Vec::new(),
+            sources: vec![source],
+            title: None,
+            meta: BTreeMap::new(),
+            overview_shift: DIO_OVERVIEW_SHIFT,
+        };
+        Ok(Self {
+            writer: Writer::new(declaration, write_options())?,
+            clock_hz: header.clock_hz,
+            pins,
+            mask: header.dio_mask,
+            levels: header.dio_levels & header.dio_mask,
+            end: 0,
+            ended_at: None,
+            reason: None,
+            promised: 0,
+            flushed: 0,
+        })
+    }
+
+    /// One message after the header. True at the end.
+    fn ingest(&mut self, message: &Message) -> Result<bool> {
+        match message {
+            Message::Header(_) | Message::DioHeader(_) => return Err(Error::Restarted),
+            Message::Pairs(_) => return Err(Error::DioPairs),
+            // 0x94 records markers only beside energy capture, which a DIO stream's board lacks.
+            Message::Markers(_) => {}
+            Message::Edges(edges) => {
+                let mut last = None;
+                for edge in &edges.edges {
+                    let tick = self.at(edge.time_ns)?;
+                    self.edge(tick, edge.levels)?;
+                    last = Some(tick);
+                }
+                if let Some(last) = last {
+                    self.promise(last + 1)?;
+                }
+            }
+            Message::DioLost(lost) => {
+                let from = self.at(lost.from_ns)?;
+                let to = self.at(lost.to_ns)?;
+                match to.cmp(&from) {
+                    std::cmp::Ordering::Less => return Err(Error::Timestamps),
+                    // A report that spans nothing lost nothing: the levels stand from then on.
+                    std::cmp::Ordering::Equal => self.edge(to, lost.levels)?,
+                    std::cmp::Ordering::Greater => self.lost(from, to, lost.levels)?,
+                }
+                self.promise(to + 1)?;
+            }
+            // Every edge before it is in, so the pins held their levels until then.
+            Message::DioTime(time) => {
+                let tick = self.at(time.time_ns)?;
+                if tick < self.promised {
+                    return Err(Error::Timestamps);
+                }
+                self.end = self.end.max(tick);
+                self.promise(tick)?;
+            }
+            Message::End(end) => {
+                self.reason = Some(end.reason);
+                self.ended_at = end.time_ns.map(|ns| self.at(ns)).transpose()?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `ns` in ticks, up to 2^53 − 2, so that one past it is still a length the writer takes.
+    fn at(&self, ns: u64) -> Result<i64> {
+        let ticks = (u128::from(ns) * u128::from(self.clock_hz)).div_ceil(1_000_000_000);
+        i64::try_from(ticks)
+            .ok()
+            .filter(|&tick| tick <= (1 << 53) - 2)
+            .ok_or(Error::Timestamps)
+    }
+
+    /// Every item before `tick` is in. Within a message the next edge can share this one's tick.
+    fn promise(&mut self, tick: i64) -> Result<()> {
+        if tick > self.promised {
+            self.writer.promise(tick)?;
+            self.promised = tick;
+        }
+        Ok(())
+    }
+
+    // The stream's rule: times never go back, edges stamped together go in one message, and what
+    // comes after a message or a loss report comes after its last time. So each message promises
+    // one tick past it, and a flush closes the block holding it however long the pins stay quiet.
+    fn edge(&mut self, tick: i64, levels: u8) -> Result<()> {
+        if tick < self.promised {
+            return Err(Error::Timestamps);
+        }
+        let levels = levels & self.mask;
+        for (i, &k) in self.pins.iter().enumerate() {
+            if (levels ^ self.levels) & (1 << k) != 0 {
+                self.writer.edge(i, tick)?;
+            }
+        }
+        self.levels = levels;
+        self.end = self.end.max(tick + 1);
+        self.promise(tick)
+    }
+
+    fn lost(&mut self, from: i64, to: i64, levels: u8) -> Result<()> {
+        if from < self.promised {
+            return Err(Error::Timestamps);
+        }
+        let levels = levels & self.mask;
+        for (i, &k) in self.pins.iter().enumerate() {
+            let level = levels & (1 << k) != 0;
+            self.writer.gap(i, Gap { from, to, level })?;
+        }
+        self.levels = levels;
+        // The levels are known at `to`: a gap that reached the length would read as unknown to
+        // the end instead.
+        self.end = self.end.max(to + 1);
+        Ok(())
+    }
+
+    fn finish(self, stem: &str) -> Result<Finished> {
+        let end = [self.ended_at, Some(self.end), Some(1)]
+            .into_iter()
+            .flatten()
+            .max()
+            .expect("one candidate");
+        let mut extra = BTreeMap::new();
+        extra.insert("end_reason".into(), end_reason(self.reason));
+        let finish = Finish {
+            extra: vec![extra],
+            bundle: Some(Bundle::Generated { stem: stem.into() }),
+            drop_gaps_past_end: false,
+            lost_after: BTreeMap::new(),
+        };
+        let ends = vec![end; self.pins.len()];
+        Ok(self.writer.finish(end, &ends, finish)?)
     }
 }
 
