@@ -848,6 +848,56 @@ fn write_with_file_writer(path: &Path, messages: &[Message], finish: bool) {
 }
 
 #[test]
+fn a_file_writer_publishes_again_only_once_the_view_took_the_last_snapshot() {
+    let messages = stream(shapes()[13]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.tickwave");
+    let mut writer = FileWriter::create(&path, Context::default())
+        .unwrap()
+        .flushing_always();
+    let slot = writer.snapshots();
+    let through = || {
+        slot.lock()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.snapshot.known_through())
+    };
+    let before = Instant::now();
+    let mut rest = messages.iter();
+    while through().is_none() {
+        writer.ingest(rest.next().unwrap()).unwrap();
+    }
+    let first = through().unwrap();
+    assert!(slot.lock().unwrap().as_ref().unwrap().at >= before);
+    let (last, untaken) = rest.as_slice().split_last().unwrap();
+    assert!(untaken.len() >= 2, "{} messages left", untaken.len());
+    for message in untaken {
+        writer.ingest(message).unwrap();
+    }
+    assert_eq!(through(), Some(first), "refilled before the view took it");
+
+    slot.lock().unwrap().take();
+    let taken = Instant::now();
+    writer.ingest(last).unwrap();
+    let next = slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("a snapshot once the last was taken");
+    assert!(next.snapshot.known_through() > first);
+    assert!(next.at >= taken);
+    // The end it carries is where a view of that snapshot sees the data end.
+    let bytes = std::sync::Arc::new(std::fs::read(&path).unwrap());
+    let view = escapement_tickwave_view::Recording::live(
+        next.snapshot,
+        bytes,
+        escapement_tickwave_view::Cache::new(64 << 20),
+    )
+    .unwrap();
+    assert_eq!(next.end, view.extent().map(|e| e.end));
+}
+
+#[test]
 fn a_file_writer_flushes_then_compacts_to_the_same_content() {
     let shape = shapes()[13];
     let messages = stream(shape);
@@ -888,6 +938,61 @@ fn a_file_writer_flushes_then_compacts_to_the_same_content() {
     assert_eq!((samples, markers), (whole_samples, whole_markers));
     // Nothing is left beside it.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_closed_recording_is_compacted_beside_itself_and_replaced_only_on_persist() {
+    let messages = stream(shapes()[13]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.tickwave");
+    let mut writer = FileWriter::create(&path, Context::default())
+        .unwrap()
+        .flushing_always();
+    for message in &messages {
+        writer.ingest(message).unwrap();
+    }
+    assert!(writer.close().unwrap(), "a recording is left");
+    let closed = std::fs::read(&path).unwrap();
+    assert!(content(&closed).2 > 20, "left uncompacted");
+
+    let copy = compacted(&path).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        closed,
+        "the recording is untouched until persist"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        2,
+        "the copy is beside it"
+    );
+    copy.persist().unwrap();
+    let persisted = std::fs::read(&path).unwrap();
+    let whole = encode(&messages);
+    assert_eq!(
+        Footer::parse_file(&persisted).unwrap().header.content_id,
+        Footer::parse_file(&whole).unwrap().header.content_id
+    );
+    assert!(
+        content(&persisted).2 < 5,
+        "compacted: {}",
+        content(&persisted).2
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    // A copy dropped unpersisted leaves the recording as it was and nothing beside it.
+    drop(compacted(&path).unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), persisted);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn closing_a_recording_whose_header_never_came_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.tickwave");
+    let writer = FileWriter::create(&path, Context::default()).unwrap();
+    assert!(!writer.close().unwrap());
+    assert!(!path.exists());
 }
 
 #[test]
@@ -2325,4 +2430,78 @@ fn an_export_refuses_pairs_off_whole_ticks() {
             assert!(matches!(outcome, Err(Error::NotVerge)));
         }
     }
+}
+
+#[test]
+fn a_dio_recordings_published_end_is_its_promise() {
+    let messages = dio_stream(3, 0b1111, 40);
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = FileWriter::create(&dir.path().join("dio.tickwave"), Context::default())
+        .unwrap()
+        .flushing_always();
+    let slot = writer.snapshots();
+    let mut checked = 0;
+    for message in &messages[..messages.len() - 1] {
+        writer.ingest(message).unwrap();
+        let Some(published) = slot.lock().unwrap().take() else {
+            continue;
+        };
+        // The levels hold through the promise, a DIO time's included.
+        let promise = published.snapshot.promise();
+        assert_eq!(
+            published.end,
+            (promise > 0).then_some(promise),
+            "snapshot {checked}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 10, "{checked} snapshots checked");
+}
+
+#[test]
+fn a_directorys_recordings_are_listed_and_a_cut_off_one_is_finished_by_compacting() {
+    let messages = stream(shapes()[13]);
+    let dir = tempfile::tempdir().unwrap();
+    let whole = encode(&messages);
+    let done = dir.path().join("a.tickwave");
+    let cut = dir.path().join("b.tickwave");
+    std::fs::write(&done, &whole).unwrap();
+    std::fs::write(&cut, &whole[..whole.len() / 2]).unwrap();
+    std::fs::write(dir.path().join("a.tickwave.x1y2.partial"), b"copy").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+
+    assert_eq!(recordings(dir.path()).unwrap(), [done.clone(), cut.clone()]);
+    assert!(finished(&done).unwrap());
+    assert!(!finished(&cut).unwrap());
+    compact(&cut).unwrap();
+    assert!(finished(&cut).unwrap());
+    assert!(recordings(&dir.path().join("none")).unwrap().is_empty());
+}
+
+#[test]
+fn a_recorder_leaves_its_recording_finished_for_its_owner_to_compact() {
+    let messages = stream(shapes()[13]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recorded.tickwave");
+    let (mut recorder, _snapshots) =
+        crate::capture::Recorder::tickwave(&path, Context::default()).unwrap();
+    for message in &messages {
+        // The recorder's queue is bounded; it is behind while its thread catches up.
+        while let Err(error) = recorder.send(message.clone()) {
+            assert!(
+                matches!(error, crate::capture::CaptureError::Behind),
+                "{error}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    recorder.finish().unwrap();
+    assert!(finished(&path).unwrap());
+    let closed = std::fs::read(&path).unwrap();
+    compact(&path).unwrap();
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        closed,
+        "the recorder compacted it"
+    );
 }

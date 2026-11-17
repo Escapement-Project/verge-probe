@@ -1,10 +1,8 @@
 use super::{CaptureError, CaptureWriter, Result};
 use crate::stream::Message;
-use crate::tickwave::{Context, FileWriter};
-use escapement_tickwave_format::snapshot::Snapshot;
+use crate::tickwave::{Context, FileWriter, Snapshots};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -41,7 +39,8 @@ impl Disk for FileWriter {
         Ok(FileWriter::flush(self)?)
     }
     fn finish(self) -> Result<()> {
-        Ok(FileWriter::finish(self)?)
+        FileWriter::close(self)?;
+        Ok(())
     }
 }
 
@@ -51,8 +50,10 @@ impl Recorder {
         Self::spawn(CaptureWriter::create(path)?)
     }
 
-    /// A `.tickwave` recording, and the latest snapshot of it for a view in this process.
-    pub fn tickwave(path: &Path, context: Context) -> Result<(Self, Arc<Mutex<Option<Snapshot>>>)> {
+    /// A `.tickwave` recording, and the latest snapshot of it for a view in this process. Finishing
+    /// leaves it uncompacted: its owner compacts it with [`crate::tickwave::compacted`] around the
+    /// view that reads it.
+    pub fn tickwave(path: &Path, context: Context) -> Result<(Self, Snapshots)> {
         let writer = FileWriter::create(path, context)?;
         let snapshots = writer.snapshots();
         Ok((Self::spawn(writer)?, snapshots))

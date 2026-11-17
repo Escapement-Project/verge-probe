@@ -493,6 +493,18 @@ impl Encoder {
         self.open.as_ref().map(|open| open.writer.snapshot())
     }
 
+    /// Where the pairs written so far end on the recording's axis, one past the last placed, as a
+    /// view of the snapshot sees the trace end; a DIO recording's latest tick. None before the
+    /// first. A view's extent can reach further, to DIO items or markers past the last pair.
+    #[must_use]
+    pub fn end(&self) -> Option<i64> {
+        if let Some(dio) = self.dio.as_ref() {
+            return Some(dio.end).filter(|&end| end > 0);
+        }
+        let open = self.open.as_ref()?;
+        open.last_sample.map(|tick| tick + 1 - open.base)
+    }
+
     /// Whether the header has come, so that there is a recording to finish.
     #[must_use]
     pub fn started(&self) -> bool {
@@ -1231,11 +1243,55 @@ fn stem(path: &Path) -> String {
 }
 
 /// Writes the recording at `path` again with full-size blocks, as a recorder's one-second blocks
-/// are not, into a copy beside it, then renames the copy over it. `path` stays readable until
-/// then. A finished recording keeps its content id, which the Recutter checks, and each channel
-/// gets the overview its own rate calls for. One a crash cut off is finished by repair's rules,
-/// with its markers bundled and the overview it declared.
+/// are not, into a copy beside it, then renames the copy over it.
 pub fn compact(path: &Path) -> Result<()> {
+    compacted(path)?.persist()
+}
+
+/// The recordings in `directory`, by name; none where it doesn't exist. A copy compaction left
+/// behind is not one.
+pub fn recordings(directory: &Path) -> Result<Vec<PathBuf>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "tickwave") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Whether the recording at `path` was finished. One a crash cut off was not; [`compacted`]
+/// finishes it.
+pub fn finished(path: &Path) -> Result<bool> {
+    Ok(finished_header(path)?.is_some())
+}
+
+/// A recording written again with full-size blocks into a copy beside it, not yet in its place.
+#[must_use = "the copy is removed unless persisted"]
+pub struct Compacted {
+    copy: tempfile::NamedTempFile,
+    path: PathBuf,
+}
+
+impl Compacted {
+    /// Renames the copy over the recording. Windows refuses while anything else holds the
+    /// recording open, so a view of it lets go first.
+    pub fn persist(self) -> Result<()> {
+        self.copy.persist(&self.path).map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+/// Writes the recording at `path` again with full-size blocks into a copy beside it, leaving
+/// `path` as it is and readable meanwhile. A finished recording keeps its content id, which the
+/// Recutter checks, and each channel gets the overview its own rate calls for. One a crash cut
+/// off is finished by repair's rules, with its markers bundled and the overview it declared.
+pub fn compacted(path: &Path) -> Result<Compacted> {
     let header = finished_header(path)?;
     let temp = temp_beside(path)?;
     let mut out = BufWriter::new(temp.as_file());
@@ -1256,12 +1312,14 @@ pub fn compact(path: &Path) -> Result<()> {
     out.flush()?;
     drop(out);
     temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    Ok(Compacted {
+        copy: temp,
+        path: path.to_owned(),
+    })
 }
 
 /// A recording written to disk as its stream arrives: blocks closed at least every second, a
-/// snapshot after each batch for a view in this process, compacted once it ends.
+/// snapshot for a view in this process each time it takes one, compacted once it ends.
 pub struct FileWriter {
     path: PathBuf,
     file: File,
@@ -1271,9 +1329,23 @@ pub struct FileWriter {
     flush_every: Duration,
     /// A flush whose bytes are not all in the file yet, to sync once they are.
     unsynced: bool,
-    published: Option<Instant>,
-    latest: Arc<Mutex<Option<Snapshot>>>,
+    latest: Snapshots,
 }
+
+/// A snapshot, when its writer published it, and where its data ends: a view following the
+/// recording places its now from that end and the time since.
+#[derive(Debug)]
+pub struct Published {
+    pub snapshot: Snapshot,
+    pub at: Instant,
+    /// [`Encoder::end`] when published.
+    pub end: Option<i64>,
+}
+
+/// Where a writer leaves its latest snapshot for a view in this process. The writer fills it after a
+/// message only once the view has taken the one before, so the view gets one at most each time it
+/// takes, at most a message late, and one that takes none costs the writer nothing.
+pub type Snapshots = Arc<Mutex<Option<Published>>>;
 
 /// Syncs the file to the disk on a thread of its own, so a slow disk holds up no message.
 struct Syncer {
@@ -1325,8 +1397,6 @@ const AHEAD_S: u32 = 60;
 
 /// How often a crash can lose what came in, at most.
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
-/// How often a view gets a new snapshot, at most.
-const PUBLISH_EVERY: Duration = Duration::from_millis(200);
 
 impl FileWriter {
     pub fn create(path: &Path, context: Context) -> Result<Self> {
@@ -1346,7 +1416,6 @@ impl FileWriter {
             flushed: Instant::now(),
             flush_every: FLUSH_EVERY,
             unsynced: false,
-            published: None,
             latest: Arc::default(),
         })
     }
@@ -1358,9 +1427,9 @@ impl FileWriter {
         self
     }
 
-    /// The latest snapshot of what is in the file, for a view in this process.
+    /// The latest snapshot of what is in the file, for a view in this process to take.
     #[must_use]
-    pub fn snapshots(&self) -> Arc<Mutex<Option<Snapshot>>> {
+    pub fn snapshots(&self) -> Snapshots {
         Arc::clone(&self.latest)
     }
 
@@ -1388,13 +1457,15 @@ impl FileWriter {
             self.unsynced = true;
         }
         self.take_output()?;
-        if self
-            .published
-            .is_none_or(|at| at.elapsed() >= PUBLISH_EVERY)
+        let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        if latest.is_none()
             && let Some(snapshot) = self.encoder.snapshot()
         {
-            *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
-            self.published = Some(Instant::now());
+            *latest = Some(Published {
+                snapshot,
+                at: Instant::now(),
+                end: self.encoder.end(),
+            });
         }
         Ok(())
     }
@@ -1417,11 +1488,27 @@ impl FileWriter {
         // Compacting renames a copy over the file, which Windows refuses while a handle is open.
         // A sync that failed is reported once the recording is finished as far as it can be.
         let synced = self.syncer.stop();
-        let finished = self.finish_file();
-        synced.and(finished)
+        let path = self.path.clone();
+        let compacted = match self.close_file() {
+            Ok(true) => compact(&path),
+            Ok(false) => Ok(()),
+            Err(error) => Err(error),
+        };
+        synced.and(compacted)
     }
 
-    fn finish_file(mut self) -> Result<()> {
+    /// Ends the recording without compacting it, for a caller that compacts it with
+    /// [`compacted`] while a view still reads it. False where the stream never sent its header,
+    /// which leaves no file.
+    pub fn close(mut self) -> Result<bool> {
+        let synced = self.syncer.stop();
+        let closed = self.close_file();
+        synced.and(closed)
+    }
+
+    /// Writes the recording's end and closes the file, true; or removes the file where no header
+    /// came, false.
+    fn close_file(mut self) -> Result<bool> {
         let bytes = self.encoder.take_output();
         self.file.write_all(&bytes)?;
         let encoder = std::mem::replace(&mut self.encoder, Encoder::new(Context::default()));
@@ -1430,11 +1517,12 @@ impl FileWriter {
                 self.file.write_all(&finished.tail)?;
                 self.file.sync_all()?;
                 drop(self.file);
-                compact(&self.path)
+                Ok(true)
             }
             None => {
                 drop(self.file);
-                Ok(std::fs::remove_file(&self.path)?)
+                std::fs::remove_file(&self.path)?;
+                Ok(false)
             }
         }
     }
