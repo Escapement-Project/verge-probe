@@ -715,6 +715,7 @@ name = "escapement-tickwave-view"
 version = "0.1.0"
 dependencies = [
  "escapement-tickwave-format",
+ "foldhash",
  "lru",
  "num-bigint",
  "num-traits",

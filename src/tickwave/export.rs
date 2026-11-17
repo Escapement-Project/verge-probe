@@ -44,6 +44,11 @@ impl<'a> Layout<'a> {
         let source = recording.sources().first().ok_or(Error::NotVerge)?;
         let header = header_from(&source.extra).ok_or(Error::NotVerge)?;
         let channel = |name: &str| recording.channel(name).ok_or(Error::NotVerge);
+        // The Recorder places pairs on whole ticks, as the export reads them.
+        let whole = |c: usize| match recording.runs(c)?.grid.d() {
+            1 => Ok(c),
+            _ => Err(Error::NotVerge),
+        };
         let mut pins = Vec::new();
         for k in (0..4).filter(|k| header.dio_mask & (1 << k) != 0) {
             pins.push((k, channel(&format!("DIO{k}"))?));
@@ -52,8 +57,8 @@ impl<'a> Layout<'a> {
             recording,
             base: -source.origin,
             extra: &source.extra,
-            v: channel("V")?,
-            i: channel("I")?,
+            v: whole(channel("V")?)?,
+            i: whole(channel("I")?)?,
             low: channel("low_range")?,
             under: channel("under_range")?,
             pins,
@@ -100,9 +105,8 @@ impl<'a> Layout<'a> {
                 }
             }
         }
-        let all = self.recording.markers(i64::MIN..i64::MAX, None, usize::MAX);
-        for a in all.entries.iter().map(|m| &m.annotation) {
-            widen(a.start..a.end.unwrap_or(a.start).max(a.start + 1));
+        if let Some(span) = self.recording.markers_span() {
+            widen(span);
         }
         Ok(extent)
     }
@@ -395,8 +399,9 @@ pub fn export(
         return Err(Error::Exists(path.to_owned()));
     }
     let layout = Layout::new(recording)?;
-    // A bundle that doesn't resolve leaves the markers empty, which would export as none.
-    recording.load_markers()?;
+    // An empty interval reads the bundle and no part. A bundle that doesn't read leaves the
+    // markers out of the extent, so an export it can't place is refused.
+    recording.try_markers(0..0, None, 0)?;
     // Only the sink holds the file open, so a CSV marker merge can rename over it.
     let (file, temp) = temp_beside(path)?.into_parts();
     let mut sink = Sink::from_file(file, &temp, csv)?;
@@ -405,7 +410,7 @@ pub fn export(
     } else {
         layout.header.dio_mask
     };
-    if recording.marker_count() as u64 + layout.count("marker_losses") > 0 {
+    if recording.has_markers() || layout.count("marker_losses") > 0 {
         sink.include_markers()?;
     }
     sink.begin_with_dio_gaps(layout.header.whole_rate(), pins, layout.header.dio_levels)?;
@@ -435,7 +440,7 @@ fn export_markers(
         let mut after = None;
         loop {
             cancelled(cancel)?;
-            let page = recording.markers(interval.clone(), after, MARKER_PAGE);
+            let page = recording.try_markers(interval.clone(), after, MARKER_PAGE)?;
             for marker in &page.entries {
                 let a = &marker.annotation;
                 if !is_marker(a.kind.as_deref()) {
@@ -461,13 +466,7 @@ fn export_markers(
         }
     }
     // The loss reports that came with no marker have no time, so every export carries them.
-    let all = recording.markers(i64::MIN..i64::MAX, None, usize::MAX);
-    let attached = all
-        .entries
-        .iter()
-        .filter(|m| m.annotation.kind.as_deref() == Some("marker-after-loss"))
-        .count() as u64;
-    for _ in attached..layout.count("marker_losses") {
+    for _ in 0..layout.count("untimed_marker_losses") {
         sink.marker_loss();
     }
     Ok(())

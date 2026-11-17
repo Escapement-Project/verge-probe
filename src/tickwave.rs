@@ -148,9 +148,12 @@ fn analog(name: &str, unit: &str, period: Ratio, coding: AnalogCoding) -> Declar
             period,
             coding,
             significant: Some(4),
+            phase: None,
         },
         shaping: Default::default(),
         overview_shift: None,
+        requires: Vec::new(),
+        codec: None,
     }
 }
 
@@ -162,6 +165,8 @@ fn digital(name: &str, initial: bool) -> DeclaredChannel {
         data: DeclaredKind::Digital { initial },
         shaping: Default::default(),
         overview_shift: None,
+        requires: Vec::new(),
+        codec: None,
     }
 }
 
@@ -338,8 +343,13 @@ struct Open {
     dio_levels: Option<u8>,
     /// The latest DIO tick placed: one past an edge, or a gap's `to`.
     dio_end: i64,
+    /// Where an attached stream's first DIO gap ends: the pins are known there, so a loss report
+    /// from before it starts past it.
+    dio_start: Option<i64>,
     markers: u64,
     marker_losses: u64,
+    /// Loss reports that came with no marker, which no time places.
+    untimed_marker_losses: u64,
     marker_ticks: HashMap<i64, u32>,
     last_marker: Option<i64>,
     lost_after: u64,
@@ -406,6 +416,11 @@ impl Encoder {
                 let open = self.open.as_mut().unwrap();
                 let from = open.stamp(lost.from_ns)?;
                 let to = open.stamp(lost.to_ns)?;
+                // The stream's rule: a report up to a pairs message's last pair comes before the
+                // next pairs message, so none ends before what that message promised.
+                if to < open.promised {
+                    return Err(Error::Timestamps);
+                }
                 // A report that spans nothing lost nothing: the levels stand from then on.
                 let item = match to.cmp(&from) {
                     std::cmp::Ordering::Less => return Err(Error::Timestamps),
@@ -560,6 +575,7 @@ impl DioOpen {
             title: None,
             meta: BTreeMap::new(),
             overview_shift: DIO_OVERVIEW_SHIFT,
+            requires: Vec::new(),
         };
         Ok(Self {
             writer: Writer::new(declaration, write_options())?,
@@ -739,15 +755,14 @@ impl Open {
             timebase,
             channels,
             derived: vec![Derived {
-                name: "P".into(),
-                unit: "W".into(),
-                product: ["I".into(), "V".into()],
                 significant: Some(4),
+                ..Derived::multiply("P", "W", "I", "V")
             }],
             sources: vec![source],
             title: None,
             meta: BTreeMap::new(),
             overview_shift: overview_shift(period),
+            requires: Vec::new(),
         };
         Ok(Self {
             writer: Writer::new(declaration, write_options())?,
@@ -767,8 +782,10 @@ impl Open {
             range: [None, None],
             dio_levels: from_start.then_some(header.dio_levels),
             dio_end: base,
+            dio_start: None,
             markers: 0,
             marker_losses: 0,
+            untimed_marker_losses: 0,
             marker_ticks: HashMap::new(),
             last_marker: None,
             lost_after: 0,
@@ -835,10 +852,11 @@ impl Open {
 
     /// Every item before the capture's tick `before` is in.
     fn promise(&mut self, before: i64) -> Result<()> {
-        // With no DIO item yet, an attached stream's first gap goes in at the first promise past
-        // its first pair: every later item lies at or after the promise, so past the gap.
-        if self.dio_levels.is_none() && self.first_pair.is_some_and(|first| before > first) {
-            self.start_dio(None)?;
+        // With no DIO item yet, an attached stream's first gap goes in before the first promise
+        // at or past its first pair, and ends before the promise: every later edge lies at or
+        // after it, and every later loss report ends there or later.
+        if self.dio_levels.is_none() && self.first_pair.is_some_and(|first| before >= first) {
+            self.start_dio(Some(before))?;
         }
         if before > self.promised {
             self.writer.promise(before - self.base)?;
@@ -927,6 +945,9 @@ impl Open {
     fn markers(&mut self, markers: &Markers) -> Result<()> {
         if markers.lost() {
             self.marker_losses += 1;
+            if markers.markers.is_empty() {
+                self.untimed_marker_losses += 1;
+            }
         }
         for (index, marker) in markers.markers.iter().enumerate() {
             let tick = self.stamp(marker.time_ns)?;
@@ -1012,6 +1033,7 @@ impl Open {
         if let Some(to) = to {
             self.dio_end = self.dio_end.max(to);
         }
+        self.dio_start = Some(to.map_or(self.base, |to| to.max(self.base)));
         for item in std::mem::take(&mut self.early) {
             self.place_dio(item)?;
         }
@@ -1086,6 +1108,10 @@ impl Open {
                 self.dio_end = self.dio_end.max(tick + 1);
             }
             Dio::Lost { from, to, levels } => {
+                let from = self.dio_start.map_or(from, |known| from.max(known + 1));
+                if to <= from {
+                    return self.place_dio(Dio::Edge { tick: from, levels });
+                }
                 for (i, &k) in self.pins.iter().enumerate() {
                     let gap = Gap {
                         from,
@@ -1141,6 +1167,10 @@ impl Open {
         extra.insert("end_reason".into(), end_reason(self.reason));
         extra.insert("markers".into(), self.markers.to_string());
         extra.insert("marker_losses".into(), self.marker_losses.to_string());
+        extra.insert(
+            "untimed_marker_losses".into(),
+            self.untimed_marker_losses.to_string(),
+        );
         // A stream that brought no pair has no sample for its losses to lie beside.
         let lost_after = if self.last_sample.is_some() && self.lost_after > 0 {
             BTreeMap::from([(V, self.lost_after), (I, self.lost_after)])

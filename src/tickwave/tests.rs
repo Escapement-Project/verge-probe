@@ -6,7 +6,7 @@ use crate::capture::{Archive, CaptureWriter, Interval};
 use crate::stream::{DioHeader, DioLost, DioTime, Edge, Edges, End, Marker, Pair};
 use escapement_tickwave_format::decode::{BlockChannel, Footer, Index, from_memory};
 use escapement_tickwave_format::header::ChannelKind;
-use escapement_tickwave_format::model::{Break, sample_tick};
+use escapement_tickwave_format::model::{Break, Grid};
 use std::sync::atomic::AtomicBool;
 
 const CLOCK: u32 = 96_000_000;
@@ -346,12 +346,15 @@ fn decode(file: &[u8]) -> Decoded {
         .map(|c| footer.breaks(c).unwrap_or_default().to_vec())
         .collect();
     let mut annotations = Vec::new();
-    for (name, text) in footer
-        .read_bundle(from_memory(file))
-        .unwrap()
-        .iter()
-        .flatten()
-    {
+    let sidecar = footer.read_sidecar(from_memory(file)).unwrap();
+    if let Some(sidecar) = &sidecar {
+        assert_eq!(
+            sidecar.left_out,
+            Vec::<String>::new(),
+            "annotations left out"
+        );
+    }
+    for (name, text) in sidecar.iter().flat_map(|s| &s.files) {
         if name.ends_with(".jsonl") {
             for line in text.lines().skip(1) {
                 annotations.push(serde_json::from_str(line).unwrap());
@@ -524,11 +527,7 @@ fn compare(shape: Shape) -> Tally {
     };
     let breaks = &d.breaks[V];
     assert_eq!(*count as usize, stored.len(), "{}", shape.seed);
-    let mut runs = vec![escapement_tickwave_format::model::Break {
-        index: 0,
-        tick: *first,
-        lost: 0,
-    }];
+    let mut runs = vec![Break::new(0, *first, 0)];
     runs.extend(breaks.iter().copied());
     let mut run = 0;
     for (i, s) in stored.iter().enumerate() {
@@ -801,6 +800,13 @@ fn ticks_round_trip_through_the_probes_ns() {
     }
 }
 
+/// The tick of sample `index` of a run that starts at `first`.
+fn sample_tick(first: i64, period: Ratio, index: u64) -> i64 {
+    Grid::new(period, None)
+        .unwrap()
+        .sample_tick(first, &[], index)
+}
+
 /// Each sample's tick and codes, and each marker's start, from a finished file.
 fn content(file: &[u8]) -> (Vec<(i64, u64, u64)>, Vec<i64>, usize) {
     let d = decode(file);
@@ -810,9 +816,9 @@ fn content(file: &[u8]) -> (Vec<(i64, u64, u64)>, Vec<i64>, usize) {
     let breaks = &d.breaks[V];
     let samples = (0..d.codes[V].len())
         .map(|i| {
-            let at = escapement_tickwave_format::model::run_sample_tick(
-                *first, *period, breaks, i as u64,
-            );
+            let at = Grid::new(*period, None)
+                .unwrap()
+                .sample_tick(*first, breaks, i as u64);
             (at, d.codes[V][i], d.codes[I][i])
         })
         .collect();
@@ -1208,7 +1214,8 @@ fn same_sigrok(archive: &Path, recording: &Path, case: &str) -> usize {
 }
 
 /// A file whose marker bundle doesn't resolve still opens, and its export is refused rather than
-/// written without the markers.
+/// written without the markers: over the pairs, and over an interval that meets nothing else,
+/// where the markers it can't place might be.
 #[test]
 fn an_export_of_a_file_whose_markers_dont_resolve_is_refused() {
     use escapement_tickwave_view::{Cache, Recording};
@@ -1250,16 +1257,71 @@ fn an_export_of_a_file_whose_markers_dont_resolve_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let cancel = AtomicBool::new(false);
     for (name, csv) in [("markers.csv", true), ("markers.sr", false)] {
-        let path = dir.path().join(name);
+        for interval in [0..i64::MAX / 4, i64::MIN / 4..0] {
+            let path = dir.path().join(name);
+            let error = export(&recording, &path, csv, interval.clone(), &cancel).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Error::View(escapement_tickwave_view::Error::Annotations(_))
+                ),
+                "{name} {interval:?}: {error}"
+            );
+            assert!(!path.exists(), "{name} {interval:?}");
+        }
+    }
+}
+
+/// An export reads the marker parts its interval meets and no other: one over a part that doesn't
+/// read is refused, and one past it is written.
+#[test]
+fn an_export_reads_only_the_marker_parts_it_meets() {
+    use escapement_tickwave_view::{Cache, Recording};
+    let header = header(Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 1,
+        dio_mask: 0,
+        messages: 1,
+        end: true,
+    });
+    let p = u64::from(header.period);
+    let pair = Pair {
+        voltage_code: 30_000,
+        current_code: 1_000,
+        low: true,
+        under_range: false,
+    };
+    let marker = Marker {
+        time_ns: ns(3 * p),
+        number: 1,
+        label: b"m".to_vec(),
+    };
+    let messages = [
+        Message::Header(header),
+        Message::Pairs(Pairs::new(0, 1, ns(0), vec![pair; 10])),
+        Message::Markers(Markers::new(0, vec![marker])),
+        Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 10,
+            time_ns: None,
+        }),
+    ];
+    let mut file = encode(&messages);
+    let footer = Index::of_file(&file).unwrap().footer;
+    let rows = footer.part_rows(from_memory(&file)).unwrap();
+    let [row] = rows[..] else { panic!("{rows:?}") };
+    file[(row.offset + u64::from(row.length) / 2) as usize] ^= 0xff;
+    let recording = Recording::open(std::sync::Arc::new(file), Cache::new(64 << 20)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (name, csv) in [("markers.csv", true), ("markers.sr", false)] {
+        let path = dir.path().join(format!("over-{name}"));
         let error = export(&recording, &path, csv, 0..i64::MAX / 4, &cancel).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                Error::View(escapement_tickwave_view::Error::Annotations(_))
-            ),
-            "{name}: {error}"
-        );
+        assert!(matches!(error, Error::View(_)), "{name}: {error}");
         assert!(!path.exists(), "{name}");
+        let path = dir.path().join(format!("past-{name}"));
+        export(&recording, &path, csv, row.end + 1..i64::MAX / 4, &cancel).unwrap();
     }
 }
 
@@ -1969,6 +2031,244 @@ fn a_dio_recording_cut_off_keeps_its_latest_edge_and_recovers_to_a_prefix() {
                     "seed {seed}, cut at {cut}"
                 );
             }
+        }
+    }
+}
+
+/// A crash while the finish is being written leaves a file cut inside its tail: past every block
+/// and record the recording wrote while it ran.
+#[test]
+fn a_recording_cut_inside_its_finish_recovers() {
+    for k in [2, 13, 22, 33] {
+        let messages = stream(shapes()[k]);
+        let mut encoder = Encoder::new(Context::default());
+        let mut file = Vec::new();
+        for message in &messages {
+            encoder.ingest(message).unwrap();
+            file.extend(encoder.take_output());
+            encoder.flush().unwrap();
+            file.extend(encoder.take_output());
+        }
+        let body = file.len();
+        file.extend(encoder.finish("capture").unwrap().unwrap().tail);
+        let footer = u64::from_le_bytes(file[file.len() - 24..file.len() - 16].try_into().unwrap());
+        let footer = usize::try_from(footer).unwrap();
+        let (all, all_markers, _) = content(&file);
+        let dir = tempfile::tempdir().unwrap();
+        let step = ((file.len() - body) / 128).max(1);
+        let cuts: std::collections::BTreeSet<usize> = (body..file.len())
+            .step_by(step)
+            .chain([footer, file.len() - 1])
+            .chain(footer.saturating_sub(if k == 13 { 4096 } else { 0 })..footer)
+            .collect();
+        let mut failed = Vec::new();
+        for &cut in &cuts {
+            let path = dir.path().join(format!("cut-{cut}.tickwave"));
+            std::fs::write(&path, &file[..cut]).unwrap();
+            if let Err(error) = compact(&path) {
+                failed.push(format!("{}: {error}", cut - body));
+                continue;
+            }
+            let (samples, markers, _) = content(&std::fs::read(&path).unwrap());
+            assert_eq!(samples[..], all[..samples.len()], "cut at {cut}");
+            assert!(
+                markers.iter().all(|m| all_markers.contains(m)),
+                "cut at {cut}"
+            );
+            if cut == footer {
+                assert_eq!(samples, all, "cut at the footer");
+                assert_eq!(markers.len(), all_markers.len(), "cut at the footer");
+            }
+        }
+        eprintln!(
+            "shape {k}: {} markers, {} samples; tail {} bytes from {body}, footer at +{}, {} cuts",
+            all_markers.len(),
+            all.len(),
+            file.len() - body,
+            footer - body,
+            cuts.len()
+        );
+        assert!(
+            failed.is_empty(),
+            "shape {k}: {} of {} cuts failed: {failed:#?}",
+            failed.len(),
+            cuts.len()
+        );
+    }
+}
+
+/// Clock counts between pairs at 1,000 pairs a second.
+const P: u64 = CLOCK as u64 / 1_000;
+
+/// An attached stream at 1,000 pairs a second whose first pairs message holds `first` pairs, then
+/// `dio`, then a third message and the end.
+fn attached(first: u32, dio: Message) -> Vec<Message> {
+    let header = header(Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 5_000,
+        dio_mask: 0b0001,
+        messages: 3,
+        end: true,
+    });
+    let pair = Pair {
+        voltage_code: 30_000,
+        current_code: 1_000,
+        low: true,
+        under_range: false,
+    };
+    let at = |sequence: u32| ns(u64::from(sequence) * P);
+    let second = 5_000 + first;
+    vec![
+        Message::Header(header),
+        Message::Pairs(Pairs::new(0, 5_000, at(5_000), vec![pair; first as usize])),
+        Message::Pairs(Pairs::new(0, second, at(second), vec![pair; 10])),
+        dio,
+        Message::Pairs(Pairs::new(0, second + 10, at(second + 10), vec![pair; 10])),
+        Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: second + 19,
+            time_ns: None,
+        }),
+    ]
+}
+
+fn spans(gaps: &[Gap]) -> Vec<(i64, i64, bool)> {
+    gaps.iter().map(|g| (g.from, g.to, g.level)).collect()
+}
+
+#[test]
+fn a_dio_loss_from_before_the_first_pair_starts_past_the_first_gap() {
+    let messages = attached(
+        10,
+        Message::DioLost(DioLost {
+            from_ns: ns(4_999 * P),
+            to_ns: ns(5_012 * P),
+            levels: 0,
+        }),
+    );
+    let p = P as i64;
+    assert_eq!(
+        spans(&decode(&encode(&messages)).gaps[FIRST_DIO]),
+        [
+            (4_998 * p, 5_000 * p, true),
+            (5_000 * p + 1, 5_012 * p, false)
+        ]
+    );
+}
+
+#[test]
+fn a_dio_loss_that_ends_before_the_latest_promise_is_refused() {
+    // The second pairs message promises everything before the first message's last pair.
+    for (to, refused) in [(5_008, true), (5_009, false)] {
+        let messages = attached(
+            10,
+            Message::DioLost(DioLost {
+                from_ns: ns(5_003 * P),
+                to_ns: ns(to * P),
+                levels: 0,
+            }),
+        );
+        let mut encoder = Encoder::new(Context::default());
+        let outcome = messages[..4]
+            .iter()
+            .try_for_each(|message| encoder.ingest(message).map(drop));
+        assert_eq!(outcome.is_err(), refused, "a loss to {to}");
+    }
+}
+
+#[test]
+fn an_edge_at_a_lone_first_pair_comes_after_the_first_gap() {
+    let messages = attached(1, Message::Edges(Edges::new_at(vec![(5_000 * P, 0)])));
+    let d = decode(&encode(&messages));
+    let p = P as i64;
+    assert_eq!(
+        spans(&d.gaps[FIRST_DIO]),
+        [(4_998 * p, 5_000 * p - 1, true)]
+    );
+    assert_eq!(d.edges[FIRST_DIO], [5_000 * p]);
+}
+
+/// A recording laid out as the Recorder lays one out, its pairs `period` apart and `phase` past
+/// their ticks.
+fn laid_out(period: Ratio, phase: Option<Ratio>) -> Vec<u8> {
+    let header = header(Shape {
+        seed: 0,
+        rate: 1_000,
+        first_sequence: 1,
+        dio_mask: 0,
+        messages: 1,
+        end: true,
+    });
+    let timebase = Ratio::integer(u64::from(CLOCK)).unwrap();
+    let mut channels = vec![
+        analog("V", "V", period, int(1000)),
+        analog("I", "A", period, int(1_000_000_000)),
+        digital("low_range", false),
+        digital("under_range", false),
+    ];
+    for channel in &mut channels[..2] {
+        if let DeclaredKind::Analog { phase: p, .. } = &mut channel.data {
+            *p = phase;
+        }
+    }
+    let mut source = SourceHeader::new(SourceFormat::Other(FORMAT.into()), timebase);
+    source.extra = header_extra(&header, &Context::default());
+    let declaration = Declaration {
+        timebase,
+        channels,
+        derived: Vec::new(),
+        sources: vec![source],
+        title: None,
+        meta: BTreeMap::new(),
+        overview_shift: overview_shift(period),
+        requires: Vec::new(),
+    };
+    let mut writer = Writer::new(declaration, write_options()).unwrap();
+    for c in [V, I] {
+        writer.run(c, 0, 0).unwrap();
+        for _ in 0..10 {
+            writer.sample(c, 1u64).unwrap();
+        }
+    }
+    let end = 11 * P as i64;
+    let mut file = writer.take_output();
+    file.extend(
+        writer
+            .finish(end, &[end, end], Finish::default())
+            .unwrap()
+            .tail,
+    );
+    file
+}
+
+#[test]
+fn an_export_refuses_pairs_off_whole_ticks() {
+    use escapement_tickwave_view::{Cache, Recording};
+    let whole = Ratio::integer(P).unwrap();
+    let cases = [
+        (whole, None, true),
+        (Ratio::new(2 * P + 1, 2).unwrap(), None, false),
+        (whole, Ratio::new(1, 2), false),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (k, (period, phase, exports)) in cases.into_iter().enumerate() {
+        let recording = Recording::open(
+            std::sync::Arc::new(laid_out(period, phase)),
+            Cache::new(1 << 20),
+        )
+        .unwrap();
+        let path = dir.path().join(format!("{k}.csv"));
+        let outcome = export(&recording, &path, true, 0..i64::MAX / 4, &cancel);
+        assert_eq!(
+            outcome.is_ok(),
+            exports,
+            "{period:?} {phase:?}: {:?}",
+            outcome.err()
+        );
+        if !exports {
+            assert!(matches!(outcome, Err(Error::NotVerge)));
         }
     }
 }
