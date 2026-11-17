@@ -52,7 +52,7 @@ const DIO_OVERVIEW_SHIFT: u8 = 23;
 mod export;
 pub use export::export;
 
-#[cfg(all(test, feature = "capture"))]
+#[cfg(test)]
 mod tests;
 
 #[derive(Debug, thiserror::Error)]
@@ -1421,7 +1421,7 @@ impl FileWriter {
     }
 
     /// Blocks closed after every message, for tests of many-block files.
-    #[cfg(all(test, feature = "capture"))]
+    #[cfg(test)]
     fn flushing_always(mut self) -> Self {
         self.flush_every = Duration::ZERO;
         self

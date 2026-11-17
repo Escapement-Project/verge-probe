@@ -1,4 +1,4 @@
-use super::{CaptureError, CaptureWriter, Result};
+use super::{CaptureError, Result};
 use crate::stream::Message;
 use crate::tickwave::{Context, FileWriter, Snapshots};
 use std::path::Path;
@@ -12,44 +12,7 @@ pub struct Recorder {
     thread: Option<JoinHandle<Result<()>>>,
 }
 
-/// Where a recorder's messages go.
-trait Disk: Send + 'static {
-    fn ingest(&mut self, message: Message) -> Result<bool>;
-    fn flush(&mut self) -> Result<()>;
-    fn finish(self) -> Result<()>;
-}
-
-impl Disk for CaptureWriter {
-    fn ingest(&mut self, message: Message) -> Result<bool> {
-        CaptureWriter::ingest(self, message)
-    }
-    fn flush(&mut self) -> Result<()> {
-        CaptureWriter::flush(self)
-    }
-    fn finish(self) -> Result<()> {
-        CaptureWriter::finish(self)
-    }
-}
-
-impl Disk for FileWriter {
-    fn ingest(&mut self, message: Message) -> Result<bool> {
-        Ok(FileWriter::ingest(self, &message)?)
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(FileWriter::flush(self)?)
-    }
-    fn finish(self) -> Result<()> {
-        FileWriter::close(self)?;
-        Ok(())
-    }
-}
-
 impl Recorder {
-    /// A `.vergecapture` archive.
-    pub fn create(path: &Path) -> Result<Self> {
-        Self::spawn(CaptureWriter::create(path)?)
-    }
-
     /// A `.tickwave` recording, and the latest snapshot of it for a view in this process. Finishing
     /// leaves it uncompacted: its owner compacts it with [`crate::tickwave::compacted`] around the
     /// view that reads it.
@@ -59,14 +22,14 @@ impl Recorder {
         Ok((Self::spawn(writer)?, snapshots))
     }
 
-    fn spawn(mut writer: impl Disk) -> Result<Self> {
+    fn spawn(mut writer: FileWriter) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(256);
         let thread = thread::Builder::new()
             .name("capture-disk".into())
             .spawn(move || {
                 let received = loop {
                     let step = match receiver.recv_timeout(Duration::from_millis(200)) {
-                        Ok(message) => writer.ingest(message),
+                        Ok(message) => writer.ingest(&message),
                         Err(RecvTimeoutError::Timeout) => writer.flush().map(|()| false),
                         Err(RecvTimeoutError::Disconnected) => Ok(true),
                     };
@@ -77,8 +40,8 @@ impl Recorder {
                     }
                 };
                 // What arrived before an error is kept; the first error is the one reported.
-                let finished = writer.finish();
-                received.and(finished)
+                let finished = writer.close().map(drop);
+                received.and(finished).map_err(CaptureError::from)
             })?;
         Ok(Self {
             sender: Some(sender),

@@ -34,17 +34,14 @@ capture are the Pro's. A board with DIO pins and no energy capture, a standalone
 without its energy circuit, streams its DIO pins alone (`start_dio_stream`). `record::Sink` writes
 pairs and DIO edges as CSV or as a sigrok session.
 
-The `capture` feature adds disk-backed captures, in SQLite. `capture::Recorder` takes stream
-messages without waiting for the disk, and fails rather than drop one when the disk falls behind.
-A capture keeps the original messages, the converted pairs, the pairs lost, and sums at several
-scales. `capture::Archive` reads it while a recording continues: statistics for any interval, an
-envelope of at most a set number of bins for drawing one, and exports of an interval as CSV or
-sigrok, with voltage, current and GAP but no DIO.
+The `tickwave` feature writes the stream as a `.tickwave` recording, the format of tickwave, the
+project's viewer for captures. `tickwave::export` writes all or part of one as CSV or a sigrok
+session. An export keeps every pair whose period overlaps the interval, so its first can start
+before the interval.
 
-An interval includes its start and excludes its end. Each pair covers its own period, clipped at
-the next pair's time, and time without pairs adds nothing to charge or energy. The sums are whole
-numbers, so an interval's statistics do not depend on how it was split to compute them. An export
-keeps every pair whose period overlaps the interval, so its first can start before the interval.
+The `capture` feature adds `capture::Recorder`, which writes a recording on a thread of its own. It
+takes stream messages without waiting for the disk, and fails rather than drop one when the disk
+falls behind.
 
 Both frontends use the library for discovery, image loading and updates:
 

@@ -695,7 +695,7 @@ pub struct Sample {
     pub millivolts: u32,
     pub nanoamps: u32,
     /// The pair's own range. Step 5 can give it a current from the pairs either side, which then
-    /// share it. None only for a sample from a capture archive older than this field.
+    /// share it. A sample from the stream always has one.
     pub range: Option<CurrentRange>,
     /// The pair's own reading was under range (Pair::under_range).
     #[serde(default)]
