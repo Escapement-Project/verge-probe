@@ -2035,6 +2035,60 @@ fn a_dio_recording_cut_off_keeps_its_latest_edge_and_recovers_to_a_prefix() {
     }
 }
 
+/// A crash before the first edge leaves a file with no block, which recovers to the probe's last
+/// DIO time before the last flush, every pin at its starting level.
+#[test]
+fn a_dio_recording_cut_off_before_its_first_edge_recovers_to_its_last_dio_time() {
+    let (mask, levels) = (0x0f, 0b0110);
+    let last_ns: u64 = 2_600_000_000;
+    let messages = [
+        Message::DioHeader(DioHeader {
+            clock_hz: 150_000_000,
+            dio_mask: mask,
+            dio_levels: levels,
+            edge_resolution_ns: 7,
+        }),
+        Message::DioTime(DioTime {
+            time_ns: 200_000_000,
+        }),
+        Message::DioTime(DioTime { time_ns: last_ns }),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quiet.tickwave");
+    let mut writer = FileWriter::create(&path, Context::default())
+        .unwrap()
+        .flushing_always();
+    for message in &messages {
+        writer.ingest(message).unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    compact(&path).unwrap();
+    let recovered = decode(&std::fs::read(&path).unwrap());
+    let last = last_ns as i64 * 150 / 1000;
+    assert!(
+        recovered.header.length >= last,
+        "{}",
+        recovered.header.length
+    );
+    let mut pins = 0;
+    for (c, channel) in recovered.header.channels.iter().enumerate() {
+        let Some(pin) = channel.name.strip_prefix("DIO") else {
+            continue;
+        };
+        let pin: u32 = pin.parse().unwrap();
+        assert!(recovered.edges[c].is_empty(), "{}", channel.name);
+        assert_eq!(
+            level_at(&recovered, c, last - 1),
+            Some(levels >> pin & 1 == 1),
+            "{}",
+            channel.name
+        );
+        pins += 1;
+    }
+    assert_eq!(pins, 4);
+}
+
 /// A crash while the finish is being written leaves a file cut inside its tail: past every block
 /// and record the recording wrote while it ran.
 #[test]
