@@ -51,7 +51,7 @@ pub enum CommandError<E: std::error::Error + 'static> {
 }
 
 impl<E: std::error::Error + 'static> CommandError<E> {
-    fn widen(error: CommandError<Infallible>) -> Self {
+    pub(crate) fn widen(error: CommandError<Infallible>) -> Self {
         match error {
             CommandError::Probe(error) => Self::Probe(error),
             CommandError::Unsupported(command) => Self::Unsupported(command),
@@ -269,8 +269,67 @@ pub struct CalibratedEnergySample {
     pub voltage_millivolts: u32,
     /// Target current in nanoamps, positive into the target.
     pub current_nanoamps: i32,
-    /// Per-sample current-sense path, 0 through 4.
+    /// Per-sample current-sense path, 0 through 4: [`CalibratedEnergySample::sense`] names it.
     pub range_id: u8,
+}
+
+impl CalibratedEnergySample {
+    /// The current range the pair was read on, and the range jumper's setting: `None` for a
+    /// range ID this library does not know.
+    #[must_use]
+    pub fn sense(&self) -> Option<SensePath> {
+        SensePath::from_id(self.range_id)
+    }
+}
+
+/// Where a pair's current was read: on the low or the high range, in the 350 mA or the 50 mA
+/// setting of the range jumper (host-interface.md, "The range is 1 for the low range in the
+/// 350 mA setting").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SensePath {
+    pub range: crate::stream::CurrentRange,
+    /// The range jumper's setting, 350 or 50 mA.
+    pub setting_ma: u16,
+}
+
+impl SensePath {
+    /// The path a firmware range ID names: 1 to 4.
+    #[must_use]
+    pub fn from_id(id: u8) -> Option<SensePath> {
+        use crate::stream::CurrentRange::{High, Low};
+        let (range, setting_ma) = match id {
+            1 => (Low, 350),
+            2 => (High, 350),
+            3 => (Low, 50),
+            4 => (High, 50),
+            _ => return None,
+        };
+        Some(SensePath { range, setting_ma })
+    }
+}
+
+impl std::fmt::Display for SensePath {
+    /// As "low range, 350 mA setting".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let range = match self.range {
+            crate::stream::CurrentRange::Low => "low",
+            crate::stream::CurrentRange::High => "high",
+        };
+        write!(f, "{range} range, {} mA setting", self.setting_ma)
+    }
+}
+
+/// What [`VergeControl::stop_running_energy_capture`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnergyStop {
+    /// A capture ran, and stopped.
+    Stopped,
+    /// A fault had stopped the capture already.
+    AlreadyFailed,
+    /// No capture ran.
+    NotRunning,
 }
 
 /// Result of starting an energy capture.
@@ -1292,6 +1351,24 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
     pub fn end_energy_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
         self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
         parse_energy_status(&self.send(ENERGY_COMMAND, &[7])?)
+    }
+
+    /// Stops whatever capture runs, by its identity, so a capture another host starts meanwhile
+    /// runs on. Says what it found: a capture to stop, one a fault had stopped already, or none.
+    pub fn stop_running_energy_capture(&mut self) -> Result<EnergyStop, CommandError<EnergyError>> {
+        let status = self.energy_capture_status()?;
+        if let Some(id) = status.capture_id {
+            match self.stop_energy_capture_if(id) {
+                // A fault stops a capture all the same, and the stop answers with it.
+                Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(match (status.running, status.result) {
+            (true, _) => EnergyStop::Stopped,
+            (false, Some(EnergyError::DmaError)) => EnergyStop::AlreadyFailed,
+            (false, _) => EnergyStop::NotRunning,
+        })
     }
 
     /// Stops voltage/current capture.

@@ -26,13 +26,14 @@ use crate::image::{Image, ImageError};
 use crate::paths::{self, Path};
 use crate::progress::{Cancel, Progress};
 use crate::release::Repo;
-use crate::source::{self, ImageVersion, Payload, Source};
+use crate::source::{self, ImageVersion, Loaded, Payload, Source};
 use crate::update::{self, Outcome, Timing, UpdateError};
 use crate::version::{Build, Relation, StockVersion};
 
 /// Polls past [`Timing::settle`] that a new probe may fail to open before the batch skips it.
 const OPEN_GRACE_POLLS: u32 = 4;
 
+/// Which units running NXP's firmware a batch takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StockFilter {
     None,
@@ -144,6 +145,18 @@ pub struct Armed {
 }
 
 impl Armed {
+    /// The image `source` loaded, from `repo` where it is a release.
+    #[must_use]
+    pub fn new(loaded: Loaded, source: Source, repo: Repo) -> Armed {
+        Armed {
+            image: loaded.image,
+            name: loaded.name,
+            version: loaded.version,
+            source,
+            repo,
+        }
+    }
+
     #[must_use]
     pub fn payload(&self) -> Payload<'_> {
         Payload::new(&self.image, &self.version)

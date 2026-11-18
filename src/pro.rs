@@ -4,6 +4,7 @@
 use crate::aux::{Aux, AuxError, AuxLink};
 use crate::bus::BusError;
 use crate::dap::LinkError;
+use crate::detect::PickError;
 use crate::stream::Message;
 use crate::{Bus, CommandError, DapTransport, Unit, VergeControl, VergeInfo, VergeTransport};
 use std::convert::Infallible;
@@ -264,6 +265,61 @@ pub fn with_pro<B: Bus, T, E: From<ProError>>(
     let mut pro = VergeControl::new(&mut transport as &mut dyn ProLink);
     check_offered(&name, &mut pro, feature)?;
     f(&name, &mut pro)
+}
+
+/// Why [`find`] found no unit to act on.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FindError {
+    #[error("looking for MCU-Links")]
+    Detect(#[source] BusError),
+    #[error("no MCU-Link is attached")]
+    NoneAttached,
+    #[error("no attached MCU-Link has serial {0}")]
+    NoSuchSerial(String),
+    /// None of several attached units runs Verge on a board with the feature.
+    #[error("none of the attached units runs Verge on a board with the {feature}")]
+    #[non_exhaustive]
+    NoneFits { feature: Feature, units: Vec<Unit> },
+    /// Several units could be meant: name one by its serial.
+    #[error("{} attached units run Verge on a board with the {feature}: pick one by serial", units.len())]
+    #[non_exhaustive]
+    Several { feature: Feature, units: Vec<Unit> },
+    /// The unit named, or the only one attached, cannot give the feature.
+    #[error(transparent)]
+    Refused(#[from] ProError),
+}
+
+/// The unit that `serial` names, or without one, the only attached unit running Verge on a board
+/// with `feature`, checked as [`validate`] checks it. A lone attached unit is refused saying why.
+pub fn find<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit, FindError> {
+    find_where(bus, serial, feature, |_| true)
+}
+
+/// [`find`], choosing without a serial only among the units `fits` takes.
+pub fn find_where<B: Bus>(
+    bus: &B,
+    serial: Option<&str>,
+    feature: Feature,
+    fits: impl Fn(&Unit) -> bool,
+) -> Result<Unit, FindError> {
+    let units = crate::detect::detect_named(bus, serial).map_err(FindError::Detect)?;
+    let reaches = |unit: &Unit| {
+        unit.verge()
+            .and_then(|ours| ours.board)
+            .is_some_and(|board| feature.on(board))
+            && fits(unit)
+    };
+    let unit = match crate::detect::pick(&units, serial, reaches) {
+        Ok(unit) => unit,
+        Err(PickError::NoneFits(_)) if units.len() == 1 => &units[0],
+        Err(PickError::NoneAttached) => return Err(FindError::NoneAttached),
+        Err(PickError::NoSuchSerial(serial)) => return Err(FindError::NoSuchSerial(serial)),
+        Err(PickError::NoneFits(units)) => return Err(FindError::NoneFits { feature, units }),
+        Err(PickError::Several(units)) => return Err(FindError::Several { feature, units }),
+    };
+    validate(unit, feature)?;
+    Ok(unit.clone())
 }
 
 /// Verge Aux on `unit`, checked to offer energy measurement: the only way to its stream.

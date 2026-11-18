@@ -15,6 +15,7 @@ pub use capture_id::CaptureId;
 pub mod dap;
 pub mod daplink_rs;
 pub mod detect;
+pub mod dio;
 pub mod hid;
 pub mod ids;
 pub mod image;
@@ -51,11 +52,12 @@ pub use probe::{
     AttachError, BoardKind, CalibratedEnergySample, CalibrationPoint, CalibrationRange,
     CodeLabArena, CodegenMeasurement, CodegenMode, CommandError, DapTransport, DioState,
     EnergyAccumulator, EnergyCalibration, EnergyCaptureSample, EnergyCaptureStart,
-    EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergyRanges, EnergySample, EnergyTotal,
-    JtagCodegenState, JtagGenerationLogEntry, JtagPacingState, JtagWire, LatencyOutcome, Marked,
-    ProBusError, RawEnergySample, Refused, SamplePosition, SampleRequest, SampleResult, SpiMode,
-    SwdCodegenState, TargetSenseError, TargetSenseReading, VendorStatus, VergeControl, VergeInfo,
-    VergeProbe, VergeSession, VergeTransport, attach, is_mcu_link, prepare_probe,
+    EnergyCaptureStatus, EnergyError, EnergyMonitorError, EnergyRanges, EnergySample, EnergyStop,
+    EnergyTotal, JtagCodegenState, JtagGenerationLogEntry, JtagPacingState, JtagWire,
+    LatencyOutcome, Marked, ProBusError, RawEnergySample, Refused, SamplePosition, SampleRequest,
+    SampleResult, SensePath, SpiMode, SwdCodegenState, TargetSenseError, TargetSenseReading,
+    VendorStatus, VergeControl, VergeInfo, VergeProbe, VergeSession, VergeTransport, attach,
+    is_mcu_link, prepare_probe,
 };
 
 /// docs/library.md's examples, each a program `cargo test --doc` builds.

@@ -391,6 +391,65 @@ pub fn detect_named<B: Bus>(bus: &B, serial: Option<&str>) -> Result<Vec<Unit>, 
         .collect())
 }
 
+/// Why [`pick`] found no one unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PickError {
+    /// No unit is attached.
+    NoneAttached,
+    /// No attached unit has the serial named.
+    NoSuchSerial(String),
+    /// None of the attached units fits: all of them. A lone unit here is one a command can say it
+    /// cannot act on.
+    NoneFits(Vec<Unit>),
+    /// Several units fit, or several have the serial named.
+    Several(Vec<Unit>),
+}
+
+impl std::fmt::Display for PickError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PickError::NoneAttached => f.write_str("no MCU-Link is attached"),
+            PickError::NoSuchSerial(serial) => {
+                write!(f, "no attached MCU-Link has serial {serial}")
+            }
+            PickError::NoneFits(_) => f.write_str("no attached MCU-Link fits"),
+            PickError::Several(units) => {
+                write!(
+                    f,
+                    "{} attached MCU-Links fit: pick one by serial",
+                    units.len()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PickError {}
+
+/// The unit a command acts on: the one `serial` names, or without a serial, the only one of
+/// `units` that `fits`.
+pub fn pick<'a>(
+    units: &'a [Unit],
+    serial: Option<&str>,
+    fits: impl Fn(&Unit) -> bool,
+) -> Result<&'a Unit, PickError> {
+    let found: Vec<&Unit> = match serial {
+        Some(serial) => units
+            .iter()
+            .filter(|unit| unit.serial() == Some(serial))
+            .collect(),
+        None => units.iter().filter(|unit| fits(unit)).collect(),
+    };
+    match (found.as_slice(), serial) {
+        ([unit], _) => Ok(unit),
+        ([_, _, ..], _) => Err(PickError::Several(found.into_iter().cloned().collect())),
+        ([], Some(serial)) => Err(PickError::NoSuchSerial(serial.to_owned())),
+        ([], None) if units.is_empty() => Err(PickError::NoneAttached),
+        ([], None) => Err(PickError::NoneFits(units.to_vec())),
+    }
+}
+
 /// What one device runs, asked as [`detect`] asks every device. `None` for a device this tool
 /// ignores.
 pub fn query_device<B: Bus>(bus: &B, device: UsbDevice) -> Option<Unit> {
