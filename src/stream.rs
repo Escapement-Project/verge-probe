@@ -11,6 +11,9 @@ use thiserror::Error;
 
 use crate::probe::CalibrationPoint;
 
+mod reader;
+pub use reader::{Began, Counts, EnergyStream, Messages, Reader, ReaderError, WAIT};
+
 pub const PAIRS: u8 = 0xA0;
 pub const HEADER: u8 = 0xA1;
 pub const END: u8 = 0xA2;
@@ -876,6 +879,12 @@ impl Converter {
     /// switch comes with the pair after it, or at [`Converter::end`].
     pub fn take_samples(&mut self) -> Vec<Sample> {
         std::mem::take(&mut self.samples)
+    }
+
+    /// [`Converter::take_samples`] for a caller that only looks at them: the converter keeps their
+    /// room for the next.
+    pub fn drain_samples(&mut self) -> impl Iterator<Item = Sample> + '_ {
+        self.samples.drain(..)
     }
 
     /// The total so far, leaving a pair still waiting out of it.

@@ -435,6 +435,13 @@ impl crate::aux::AuxLink for SimAux {
         Ok(())
     }
 
+    fn now(&self) -> Duration {
+        self.world
+            .lock()
+            .expect("the bench lock is not poisoned")
+            .now
+    }
+
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
         let mut waited = Duration::ZERO;
         loop {

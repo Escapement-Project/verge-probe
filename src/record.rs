@@ -1,6 +1,8 @@
-//! CSV and sigrok session writers shared by frontends.
+//! Recording files: CSV and sigrok sessions from converted pairs, and [`Writer`], which writes a
+//! stream's messages as either, or as a tickwave recording.
 
 mod markers;
+mod writer;
 use crate::stream::{CurrentRange, DioLost, Edge, Markers, Sample};
 pub use markers::label as marker_label;
 use std::collections::VecDeque;
@@ -8,9 +10,21 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+pub use writer::{Format, SinkWriter, Writer};
 use zip::ZipWriter;
 use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
+
+/// What a recording says about where it came from, beyond the stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Context {
+    /// The probe's model, as "MCU-Link Pro".
+    pub instrument: Option<String>,
+    /// The firmware's version.
+    pub software: Option<String>,
+    /// The host's clock as the recording started, RFC 3339 in UTC.
+    pub started_utc: Option<String>,
+}
 
 /// A temporary file beside `path`, named after it (`<name>.<random>.partial`), with the
 /// permissions a new file there gets rather than tempfile's owner-only ones. Only a drop removes
@@ -32,6 +46,7 @@ pub(crate) fn temp_beside(path: &Path) -> io::Result<tempfile::NamedTempFile> {
     builder.tempfile_in(dir)
 }
 
+/// Why a recording file could not be written.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecordError {
@@ -59,6 +74,27 @@ pub enum RecordError {
     },
     #[error("{} is no longer the file recorded to; that file keeps its pairs, without markers", path.display())]
     Replaced { path: PathBuf },
+    /// A tickwave recording's error, boxed: an export's can hold a [`RecordError`] in turn.
+    #[cfg(feature = "tickwave")]
+    #[error(transparent)]
+    Tickwave(Box<crate::tickwave::Error>),
+    #[error("writing a tickwave recording needs verge-probe's tickwave feature")]
+    NoTickwave,
+    #[error("the file's writer has stopped; finishing the file gives the reason")]
+    Stopped,
+    #[error("the file's writer panicked")]
+    Panicked,
+    #[error("the stream began again before it ended")]
+    SecondStream,
+    #[error("a sigrok session or CSV records an energy stream, and this is a DIO stream alone")]
+    DioOnly,
+}
+
+#[cfg(feature = "tickwave")]
+impl From<crate::tickwave::Error> for RecordError {
+    fn from(error: crate::tickwave::Error) -> Self {
+        RecordError::Tickwave(Box::new(error))
+    }
 }
 
 impl RecordError {

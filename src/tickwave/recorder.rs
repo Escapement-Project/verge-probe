@@ -2,7 +2,7 @@ use super::{Context, Error, FileWriter, Result, Snapshots, compact};
 use crate::stream::Message;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -11,18 +11,40 @@ use std::time::Duration;
 pub struct Recorder {
     path: PathBuf,
     snapshots: Snapshots,
-    sender: Option<SyncSender<Message>>,
+    sender: Option<Queue>,
     thread: Option<JoinHandle<Result<bool>>>,
     /// Whether the writer left a file, once its thread has been joined.
     written: bool,
 }
 
+/// The way to the writer's thread: a queue of 256 messages, or one without a bound.
+enum Queue {
+    Bounded(SyncSender<Message>),
+    Unbounded(Sender<Message>),
+}
+
 impl Recorder {
     /// Starts a recording at `path`, as [`FileWriter::create`] does.
     pub fn create(path: &Path, context: Context) -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(256);
+        Self::spawn(path, context, Queue::Bounded(sender), receiver)
+    }
+
+    /// [`Recorder::create`] with a queue that has no bound: a disk that falls behind costs memory
+    /// rather than the recording.
+    pub(crate) fn create_unbounded(path: &Path, context: Context) -> Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        Self::spawn(path, context, Queue::Unbounded(sender), receiver)
+    }
+
+    fn spawn(
+        path: &Path,
+        context: Context,
+        sender: Queue,
+        receiver: Receiver<Message>,
+    ) -> Result<Self> {
         let mut writer = FileWriter::create(path, context)?;
         let snapshots = writer.snapshots();
-        let (sender, receiver) = mpsc::sync_channel(256);
         let thread = thread::Builder::new()
             .name("recorder".into())
             .spawn(move || {
@@ -57,9 +79,16 @@ impl Recorder {
         Arc::clone(&self.snapshots)
     }
 
+    /// The stream's next message. Fails when the writer has fallen 256 messages behind, and once it
+    /// has stopped on an error, which [`Recorder::finish`] gives.
     pub fn send(&mut self, message: Message) -> Result<()> {
-        let sender = self.sender.as_ref().ok_or(Error::Closed)?;
-        match sender.try_send(message) {
+        let sent = match self.sender.as_ref().ok_or(Error::Closed)? {
+            Queue::Bounded(sender) => sender.try_send(message),
+            Queue::Unbounded(sender) => sender
+                .send(message)
+                .map_err(|error| TrySendError::Disconnected(error.0)),
+        };
+        match sent {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(Error::Behind),
             // The writer ended: its own error says why.

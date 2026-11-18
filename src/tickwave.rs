@@ -116,16 +116,7 @@ pub fn nanos(tick: i64, clock_hz: u32) -> u64 {
     (u128::from(tick.max(0) as u64) * 1_000_000_000 / u128::from(clock_hz.max(1))) as u64
 }
 
-/// What the recording says about where it came from, beyond the stream.
-#[derive(Clone, Debug, Default)]
-pub struct Context {
-    /// The probe's model, as "MCU-Link Pro".
-    pub instrument: Option<String>,
-    /// The firmware's version.
-    pub software: Option<String>,
-    /// The host's clock as the recording started, RFC 3339 in UTC.
-    pub started_utc: Option<String>,
-}
+pub use crate::record::Context;
 
 pub fn write_options() -> WriteOptions {
     WriteOptions {

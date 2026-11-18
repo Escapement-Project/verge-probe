@@ -7,7 +7,8 @@
 //! [`Aux::message`].
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use probe_rs::probe::DebugProbeError;
 
@@ -32,6 +33,13 @@ pub trait AuxLink {
     fn write(&mut self, request: &[u8]) -> Result<(), LinkError>;
     /// One transfer from the IN endpoint, or [`LinkError::Timeout`] if none came.
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError>;
+    /// Time since an arbitrary start, which a stream's waits are timed by. The simulator's link
+    /// gives its bench's time, as [`crate::Bus::now`] does, so a link that wraps another forwards
+    /// it.
+    fn now(&self) -> Duration {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed()
+    }
 }
 
 impl<L: AuxLink + ?Sized> AuxLink for Box<L> {
@@ -42,8 +50,13 @@ impl<L: AuxLink + ?Sized> AuxLink for Box<L> {
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
         (**self).read(timeout)
     }
+
+    fn now(&self) -> Duration {
+        (**self).now()
+    }
 }
 
+/// Why reading Verge Aux's stream failed: the link, or a message that does not parse.
 #[derive(Debug, thiserror::Error)]
 pub enum AuxError {
     #[error(transparent)]
@@ -156,6 +169,12 @@ impl<L: AuxLink> Aux<L> {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// The link's time ([`AuxLink::now`]).
+    #[must_use]
+    pub fn now(&self) -> Duration {
+        self.link.now()
     }
 }
 
