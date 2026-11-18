@@ -37,11 +37,8 @@ pairs and DIO edges as CSV or as a sigrok session.
 The `tickwave` feature writes the stream as a `.tickwave` recording, the format of tickwave, the
 project's viewer for captures. `tickwave::export` writes all or part of one as CSV or a sigrok
 session. An export keeps every pair whose period overlaps the interval, so its first can start
-before the interval.
-
-The `capture` feature adds `capture::Recorder`, which writes a recording on a thread of its own. It
-takes stream messages without waiting for the disk, and fails rather than drop one when the disk
-falls behind.
+before the interval. `tickwave::Recorder` writes a recording on a thread of its own. It takes stream
+messages without waiting for the disk, and fails rather than drop one when the disk falls behind.
 
 Both frontends use the library for discovery, image loading and updates:
 

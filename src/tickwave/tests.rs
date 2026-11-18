@@ -1953,31 +1953,36 @@ fn a_directorys_recordings_are_listed_and_a_cut_off_one_is_finished_by_compactin
     assert!(recordings(&dir.path().join("none")).unwrap().is_empty());
 }
 
-#[cfg(feature = "capture")]
-#[test]
-fn a_recorder_leaves_its_recording_finished_for_its_owner_to_compact() {
-    let messages = stream(shapes()[13]);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("recorded.tickwave");
-    let (mut recorder, _snapshots) =
-        crate::capture::Recorder::tickwave(&path, Context::default()).unwrap();
-    for message in &messages {
+/// Sends a stream through a recorder, waiting out its bounded queue.
+fn record(path: &Path, messages: &[Message]) -> Recorder {
+    let mut recorder = Recorder::create(path, Context::default()).unwrap();
+    for message in messages {
         // The recorder's queue is bounded; it is behind while its thread catches up.
         while let Err(error) = recorder.send(message.clone()) {
-            assert!(
-                matches!(error, crate::capture::CaptureError::Behind),
-                "{error}"
-            );
+            assert!(matches!(error, Error::Behind), "{error}");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
-    recorder.finish().unwrap();
-    assert!(finished(&path).unwrap());
-    let closed = std::fs::read(&path).unwrap();
-    compact(&path).unwrap();
-    assert_ne!(
-        std::fs::read(&path).unwrap(),
-        closed,
-        "the recorder compacted it"
+    recorder
+}
+
+#[test]
+fn a_recorder_finishes_its_recording_compacted_and_closes_it_without() {
+    let messages = stream(shapes()[13]);
+    // The same name in two directories: the file's name is part of what it holds.
+    let (one, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let closed = one.path().join("recorded.tickwave");
+    record(&closed, &messages).close().unwrap();
+    assert!(finished(&closed).unwrap());
+    let finished_path = other.path().join("recorded.tickwave");
+    record(&finished_path, &messages).finish().unwrap();
+    let before = std::fs::read(&closed).unwrap();
+    compact(&closed).unwrap();
+    let compacted = std::fs::read(&closed).unwrap();
+    assert_ne!(compacted, before, "close left it uncompacted");
+    assert_eq!(
+        std::fs::read(&finished_path).unwrap(),
+        compacted,
+        "finish compacted it"
     );
 }

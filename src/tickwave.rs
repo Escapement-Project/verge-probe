@@ -52,6 +52,8 @@ const DIO_OVERVIEW_SHIFT: u8 = 23;
 
 mod export;
 pub use export::export;
+mod recorder;
+pub use recorder::Recorder;
 
 #[cfg(test)]
 mod tests;
@@ -87,6 +89,15 @@ pub enum Error {
     DioPairs,
     #[error("cancelled")]
     Cancelled,
+    #[error("the recording is closed")]
+    Closed,
+    /// The recorder's queue filled: the disk cannot keep up with the stream.
+    #[error("the recorder's disk writer fell behind the stream")]
+    Behind,
+    #[error("the recorder's disk writer stopped")]
+    Stopped,
+    #[error("the recorder's disk writer panicked")]
+    Panicked,
 }
 
 type Result<T> = std::result::Result<T, Error>;

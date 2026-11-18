@@ -1,31 +1,30 @@
-use super::{CaptureError, Result};
+use super::{Context, Error, FileWriter, Result, Snapshots, compact};
 use crate::stream::Message;
-use crate::tickwave::{Context, FileWriter, Snapshots};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// USB submits without waiting for disk. A full queue is a recording failure, never silent loss.
+/// A [`FileWriter`] on a thread of its own, so reading the stream never waits on the disk. A full
+/// queue fails the recording rather than drop a message.
 pub struct Recorder {
+    path: PathBuf,
+    snapshots: Snapshots,
     sender: Option<SyncSender<Message>>,
-    thread: Option<JoinHandle<Result<()>>>,
+    thread: Option<JoinHandle<Result<bool>>>,
+    /// Whether the writer left a file, once its thread has been joined.
+    written: bool,
 }
 
 impl Recorder {
-    /// A `.tickwave` recording, and the latest snapshot of it for a view in this process. Finishing
-    /// leaves it uncompacted: its owner compacts it with [`crate::tickwave::compacted`] around the
-    /// view that reads it.
-    pub fn tickwave(path: &Path, context: Context) -> Result<(Self, Snapshots)> {
-        let writer = FileWriter::create(path, context)?;
+    /// Starts a recording at `path`, as [`FileWriter::create`] does.
+    pub fn create(path: &Path, context: Context) -> Result<Self> {
+        let mut writer = FileWriter::create(path, context)?;
         let snapshots = writer.snapshots();
-        Ok((Self::spawn(writer)?, snapshots))
-    }
-
-    fn spawn(mut writer: FileWriter) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(256);
         let thread = thread::Builder::new()
-            .name("capture-disk".into())
+            .name("recorder".into())
             .spawn(move || {
                 let received = loop {
                     let step = match receiver.recv_timeout(Duration::from_millis(200)) {
@@ -40,22 +39,31 @@ impl Recorder {
                     }
                 };
                 // What arrived before an error is kept; the first error is the one reported.
-                let finished = writer.close().map(drop);
-                received.and(finished).map_err(CaptureError::from)
+                let closed = writer.close();
+                received.and(closed)
             })?;
         Ok(Self {
+            path: path.to_owned(),
+            snapshots,
             sender: Some(sender),
             thread: Some(thread),
+            written: false,
         })
     }
 
+    /// The latest snapshot of what is in the file, for a view in this process to take.
+    #[must_use]
+    pub fn snapshots(&self) -> Snapshots {
+        Arc::clone(&self.snapshots)
+    }
+
     pub fn send(&mut self, message: Message) -> Result<()> {
-        let sender = self.sender.as_ref().ok_or(CaptureError::Closed)?;
+        let sender = self.sender.as_ref().ok_or(Error::Closed)?;
         match sender.try_send(message) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(CaptureError::Behind),
+            Err(TrySendError::Full(_)) => Err(Error::Behind),
             // The writer ended: its own error says why.
-            Err(TrySendError::Disconnected(_)) => self.check().and(Err(CaptureError::Stopped)),
+            Err(TrySendError::Disconnected(_)) => self.check().and(Err(Error::Stopped)),
         }
     }
 
@@ -67,28 +75,39 @@ impl Recorder {
             .is_some_and(|thread| thread.is_finished())
         {
             self.join()?;
-            return Err(CaptureError::Stopped);
+            return Err(Error::Stopped);
         }
         Ok(())
     }
 
+    /// Ends the recording and compacts it, as [`FileWriter::finish`] does.
     pub fn finish(mut self) -> Result<()> {
+        self.join()?;
+        if self.written {
+            compact(&self.path)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the recording without compacting it, as [`FileWriter::close`] does, for a caller that
+    /// compacts it with [`super::compacted`] around a view that reads it.
+    pub fn close(mut self) -> Result<()> {
         self.join()
     }
 
     fn join(&mut self) -> Result<()> {
         self.sender.take();
-        match self.thread.take() {
-            Some(thread) => thread.join().map_err(|_| CaptureError::Panicked)?,
-            None => Ok(()),
+        if let Some(thread) = self.thread.take() {
+            self.written = thread.join().map_err(|_| Error::Panicked)??;
         }
+        Ok(())
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
         if let Err(error) = self.join() {
-            tracing::error!("closing capture: {error}");
+            tracing::error!("closing the recording: {error}");
         }
     }
 }

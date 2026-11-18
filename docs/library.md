@@ -299,15 +299,13 @@ stop needs.
 ## Recording energy to a file
 
 On a Pro, the probe also streams every pair it measures, with the DIO pins' edges and any markers,
-through Verge Aux. `pro::open_stream` opens it. `tickwave::FileWriter` turns the stream into a
+through Verge Aux. `pro::open_stream` opens it. `tickwave::Recorder` turns the stream into a
 `.tickwave` recording, which tickwave opens. `tickwave::export` writes all or part of one, opened as
 a `tickwave::view::Recording`, as CSV or a sigrok session.
 
 ```rust,no_run
 use std::error::Error;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use escapement_verge_probe::VergeControl;
@@ -315,7 +313,7 @@ use escapement_verge_probe::aux::{Aux, AuxLink};
 use escapement_verge_probe::detect;
 use escapement_verge_probe::pro::{Feature, open_stream, validate};
 use escapement_verge_probe::stream::Message;
-use escapement_verge_probe::tickwave::{Context, FileWriter};
+use escapement_verge_probe::tickwave::{Context, Recorder};
 use escapement_verge_probe::usb::UsbBus;
 
 /// How long the probe gets to send the stream's header, and its end.
@@ -345,27 +343,9 @@ fn record<L: AuxLink>(
     pro: &mut VergeControl<'_, Aux<L>>,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let mut file = FileWriter::create(path, Context::default())?;
     // The file is written on a thread of its own, so this one reads
     // the stream as fast as the probe sends it.
-    let (send, receive) = mpsc::channel::<Message>();
-    let writer = thread::spawn(move || {
-        loop {
-            match receive.recv_timeout(Duration::from_millis(100)) {
-                Ok(message) => {
-                    if file.ingest(&message)? {
-                        break;
-                    }
-                }
-                // `ingest` writes out what it holds at least once a
-                // second, so a crash loses little. `flush` does it
-                // while no message comes.
-                Err(mpsc::RecvTimeoutError::Timeout) => file.flush()?,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        file.finish()
-    });
+    let mut recorder = Recorder::create(path, Context::default())?;
 
     let start = Instant::now();
     let mut began = false;
@@ -393,12 +373,12 @@ fn record<L: AuxLink>(
             began = true;
         }
         let ended = began && matches!(message, Message::End(_));
-        if send.send(message).is_err() || ended {
+        recorder.send(message)?;
+        if ended {
             break;
         }
     }
-    drop(send);
-    writer.join().expect("the writer panicked")?;
+    recorder.finish()?;
     Ok(())
 }
 ```
@@ -406,13 +386,15 @@ fn record<L: AuxLink>(
 The probe keeps 16 stream messages your tool hasn't read, two of them for the stream's header and
 end. When the rest fill, it drops pairs, edges and markers until there is room again, and the
 recording marks the gap. At 100,000 pairs a second, the other 14 places hold about 14 ms of pairs.
-Writing the file can take longer than that whenever `FileWriter` writes out a block. So the example
-writes the file on a thread of its own, as verge does.
+Writing the file can take longer than that whenever a block is written out. So `Recorder` writes
+the file on a thread of its own, as verge does. Its queue holds 256 messages, and `send` fails the
+recording rather than drop one when the disk falls that far behind.
 
-`FileWriter` writes the recording as it goes, and `finish` rewrites it with full-size blocks. If
-your tool stops before `finish`, `tickwave::compact` recovers what was written. A capture your tool
-started keeps running when your tool fails, so the example stops it on every way out once the start
-has answered.
+The recorder writes the recording as it goes, at least once a second, so a crash loses little.
+`finish` rewrites it with full-size blocks. If your tool stops before `finish`, `tickwave::compact`
+recovers what was written. `tickwave::FileWriter` does the same work on the calling thread. A
+capture your tool started keeps running when your tool fails, so the example stops it on every way
+out once the start has answered.
 
 A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro without its energy
 circuit, streams the pins alone. `start_dio_stream` starts it over

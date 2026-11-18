@@ -38,8 +38,6 @@ unsafe_code = "forbid"
 enum_glob_use = "deny"
 
 [features]
-# A recorder that writes a stream to a tickwave recording on a thread of its own (`capture`).
-capture = ["tickwave"]
 # Energy captures as tickwave recordings (`tickwave`).
 tickwave = ["dep:escapement-tickwave-format", "dep:escapement-tickwave-view"]
 simulate = ["dep:minisign"]

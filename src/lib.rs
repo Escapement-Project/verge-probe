@@ -12,8 +12,6 @@ pub mod bus;
 pub mod cache;
 mod capture_id;
 pub use capture_id::CaptureId;
-#[cfg(feature = "capture")]
-pub mod capture;
 pub mod dap;
 pub mod daplink_rs;
 pub mod detect;
