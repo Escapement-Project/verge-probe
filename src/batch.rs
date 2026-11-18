@@ -42,6 +42,7 @@ pub enum StockFilter {
     Below(StockVersion),
 }
 
+/// Which units running Verge a batch takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OursFilter {
     None,
@@ -718,11 +719,13 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         &self.filter
     }
 
+    /// Every unit the batch has met, in the order it met them.
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
+    /// The record of every unit settled so far, as the observer was given them.
     #[must_use]
     pub fn records(&self) -> &[Record] {
         &self.records

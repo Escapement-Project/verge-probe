@@ -76,6 +76,7 @@ pub trait DapLink {
     ) -> Result<(), LinkError>;
 }
 
+/// Why a CMSIS-DAP exchange with a probe failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DapError {
     #[error(transparent)]
@@ -223,6 +224,7 @@ pub fn identify(link: &mut dyn DapLink) -> Result<Option<Ours>, DapError> {
     parse_identify(&link.exchange(&[VENDOR_IDENTIFY])?)
 }
 
+/// Why a running unit did not take the request to restart into its bootloader.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EntryError {
     #[error(

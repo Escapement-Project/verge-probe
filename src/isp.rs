@@ -15,6 +15,7 @@ pub const CHUNK: usize = 8 * PAGE as usize;
 /// Internal flash, in the McuBoot memory id space.
 const INTERNAL: u32 = 0;
 
+/// Why talking to the ROM bootloader, or flashing through it, failed.
 #[derive(Debug, thiserror::Error)]
 pub enum IspError {
     #[error("the bootloader: {0}")]

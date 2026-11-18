@@ -341,12 +341,17 @@ pub struct EnergyCaptureStart {
     pub capture_id: Option<crate::CaptureId>,
 }
 
+/// What [`VergeControl::energy_capture_status`] says of the probe's capture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EnergyCaptureStatus {
     pub running: bool,
+    /// The running capture's rate; 0 with none.
     pub actual_rate_pairs_per_second: u32,
+    /// The running capture's identity, or the last one's.
     pub capture_id: Option<crate::CaptureId>,
+    /// Why no capture runs: [`EnergyError::Stopped`], or the fault that stopped the last one.
+    /// `None` while one runs.
     pub result: Option<EnergyError>,
 }
 
@@ -1076,6 +1081,9 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
     }
 
+    /// Starts a capture at `rate` pairs a second, replacing any that runs, and keeps the identity
+    /// the probe gives it (`0x90` mode 8), so the stop can name it
+    /// ([`Self::stop_tracked_energy_capture`]).
     pub fn start_energy_capture_identified(
         &mut self,
         rate: u32,
@@ -1083,6 +1091,9 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         self.start_identified(rate, None)
     }
 
+    /// [`Self::start_energy_capture_identified`], streaming the capture through Verge Aux from its
+    /// first pair with the edges of the DIO pins in `dio_mask` (mode 9). Its header comes after the
+    /// reply. [`crate::stream::Reader::start_energy`] runs the whole stream.
     pub fn start_energy_stream_identified(
         &mut self,
         rate: u32,
@@ -1119,6 +1130,9 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         Ok(start)
     }
 
+    /// Streams the capture that runs from its next pair, with the edges of the DIO pins in
+    /// `dio_mask`, and leaves it running (mode 10, Verge Aux only). The capture's identity comes in
+    /// the stream's header: pass the header to [`Self::accept_energy_header`].
     pub fn stream_energy_capture_identified(
         &mut self,
         dio_mask: u8,
@@ -1134,6 +1148,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         Ok(())
     }
 
+    /// Takes the capture's identity from the header of a stream this side started or joined.
+    /// Refuses a header that names another capture than the one started.
     pub fn accept_energy_header(
         &mut self,
         header: &crate::stream::Header,
@@ -1154,14 +1170,18 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         Ok(())
     }
 
+    /// Whether a stream this side started or joined has yet to send its header.
     pub fn awaiting_energy_header(&self) -> bool {
         self.awaiting_header
     }
 
+    /// The identity of the capture this side started or joined, once known.
     pub fn tracked_capture_id(&self) -> Option<crate::CaptureId> {
         self.capture_id
     }
 
+    /// Stops the capture this side started or joined, if it still runs: a capture another host
+    /// started meanwhile runs on.
     pub fn stop_tracked_energy_capture(&mut self) -> Result<(), CommandError<EnergyError>> {
         let id = self.capture_id.ok_or(CommandError::InvalidRequest(
             "capture identity is not known",
@@ -1169,6 +1189,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         self.stop_energy_capture_if(id)
     }
 
+    /// Ends the stream of the capture this side joined, leaving the capture running.
     pub fn end_tracked_energy_stream(&mut self) -> Result<(), CommandError<EnergyError>> {
         let id = self.capture_id.ok_or(CommandError::InvalidRequest(
             "capture identity is not known",
@@ -1176,6 +1197,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         self.end_energy_stream_if(id)
     }
 
+    /// Stops the capture `id` names, if it still runs (mode 11). Another capture is left alone,
+    /// with [`EnergyError::StaleCapture`].
     pub fn stop_energy_capture_if(
         &mut self,
         id: crate::CaptureId,
@@ -1183,6 +1206,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         self.conditional_energy(11, id)
     }
 
+    /// Ends the stream of the capture `id` names, leaving the capture running (mode 13). Another
+    /// capture's stream is left alone, with [`EnergyError::StaleCapture`].
     pub fn end_energy_stream_if(
         &mut self,
         id: crate::CaptureId,
@@ -1204,6 +1229,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_status(&self.send(ENERGY_COMMAND, &request)?)
     }
 
+    /// Whether a capture runs, at what rate, under which identity, and how the last one ended
+    /// (mode 12).
     pub fn energy_capture_status(
         &mut self,
     ) -> Result<EnergyCaptureStatus, CommandError<EnergyError>> {

@@ -55,6 +55,7 @@ impl fmt::Display for UsbDevice {
     }
 }
 
+/// Why USB could not list or open a device.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BusError {
     #[error("could not list USB devices: {0}")]

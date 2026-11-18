@@ -43,6 +43,7 @@ impl Default for Timing {
     }
 }
 
+/// Why an update, a flash or a reset did not finish, and what it left behind.
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
     #[error(transparent)]

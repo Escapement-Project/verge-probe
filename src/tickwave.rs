@@ -58,6 +58,7 @@ pub use recorder::Recorder;
 #[cfg(test)]
 mod tests;
 
+/// Why a tickwave recording could not be written, read or exported.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

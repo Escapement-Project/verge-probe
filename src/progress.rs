@@ -49,6 +49,7 @@ impl fmt::Display for Step {
     }
 }
 
+/// What a step's progress counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unit {
     Bytes,
@@ -150,11 +151,13 @@ impl fmt::Display for Left {
 pub struct Cancel(Arc<AtomicBool>);
 
 impl Cancel {
+    /// A request not made yet.
     #[must_use]
     pub fn new() -> Cancel {
         Cancel::default()
     }
 
+    /// Makes the request, for every clone of this one.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Relaxed);
     }

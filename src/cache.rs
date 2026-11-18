@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::release::{Asset, Release, Repo};
 
+/// Where downloaded releases are kept, so one checked once is not downloaded again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cache {
     root: PathBuf,

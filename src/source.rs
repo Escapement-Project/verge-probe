@@ -10,6 +10,7 @@ use crate::release::{Download, GitHub, Http, Release, ReleaseError, Repo};
 use crate::stock;
 use crate::version::Relation;
 
+/// Where an image comes from: [`load`] gets it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     /// A release of ours: the latest, or the one with this tag.
@@ -69,6 +70,7 @@ impl<'a> Payload<'a> {
     }
 }
 
+/// Why an image could not be loaded, or is refused for the unit.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("{}", file_message(.path, .error))]

@@ -10,6 +10,7 @@ use crate::daplink_rs;
 use crate::ids::Role;
 use crate::version::{Build, StockVersion};
 
+/// The firmware a unit that answered runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Firmware {
     Ours(Ours),
@@ -97,6 +98,7 @@ fn stock_straps(product: &str) -> Option<u16> {
     u16::from_str_radix(hex, 16).ok()
 }
 
+/// What a unit runs, as far as the tool could ask it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Running a CMSIS-DAP firmware the tool could query.

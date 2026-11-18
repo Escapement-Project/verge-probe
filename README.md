@@ -25,20 +25,25 @@ calls run on it while a debugger holds CMSIS-DAP. The probe also streams every e
 it: `stream` parses the messages and converts each pair as the firmware does, checked against the
 vectors the firmware's own converter writes.
 
-`pro::with_pro` runs a call through Aux, or through CMSIS-DAP when another program holds Aux.
-`pro::open_aux` opens Aux alone, for a frontend that keeps it open beside a debugger.
-`pro::open_stream` opens it for the energy stream, which only Aux carries. All three refuse a unit
-that is not running Verge, whose board lacks the feature or whose firmware does, with a `ProError`
-that says which. The DIO pins are on the Pro and the standalone MCU-Link; the supply and energy
-capture are the Pro's. A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro
-without its energy circuit, streams its DIO pins alone (`start_dio_stream`). `record::Sink` writes
-pairs and DIO edges as CSV or as a sigrok session.
+`pro::find` picks the unit a command acts on, as verge does: the one a serial names, or the only
+one with a feature. `pro::with_pro` runs a call through Aux, or through CMSIS-DAP when another
+program holds Aux. `pro::open_aux` opens Aux alone, for a frontend that keeps it open beside a
+debugger. `pro::open_stream` opens it for the energy stream, which only Aux carries. All of them
+refuse a unit that is not running Verge, whose board lacks the feature or whose firmware does, with
+an error that says which. The DIO pins are on the Pro and the standalone MCU-Link; the supply and
+energy capture are the Pro's. `change_dio` changes the pins, refusing before anything is sent a
+change the probe would refuse.
 
-The `tickwave` feature writes the stream as a `.tickwave` recording, the format of tickwave, the
-project's viewer for captures. `tickwave::export` writes all or part of one as CSV or a sigrok
-session. An export keeps every pair whose period overlaps the interval, so its first can start
-before the interval. `tickwave::Recorder` writes a recording on a thread of its own. It takes stream
-messages without waiting for the disk, and fails rather than drop one when the disk falls behind.
+`stream::Reader` runs a stream from its start to its end: it joins a running capture or starts one,
+binds the capture's identity, counts lost pairs and edges, and on every way out stops a capture it
+started, or ends the stream of one it joined. A board with DIO pins and no energy capture, a
+standalone MCU-Link or a Pro without its energy circuit, streams its DIO pins alone.
+`record::Writer` writes a stream on a thread of its own, as CSV, a sigrok session, or with the
+`tickwave` feature, a `.tickwave` recording, the format of tickwave, the project's viewer for
+captures. It takes messages without waiting for the disk. `record::Sink` writes converted pairs and
+DIO edges as CSV or as a sigrok session. `tickwave::export` writes all or part of a recording as CSV
+or a sigrok session. An export keeps every pair whose period overlaps the interval, so its first can
+start before the interval.
 
 Both frontends use the library for discovery, image loading and updates:
 

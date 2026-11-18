@@ -1,9 +1,9 @@
 # The verge-probe library
 
-verge-probe is the Rust library that verge and verge-gui are built on. A tool of your own can use it
-to find MCU-Links, debug a target through probe-rs with Verge's commands beside it, drive the DIO
-pins, switch the Pro's target supply, run its SPI and I2C bridges, and read or record its energy
-capture.
+verge-probe is the Rust library that verge and verge-gui are built on. Everything verge does is a
+call or two here: finding MCU-Links, updating their firmware, debugging a target through probe-rs
+with Verge's commands beside it, driving the DIO pins, switching the Pro's target supply, running
+its SPI and I2C bridges, and reading or recording its energy capture.
 
 Each example here is a whole program. `cargo test --doc` builds every one of them, so they stay in
 step with the library. [Host
@@ -48,6 +48,231 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 A line reads like `CJF2551AD5: an MCU-Link Pro, Verge, build d4c4c41`. A probe running NXP's
 firmware reads `NXP's firmware V3.174` instead. `unit.verge()` gives the identity of a probe that
 answered as Verge, and `None` for any other.
+
+To act on one unit, `pro::find` picks it as verge does: the one with the serial you name, or with
+none, the only attached unit running Verge on a board with the feature you ask for. A lone unit
+attached is taken whatever it runs, and checked. Its `FindError` says why it found none: nothing
+attached, no unit with that serial, several units to choose from or none that fits, each with the
+units it means, a unit that can't give the feature and why, or USB failing to list them.
+`detect::pick` chooses over a list you already have, with a test of your own, and checks nothing
+else.
+
+## Updating the firmware
+
+A program updates a unit in two calls. `source::load` gets the image: a Verge release from GitHub,
+a file, or NXP's firmware from your LinkServer install. `update::install` puts it on the unit the
+best way the unit's state allows. A unit running Verge, NXP's firmware V3.122 or later, or
+daplink-rs restarts into its bootloader when asked. A unit in ISP mode is flashed as it is.
+
+```rust,no_run
+use escapement_verge_probe::cache::Cache;
+use escapement_verge_probe::detect::{detect, pick};
+use escapement_verge_probe::progress::{Cancel, Quiet};
+use escapement_verge_probe::release::{Download, GitHub, Repo, Ureq};
+use escapement_verge_probe::source::{self, Source};
+use escapement_verge_probe::update::{self, Outcome, Timing};
+use escapement_verge_probe::usb::UsbBus;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bus = UsbBus::default();
+    let units = detect(&bus)?;
+    // The only unit attached; name one by serial where there are more.
+    let unit = pick(&units, None, |_| true)?;
+
+    let github = GitHub::new(Ureq::default(), Repo::default(), None)
+        .with_cache(Cache::user());
+    // The latest release, refused if the unit runs it or a newer one.
+    let loaded = source::load(
+        &Source::Release(None),
+        &github,
+        Some(unit),
+        false,
+        Download::Agreed,
+        &mut Quiet,
+    )?;
+
+    let cancel = Cancel::new();
+    let outcome = update::install(
+        &bus,
+        unit,
+        loaded.payload(),
+        &Timing::default(),
+        &mut Quiet,
+        &cancel,
+        &cancel,
+    )?;
+    match outcome {
+        Outcome::Running(unit) => println!("it runs {}", unit.state),
+        Outcome::JumperStillFitted => {
+            println!("flashed, but back in ISP mode: take the jumper off")
+        }
+        Outcome::NotRestarted { maybe_jumper } => {
+            println!("{}", update::not_restarted(maybe_jumper))
+        }
+    }
+    Ok(())
+}
+```
+
+`load` checks a Verge image against the unit before anything is sent: it refuses an image that
+doesn't declare the unit's board, and a release the unit runs already unless you pass `true` for
+`force`. A release is signed, and `load` checks the signature and the checksum. `Download::Agreed`
+says the user agreed to the download; `CachedOnly` takes a copy kept from an earlier download, or
+fails. `source::load_asking` asks a closure of yours first, and only where a download is needed.
+`Quiet` reports no progress. `Progress` is the trait to implement for a bar of your own: it hears
+each step, such as erasing and writing, and how far each has got.
+
+The `Cancel` is how another thread stops an update. `install` takes two: the first stops it at the
+next safe point, and the second only before anything is sent. `UpdateError::Cancelled` says what a
+stop left behind, and its `recovery` says what to do about it.
+
+`offer(unit, &units)` says how a unit can be updated without changing anything, as `verge list`
+shows it. A unit running NXP's firmware older than V3.122 needs the ISP jumper: unplug it, fit the
+jumper, and plug it back in. It then comes up in ISP mode.
+
+### ISP mode
+
+A unit in ISP mode runs its ROM bootloader. The `update` module works with it directly:
+
+- `enter_bootloader` restarts a running unit into ISP mode and leaves it there.
+- `flash_now` flashes the unit in ISP mode, and restarts it into the new image.
+- `reset_now` restarts it into the image it holds, without flashing.
+- `rom_info_now` asks the bootloader its version and flash size.
+
+In ISP mode a unit can't say which board it is, so `flash_now` can't check that a Verge image is
+built for it. `enter_bootloader` refuses a unit known to be another board than the standalone
+MCU-Link, unless you say NXP's firmware comes next, which goes on any board. Where several units
+are in ISP mode, `flash_now`, `reset_now` and `rom_info_now` take the USB port of the one to use,
+as `UsbDevice::location` names it.
+
+```rust,no_run
+use std::path::Path;
+
+use escapement_verge_probe::Image;
+use escapement_verge_probe::progress::{Cancel, Quiet};
+use escapement_verge_probe::update::{self, Timing};
+use escapement_verge_probe::usb::UsbBus;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = Image::from_path(Path::new("mculink-verge.elf"))?;
+    let outcome = update::flash_now(
+        &UsbBus::default(),
+        &image,
+        None,
+        &Timing::default(),
+        &mut Quiet,
+        &Cancel::new(),
+    )?;
+    println!("{outcome:?}");
+    Ok(())
+}
+```
+
+### Restarting a unit
+
+`update::restart` restarts a unit running Verge, as unplugging it would, and waits for it to come
+back. The request goes to the probe's USB core rather than through CMSIS-DAP, so it works while a
+debugger holds the probe. `Unit::takes_restart` says whether a unit takes one. Everything the probe
+holds is lost: the DIO pins go back to inputs, a Pro's target supply turns off, and an energy
+capture ends.
+
+### Many units in a row
+
+`batch::Batch` updates every unit of a kind as it is plugged in, one at a time, until you stop it.
+A `Filter` says which units it takes. An `Armed` holds the image it puts on them. Your `Observer`
+hears each unit start and settle. The batch writes nothing itself: `RecordWriter` writes each
+settled unit's `Record` as a line of JSON, as `verge batch` does.
+
+```rust,no_run
+use std::num::NonZeroUsize;
+
+use escapement_verge_probe::batch::{
+    Armed, Batch, Board, Filter, Observer, OursFilter, Record, StockFilter,
+};
+use escapement_verge_probe::progress::{Cancel, Progress, Quiet};
+use escapement_verge_probe::release::{Download, GitHub, Repo, Ureq};
+use escapement_verge_probe::source::{self, Source};
+use escapement_verge_probe::update::Timing;
+use escapement_verge_probe::usb::UsbBus;
+
+struct Print;
+
+impl Progress for Print {}
+
+impl Observer for Print {
+    fn record(&mut self, record: &Record) {
+        println!("{}: {}", record.port, record.result.as_str());
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bus = UsbBus::default();
+    let github = GitHub::new(Ureq::default(), Repo::default(), None);
+    let source = Source::Release(None);
+    let loaded = source::load(
+        &source,
+        &github,
+        None,
+        true,
+        Download::Agreed,
+        &mut Quiet,
+    )?;
+    let armed = Armed::new(loaded, source, github.repo().clone());
+    // Standalone MCU-Links running NXP's firmware, or Verge older than
+    // the release, from those plugged in from now on.
+    let filter = Filter {
+        board: Board::McuLink,
+        stock: StockFilter::Any,
+        ours: OursFilter::Older,
+        bootloaders: false,
+        attached: false,
+    };
+    // A stop takes no new units, and lets the one under way finish.
+    let stop = Cancel::new();
+    let mut batch = Batch::arm(
+        &bus,
+        armed,
+        filter,
+        Timing::default(),
+        stop,
+        Cancel::new(),
+        NonZeroUsize::new(10),
+    )?;
+    batch.run_to_end(&mut Print)?;
+    println!("{}", batch.tally());
+    Ok(())
+}
+```
+
+### Releases and images
+
+`GitHub::latest` and `GitHub::tagged` look up a release without downloading it. `Unit::build` gives
+the build a unit running Verge reports, and its `compare` says how it stands against a release's
+tag: up to date, the same release built another way, behind, ahead, or unknown.
+
+`Image::from_path` reads an ELF or S-record file without touching any device. It says what goes into
+flash and the file's SHA-256. `Image::declaration` finds the record in a Verge image that names the
+boards it is built for, and `Image::boards` lists them. `Image::check_for_mculink` says whether it
+fits the probe's flash and has a vector table.
+
+```rust,no_run
+use escapement_verge_probe::detect;
+use escapement_verge_probe::release::{GitHub, Repo, Ureq};
+use escapement_verge_probe::usb::UsbBus;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let github = GitHub::new(Ureq::default(), Repo::default(), None);
+    let release = github.latest()?;
+    println!("{} ({} bytes)", release.tag, release.image.size);
+    for unit in detect(&UsbBus::default())? {
+        if let Some(build) = unit.build() {
+            let serial = unit.serial().unwrap_or("-");
+            println!("{serial}: {:?}", build.compare(&release.tag));
+        }
+    }
+    Ok(())
+}
+```
 
 ## Debugging, with Verge's commands beside it
 
@@ -136,16 +361,13 @@ tool that keeps it open beside a debugger.
 ```rust,no_run
 use std::error::Error;
 
-use escapement_verge_probe::detect;
-use escapement_verge_probe::pro::{Feature, validate, with_pro};
+use escapement_verge_probe::dio::DioChange;
+use escapement_verge_probe::pro::{self, Feature, with_pro};
 use escapement_verge_probe::usb::UsbBus;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let bus = UsbBus::default();
-    let pro = detect(&bus)?
-        .into_iter()
-        .find(|unit| validate(unit, Feature::Supply).is_ok())
-        .ok_or("no MCU-Link Pro running Verge")?;
+    let pro = pro::find(&bus, None, Feature::Supply)?;
 
     with_pro(&bus, &pro, Feature::Supply, |name, pro| {
         let on = pro.set_target_power(true)?;
@@ -157,11 +379,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     with_pro(&bus, &pro, Feature::Dio, |name, pro| {
-        // Make DIO3 an output and drive it high, then make it an input
-        // again. The other pins stay as they are.
-        let state = pro.access_dio(0b1000, 0b1000, 0b1000)?;
+        // Drive DIO3 high, then make it an input again. The other
+        // pins stay as they are.
+        let state = pro.change_dio(&DioChange::default().high(0b1000))?;
         println!("{name}: the pins read {:04b}", state.read);
-        pro.access_dio(0b1000, 0, 0)?;
+        pro.change_dio(&DioChange::default().input(0b1000))?;
         Ok::<_, Box<dyn Error>>(())
     })?;
     Ok(())
@@ -171,14 +393,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 The supply runs at 3.3 V, or at 1.8 V with J5 fitted, and J6 connects it to the target. Give the
 target's rail time to settle before you talk to the target.
 
-`access_dio(mask, outputs, levels)` changes the pins whose bits are set in `mask`: a bit set in
-`outputs` makes that pin an output, and the same bit in `levels` drives it high. A zero mask only
-reads. On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. On a standalone
-MCU-Link, each pin changes direction on its own. `groups` in the state lists the pins that change
-together, and the probe refuses a change that splits a group. Its `Refused` error carries the pins'
-state, which the refusal left unchanged. The pins are described in [The
+A pin set is a mask, bit `k` for DIO`k`. `DioChange` names the pins to drive high, to drive low, and
+to make inputs. `change_dio` reads the pins first, and refuses a change the probe would refuse
+before it sends it. On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. On a
+standalone MCU-Link, each pin changes direction on its own, but a bench tool can give pins to its
+command marker, which keeps them until the unit restarts. A `DioError` says why: a group the change
+would split, pins the marker holds, the Pro's pins turned off by J15, or pins named twice, all found
+before anything is sent. Its `Command` variant is the command's own failure, the probe's refusal
+among them. An empty change only reads, and still says when the marker holds every pin or J15
+turned them off. `dio::names` and `dio::parse_pins` turn masks into names and back, as
+`DIO0, DIO3` and `0,dio3`.
+
+`access_dio(mask, outputs, levels)` sends the command as it is: a bit set in `mask` selects a
+pin, the same bit in `outputs` makes it an output, and in `levels` drives it high. The pins are
+described in [The
 Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) and [Probes
-and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins).
+and
+jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins).
 
 The supply and the pins keep their state when your tool exits, until something changes them or the
 probe restarts. A pin left an output keeps the SPI bridge from running.
@@ -234,24 +465,20 @@ included. The probe keeps a running total of energy between polls, so polling sl
 from the total.
 
 A start replaces any capture already running, and clears its total, whichever program started it.
-So a tool that starts a capture ends another program's recording. verge joins a running capture
-instead, with `stream_energy_capture_identified`.
+So a tool that starts a capture ends another program's recording. `stream::Reader`, below, joins a
+running capture instead.
 
 ```rust,no_run
 use std::error::Error;
 use std::time::{Duration, Instant};
 
 use escapement_verge_probe::EnergyTotal;
-use escapement_verge_probe::detect;
-use escapement_verge_probe::pro::{Feature, validate, with_pro};
+use escapement_verge_probe::pro::{self, Feature, with_pro};
 use escapement_verge_probe::usb::UsbBus;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let bus = UsbBus::default();
-    let pro = detect(&bus)?
-        .into_iter()
-        .find(|unit| validate(unit, Feature::Energy).is_ok())
-        .ok_or("no MCU-Link Pro running Verge")?;
+    let pro = pro::find(&bus, None, Feature::Energy)?;
 
     with_pro(&bus, &pro, Feature::Energy, |name, pro| {
         let end = Instant::now() + Duration::from_secs(5);
@@ -289,139 +516,112 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 The rate is in voltage and current pairs a second, from 1 to 100,000. `actual_rate_pairs_per_second`
 gives the rate the probe's timer runs at, to the nearest pair a second. A reading's current is in
-nanoamps, positive into the target. The total covers every pair since the capture started, whatever
-was polled, and stays readable after the capture stops.
+nanoamps, positive into the target. Its `sense()` says which current range read it, and in which
+setting of the range jumper. The total covers every pair since the capture started, whatever was
+polled, and stays readable after the capture stops.
 
 `start_energy_capture_identified`, `latest_energy_sample` and `stop_tracked_energy_capture` do the
 same steps one at a time. Call them on the same `pro`: it holds the capture's identity, which the
-stop needs.
+stop needs. `stop_running_energy_capture` stops whatever capture runs, by its identity, so one that
+another host starts meanwhile runs on. `read_energy_calibration` gives the points each current
+range was calibrated at.
 
-## Recording energy to a file
+## Recording a stream
 
-On a Pro, the probe also streams every pair it measures, with the DIO pins' edges and any markers,
-through Verge Aux. `pro::open_stream` opens it. `tickwave::Recorder` turns the stream into a
-`.tickwave` recording, which tickwave opens. `tickwave::export` writes all or part of one, opened as
-a `tickwave::view::Recording`, as CSV or a sigrok session.
+On a Pro, the probe also streams every pair it measures through Verge Aux, with the DIO pins' edges
+and any markers. A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro without
+its energy circuit, streams its pins alone.
+
+`stream::Reader` runs a stream from its start to its end. `record::Writer` writes one to a file, as
+a tickwave recording, which tickwave opens, a sigrok session, which PulseView opens, or CSV.
 
 ```rust,no_run
 use std::error::Error;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use escapement_verge_probe::VergeControl;
-use escapement_verge_probe::aux::{Aux, AuxLink};
-use escapement_verge_probe::detect;
-use escapement_verge_probe::pro::{Feature, open_stream, validate};
-use escapement_verge_probe::stream::Message;
-use escapement_verge_probe::tickwave::{Context, Recorder};
+use escapement_verge_probe::pro::{self, Feature};
+use escapement_verge_probe::record::{Format, Writer};
+use escapement_verge_probe::stream::{EnergyStream, Reader};
 use escapement_verge_probe::usb::UsbBus;
-
-/// How long the probe gets to send the stream's header, and its end.
-const WAIT: Duration = Duration::from_secs(2);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let bus = UsbBus::default();
-    let unit = detect(&bus)?
-        .into_iter()
-        .find(|unit| validate(unit, Feature::Energy).is_ok())
-        .ok_or("no MCU-Link Pro running Verge")?;
-    let mut aux = open_stream(&bus, &unit)?;
-    let mut pro = VergeControl::new(&mut aux);
+    let unit = pro::find(&bus, None, Feature::Energy)?;
+    let mut reader = Reader::new(pro::open_stream(&bus, &unit)?);
 
-    // Pairs at 100,000 a second, and the edges of all four DIO pins.
-    pro.start_energy_stream_identified(100_000, 0b1111)?;
-    let recorded = record(&mut pro, Path::new("capture.tickwave"));
-    if recorded.is_err() {
-        // The capture this started stops, whatever went wrong.
-        let _ = pro.stop_tracked_energy_capture();
+    // A capture at 100,000 pairs a second, or the one that runs
+    // already, with the edges of all four DIO pins.
+    reader.start_energy(&EnergyStream::new(100_000).dio(0b1111))?;
+    let path = Path::new("capture.tickwave");
+    let mut writer =
+        Writer::create(path, Format::Tickwave, reader.context())?;
+
+    // Ten seconds, then the stream ends: a capture the reader
+    // started stops, and one it joined runs on.
+    let end = Instant::now() + Duration::from_secs(10);
+    for message in reader.messages(|| Instant::now() >= end) {
+        writer.send(message?)?;
     }
-    recorded
-}
+    writer.finish()?;
 
-/// Ten seconds of the stream into `path`, then the stop and the rest.
-fn record<L: AuxLink>(
-    pro: &mut VergeControl<'_, Aux<L>>,
-    path: &Path,
-) -> Result<(), Box<dyn Error>> {
-    // The file is written on a thread of its own, so this one reads
-    // the stream as fast as the probe sends it.
-    let mut recorder = Recorder::create(path, Context::default())?;
-
-    let start = Instant::now();
-    let mut began = false;
-    let mut stopped = None;
-    loop {
-        let now = Instant::now();
-        if !began && now - start > WAIT {
-            return Err("the probe sent no stream header".into());
-        }
-        if stopped.is_none() && now - start >= Duration::from_secs(10) {
-            // The probe ends the stream after the capture's last pair.
-            pro.stop_tracked_energy_capture()?;
-            stopped = Some(now);
-        }
-        if stopped.is_some_and(|at| now - at > WAIT) {
-            return Err("the probe didn't end the stream".into());
-        }
-        let Some(message) =
-            pro.transport().message(Duration::from_millis(100))?
-        else {
-            continue;
-        };
-        if let Message::Header(header) = &message {
-            pro.accept_energy_header(header)?;
-            began = true;
-        }
-        let ended = began && matches!(message, Message::End(_));
-        recorder.send(message)?;
-        if ended {
-            break;
-        }
-    }
-    recorder.finish()?;
+    let counts = reader.counts();
+    println!("{} pairs, {} lost", counts.total.pairs, counts.lost);
     Ok(())
 }
 ```
 
-The probe keeps 16 stream messages your tool hasn't read, two of them for the stream's header and
-end. When the rest fill, it drops pairs, edges and markers until there is room again, and the
-recording marks the gap. At 100,000 pairs a second, the other 14 places hold about 14 ms of pairs.
-Writing the file can take longer than that whenever a block is written out. So `Recorder` writes
-the file on a thread of its own, as verge does. Its queue holds 256 messages, and `send` fails the
-recording rather than drop one when the disk falls that far behind.
+`start_energy` follows a capture that runs already, at its own rate and current ranges, and leaves
+it running at the end. With none running, it starts one, which the end stops. `EnergyStream::join`
+turns the following off, so the start replaces whatever runs. `Began` says which happened. A start
+answers before anything is read, so a refused one leaves nothing to clean up. Make the file after
+it, and a refused start leaves an earlier file as it was.
 
-The recorder writes the recording as it goes, at least once a second, so a crash loses little.
+`messages` gives the stream's messages from its header to its end. Once your closure returns true,
+it asks the probe to end the stream, and the probe sends the rest and then the end. It fails when
+the probe sends no header within two seconds of the start, or no end within two seconds of being
+asked. A header or an end that has come is taken however late you read it. If your tool stops early,
+by an error or a panic, dropping the reader ends the stream: a capture the reader started stops, and
+the stream of one it joined ends. `abandon` does the same without dropping it. A capture a start
+replaced, with joining turned off, does not come back. To read at your own pace, as a window does
+between frames, call `read` with a timeout instead, and `end` when you want the stream to end.
+`control` sends the probe's other commands meanwhile.
+
+`counts` says what the stream carried: its pairs and their energy, pairs lost, pairs read under the
+high range's floor, and each pin's edges. A lost pair is one the probe dropped because your tool
+didn't read in time. The probe keeps 16 stream messages your tool hasn't read, two of them for the
+stream's header and end. When the rest fill, it drops pairs, edges and markers until there is room
+again, and the recording marks the gap. At 100,000 pairs a second, the other 14 places hold about
+14 ms of pairs. Writing a file can take longer than that, so the writer works on a thread of its
+own, and its queue has no bound: a disk that falls behind costs memory rather than the recording.
+
+The writer writes a tickwave recording as it goes, at least once a second, so a crash loses little.
 `finish` rewrites it with full-size blocks. If your tool stops before `finish`, `tickwave::compact`
-recovers what was written. `tickwave::FileWriter` does the same work on the calling thread. A
-capture your tool started keeps running when your tool fails, so the example stops it on every way
-out once the start has answered.
+recovers what was written. `tickwave::Recorder` is the tickwave writer alone, with a snapshot of
+what is written for a view in the same program. Its queue holds 256 messages, and `send` fails the
+recording rather than let memory grow when the disk falls that far behind. `Format::named_by` gives the format a file's
+extension names. A sigrok session or CSV records an energy stream only.
 
-A board with DIO pins and no energy capture, a standalone MCU-Link or a Pro without its energy
-circuit, streams the pins alone. `start_dio_stream` starts it over
-`pro::open_aux(&bus, &unit, Feature::Dio)`, and `end_dio_stream` ends it. Its first message is a
-`Message::DioHeader`, its end says when it ended, and it has no pairs or markers. While its pins
-are quiet it sends a `Message::DioTime` every 200 ms: every edge before that time has arrived.
-`tickwave::FileWriter` records it as a `verge-dio` recording of the pins alone.
+`start_dio` starts the DIO stream of a board without energy capture, over
+`pro::open_aux(&bus, &unit, Feature::Dio)`. Its first message is a `Message::DioHeader`, its end
+says when it ended, and it has no pairs or markers. While its pins are quiet it sends a `Message::DioTime` every 200 ms:
+every edge before that time has arrived. A tickwave recording of it holds the pins alone.
 `VergeInfo::supports_dio_stream` says whether the probe has it.
 
 To mark a moment in the recording, such as the start of a test, send `mark` while the stream runs.
 A tool debugging the target calls `mark` on its `VergeSession`. Another program uses `with_pro`,
-which goes through CMSIS-DAP while the recorder holds Verge Aux:
+which goes through CMSIS-DAP while the reader holds Verge Aux:
 
 ```rust,no_run
 use std::error::Error;
 
 use escapement_verge_probe::Marked;
-use escapement_verge_probe::detect;
-use escapement_verge_probe::pro::{Feature, validate, with_pro};
+use escapement_verge_probe::pro::{self, Feature, with_pro};
 use escapement_verge_probe::usb::UsbBus;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let bus = UsbBus::default();
-    let pro = detect(&bus)?
-        .into_iter()
-        .find(|unit| validate(unit, Feature::Energy).is_ok())
-        .ok_or("no MCU-Link Pro running Verge")?;
+    let pro = pro::find(&bus, None, Feature::Energy)?;
     with_pro(&bus, &pro, Feature::Energy, |name, pro| {
         match pro.mark(1, b"test starts")? {
             Marked::Sent => println!("{name}: marked"),
@@ -450,8 +650,9 @@ which says what went wrong:
 | `Malformed` | The reply doesn't follow the command's protocol. |
 | `Firmware` | The firmware refused or failed the command, with its reason. |
 
-`attach`, `with_pro`, `open_aux`, `open_stream` and `monitor_energy` have error types of their
-own, which say which step failed.
+`attach`, `with_pro`, `open_aux`, `open_stream`, `pro::find`, `change_dio`, `monitor_energy`, the
+update functions, `stream::Reader` and `record::Writer` have error types of their own, which say
+which step failed.
 
 A refusal carries the state the firmware reported. The probe refuses a DIO change that splits a
 direction group, for one, and its error holds the pins as they stayed:

@@ -49,6 +49,7 @@ pub fn is_stream_message(bytes: &[u8]) -> bool {
         .is_some_and(|&first| (PAIRS..=DIO_TIME).contains(&first))
 }
 
+/// Why a message from Verge Aux is not one this library reads.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StreamError {
     #[error("the stream header has no valid capture identity")]
@@ -215,6 +216,7 @@ pub enum EndReason {
     Other(u8),
 }
 
+/// The last message of a stream.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct End {
     pub reason: EndReason,
@@ -746,6 +748,7 @@ pub struct Converter {
 }
 
 impl Converter {
+    /// A converter for the stream `header` begins.
     #[must_use]
     pub fn new(header: &Header) -> Converter {
         Converter {

@@ -50,6 +50,7 @@ const API: &str = "https://api.github.com";
 /// Generous for a 250 KB image, and small enough that a wrong URL cannot fill memory.
 pub const DOWNLOAD_LIMIT: u64 = 8 << 20;
 
+/// A GitHub repository, as `OWNER/NAME`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repo {
     pub owner: String,
@@ -83,6 +84,7 @@ impl fmt::Display for Repo {
     }
 }
 
+/// Why an HTTP request failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
     #[error("HTTP {status} from {url}")]
@@ -172,6 +174,7 @@ impl Http for Ureq {
     }
 }
 
+/// Why a release could not be looked up, downloaded or trusted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReleaseError {
     #[error("{repo} has {}", match tag {
@@ -280,6 +283,7 @@ fn deleted(left: &Option<String>) -> String {
     }
 }
 
+/// A file attached to a release.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,

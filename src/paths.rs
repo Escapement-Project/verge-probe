@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::detect::{Firmware, Guess, Jumpered, State, Unit};
 
+/// A way to update a unit, as [`offer`] lists them for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
     /// Ours reboots into the bootloader on request, then the tool flashes and resets it.

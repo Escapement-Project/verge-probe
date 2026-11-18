@@ -182,6 +182,8 @@ pub enum Sink {
 }
 
 impl Sink {
+    /// Writes to `path`, emptying a file that is there: CSV where `csv` says so, else a sigrok
+    /// session.
     pub fn create(path: &Path, csv: bool) -> Result<Sink> {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -196,6 +198,7 @@ impl Sink {
         Self::from_file(file, path, csv)
     }
 
+    /// [`Sink::create`], refusing a file that is there already.
     pub fn create_new(path: &Path, csv: bool) -> Result<Sink> {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -328,6 +331,8 @@ impl Sink {
         Ok(())
     }
 
+    /// DIO edges, in time order. Each lands among the samples by its time, so send the edges up to
+    /// a batch of samples before it.
     pub fn edges(&mut self, edges: Vec<Edge>) {
         for edge in edges {
             self.dio_state(edge.time_ns, Some(edge.levels));
@@ -387,6 +392,7 @@ impl Sink {
         Ok(())
     }
 
+    /// Converted pairs, in sequence order. A gap in their times is written as a gap.
     pub fn samples(&mut self, samples: &[Sample]) -> Result<()> {
         match self {
             Sink::Csv(csv) => {
@@ -403,10 +409,12 @@ impl Sink {
         Ok(())
     }
 
+    /// Writes what is left, and the markers, and closes the file.
     pub fn finish(self) -> Result<()> {
         self.finish_with_cancel(&AtomicBool::new(false))
     }
 
+    /// [`Sink::finish`], stopping with [`RecordError::Cancelled`] once `cancel` is set.
     pub fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<()> {
         check_cancel(cancel)?;
         match self {

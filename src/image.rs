@@ -53,6 +53,7 @@ impl Declaration {
     }
 }
 
+/// The file format an image was read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     SRecord,
@@ -89,6 +90,7 @@ pub struct PageRun {
     pub data: Vec<u8>,
 }
 
+/// Why a file is no image the tool flashes.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ImageError {
     #[error("this is neither an ELF nor an S-record file")]
@@ -151,6 +153,7 @@ impl Image {
         &self.chunks
     }
 
+    /// Reads the ELF or S-record file at `path`, as [`Image::parse`] does.
     pub fn from_path(path: &Path) -> Result<Image, ImageError> {
         let bytes = std::fs::read(path).map_err(|error| ImageError::Read {
             path: path.display().to_string(),
@@ -188,6 +191,7 @@ impl Image {
         self.chunks.iter().map(|chunk| chunk.data.len()).sum()
     }
 
+    /// The SHA-256 of the file the image was read from, in hex.
     #[must_use]
     pub fn sha256_hex(&self) -> String {
         hex::encode(self.file_sha256)

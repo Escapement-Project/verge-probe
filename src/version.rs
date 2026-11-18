@@ -79,6 +79,8 @@ pub struct Build {
 }
 
 impl Build {
+    /// A build as Verge names itself: `git describe` output, as `v0.3.0-4-g26ea505-dirty`, with
+    /// a `+variant` suffix where it was built another way.
     #[must_use]
     pub fn parse(raw: &str) -> Build {
         let raw = raw.trim();
