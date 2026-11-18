@@ -1966,6 +1966,24 @@ fn record(path: &Path, messages: &[Message]) -> Recorder {
     recorder
 }
 
+/// An ended recorder finishes its file on its own thread: once it says it has, the file is whole
+/// before anyone closes it.
+#[test]
+fn an_ended_recorder_finishes_its_file_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ended.tickwave");
+    // A stream without its End message: the writer stops only on `end`.
+    let mut recorder = record(&path, &stream(shapes()[4]));
+    recorder.end();
+    let start = std::time::Instant::now();
+    while !recorder.is_finished() {
+        assert!(start.elapsed().as_secs() < 10, "the writer never finished");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(finished(&path).unwrap());
+    recorder.close().unwrap();
+}
+
 #[test]
 fn a_recorder_finishes_its_recording_compacted_and_closes_it_without() {
     let messages = stream(shapes()[13]);

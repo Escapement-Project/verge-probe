@@ -67,7 +67,8 @@ impl Recorder {
         }
     }
 
-    /// The writer's error once it has stopped early; `Stopped` if it stopped without one.
+    /// The writer's error once it has stopped early; `Stopped` if it stopped without one, as it
+    /// does once the stream has ended.
     pub fn check(&mut self) -> Result<()> {
         if self
             .thread
@@ -78,6 +79,20 @@ impl Recorder {
             return Err(Error::Stopped);
         }
         Ok(())
+    }
+
+    /// Tells the writer nothing more comes. It writes the recording's end and syncs the file on its
+    /// own thread, which can take seconds on a busy disk; [`Recorder::is_finished`] says when
+    /// [`Recorder::close`] no longer waits for it.
+    pub fn end(&mut self) {
+        self.sender.take();
+    }
+
+    /// Whether the writer's thread has stopped: after the stream's End message, after
+    /// [`Recorder::end`], or on an error.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// Ends the recording and compacts it, as [`FileWriter::finish`] does.
