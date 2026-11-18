@@ -40,7 +40,7 @@ fn dio_refusals_explain_old_aux_j15_and_a_board_without_them() {
     use escapement_verge_probe::{CommandError, VergeControl, pro};
     for (scenario, reason) in [
         ("ours-pro-old-aux", "predates DIO on Verge Aux"),
-        ("ours-pro-j15", "remove J15"),
+        ("ours-pro-j15", "take J15 off"),
     ] {
         let bus = SimBus::scenario(scenario).unwrap();
         let unit = detect(&bus).unwrap().remove(0);

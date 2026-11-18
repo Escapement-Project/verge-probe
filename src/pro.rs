@@ -79,16 +79,16 @@ impl std::fmt::Display for Feature {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProError {
-    #[error("the tool could not ask {name} what it runs: {reason}")]
+    #[error("{name} could not be asked what it runs: {reason}")]
     Unreadable { name: String, reason: String },
-    #[error("{name} runs {state}, not Verge, so the tool cannot reach its {feature}")]
+    #[error("{name} runs {state}, not Verge, so its {feature} is out of reach")]
     NotVerge {
         name: String,
         state: String,
         feature: Feature,
     },
     #[error(
-        "{name} has its SWD jumper fitted, which takes away the interfaces the tool reaches its {feature} through. Take the jumper off and plug the unit in again"
+        "{name} has its SWD jumper fitted, which takes away the interfaces that reach its {feature}. Take the jumper off and plug the probe in again"
     )]
     SwdJumper { name: String, feature: Feature },
     #[error("{name} is not an MCU-Link Pro, so it has no {feature}")]
@@ -107,7 +107,7 @@ pub enum ProError {
     },
     #[error("{name} has no Verge Aux: update the firmware first")]
     NoAux { name: String },
-    #[error("{name} has DIO disabled: remove J15 and restart the probe")]
+    #[error("{name} has DIO disabled: take J15 off, then unplug the probe and plug it back in")]
     DioDisabled { name: String },
     #[error("{name} runs build {firmware}, which predates DIO on Verge Aux: update it first")]
     NoAuxDio { name: String, firmware: String },
@@ -135,7 +135,7 @@ pub enum ProError {
 }
 
 fn name(unit: &Unit) -> String {
-    unit.serial().unwrap_or("the unit").to_owned()
+    unit.serial().unwrap_or("the probe").to_owned()
 }
 
 /// Refuses, in a sentence that says why, a unit running Verge on a board without `feature`, or
@@ -242,7 +242,7 @@ pub fn with_pro<B: Bus, T, E: From<ProError>>(
                 return f(&name, &mut pro);
             }
             Err(BusError::Busy { .. }) => tracing::info!(
-                "another program holds {name}'s Verge Aux, so the tool uses CMSIS-DAP"
+                "another program holds {name}'s Verge Aux, so this goes through CMSIS-DAP"
             ),
             Err(source) => {
                 return Err(ProError::Open {
@@ -278,11 +278,11 @@ pub enum FindError {
     #[error("no attached MCU-Link has serial {0}")]
     NoSuchSerial(String),
     /// None of several attached units runs Verge on a board with the feature.
-    #[error("none of the attached units runs Verge on a board with the {feature}")]
+    #[error("none of the attached probes runs Verge on a board with the {feature}")]
     #[non_exhaustive]
     NoneFits { feature: Feature, units: Vec<Unit> },
     /// Several units could be meant: name one by its serial.
-    #[error("{} attached units run Verge on a board with the {feature}: pick one by serial", units.len())]
+    #[error("{} attached probes run Verge on a board with the {feature}: pick one by serial", units.len())]
     #[non_exhaustive]
     Several { feature: Feature, units: Vec<Unit> },
     /// The unit named, or the only one attached, cannot give the feature.

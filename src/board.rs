@@ -76,7 +76,7 @@ impl fmt::Display for Board {
 pub fn built_for(boards: &[Board]) -> String {
     let names: Vec<String> = boards.iter().map(|board| format!("the {board}")).collect();
     match names.as_slice() {
-        [] => "no board this tool knows".to_owned(),
+        [] => "no board this version knows".to_owned(),
         [one] => format!("{one} only"),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }

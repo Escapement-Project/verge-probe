@@ -283,7 +283,8 @@ fn a_failure_does_not_stop_the_batch_and_its_bootloader_is_named() {
     // In ISP mode nothing tells the board, so the pause names it and the batch's own image.
     let paused = batch.paused().unwrap();
     assert!(
-        paused.contains("The unit at 1-1, a standalone MCU-Link, failed and is in ISP mode"),
+        paused.contains("The probe at 1-1 failed and is in ISP mode")
+            && paused.contains("It said it was a standalone MCU-Link before"),
         "{paused}"
     );
     assert!(
@@ -674,7 +675,7 @@ fn an_arrival_that_never_opens_is_skipped_once_its_grace_is_over() {
     drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
     assert_eq!(
         status(&batch, "1-1"),
-        Status::Skipped("the tool could not ask what it runs: another program has it open".into())
+        Status::Skipped("it could not be asked what it runs: another program has it open".into())
     );
     assert_eq!(seen.records.len(), 1);
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
@@ -1566,13 +1567,13 @@ fn a_cancelled_unit_is_recorded_with_its_recovery() {
     let reason = record.reason.as_deref().unwrap();
     assert!(
         reason.starts_with(
-            "stopped during the flash: the unit is in ISP mode, with a partial image."
+            "stopped during the flash: the probe is in ISP mode, with a partial image."
         ),
         "{reason}"
     );
     assert!(
         reason.contains(
-            "which is built for a standalone MCU-Link: `verge isp flash --release v0.3.0 --repo someone/mculink-verge`"
+            "This probe said it was a standalone MCU-Link before it went into ISP mode, where it cannot report its board. Flash it again with the same image, which is built for it: `verge isp flash --release v0.3.0 --repo someone/mculink-verge`"
         ),
         "{reason}"
     );

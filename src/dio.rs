@@ -2,7 +2,7 @@
 //!
 //! The Pro has them on J19, the standalone MCU-Link on J8 ([The
 //! Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins), [Probes
-//! and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins)).
+//! and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-standalone-mcu-links-dio-pins)).
 //! A pin set is a mask, bit `k` for DIO`k`.
 
 use std::fmt;

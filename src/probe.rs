@@ -1808,7 +1808,7 @@ pub enum AttachError {
     #[error("the MCU-Link does not run Verge, and cJTAG needs it")]
     NotVerge,
     #[error(
-        "the MCU-Link runs Verge build {0}, older than the cJTAG commands this tool sends. Update it"
+        "the MCU-Link runs Verge build {0}, older than the cJTAG commands this version sends. Update it"
     )]
     VergeTooOld(String),
     #[error("an on-board MCU-Link has no cJTAG")]

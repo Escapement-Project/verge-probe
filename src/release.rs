@@ -244,7 +244,7 @@ pub enum ReleaseError {
     },
     #[error("{name}: {error}")]
     Image { name: String, error: ImageError },
-    #[error("release {tag} has no {name}: it is not signed, so the tool will not install it")]
+    #[error("release {tag} has no {name}: it is not signed, so it is refused")]
     Unsigned { tag: String, name: String },
     #[error(
         "this build of verge has no release key, so it cannot check a release's signature and installs none"

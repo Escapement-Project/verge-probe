@@ -139,7 +139,7 @@ pub enum ReaderError {
     SecondStream,
     #[error("the probe began a DIO stream, which carries no energy")]
     DioInEnergy,
-    #[error("the probe streamed energy pairs, not its DIO pins alone")]
+    #[error("the probe streamed energy samples, not its DIO pins alone")]
     EnergyInDio,
     #[error("the stream header carries no capture identity")]
     NoIdentity,

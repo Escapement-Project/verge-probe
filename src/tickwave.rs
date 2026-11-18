@@ -64,11 +64,13 @@ mod tests;
 pub enum Error {
     #[error("the capture restarted before its stream ended")]
     Restarted,
-    #[error("a stream of {0} pairs a second, which a recording cannot hold")]
+    #[error("a stream of {0} samples a second, which a recording cannot hold")]
     Rate(f64),
     #[error("the stream's times went back")]
     Timestamps,
-    #[error("the stream's end reports {0} pairs lost after the last, more than a recording holds")]
+    #[error(
+        "the stream's end reports {0} samples lost after the last, more than a recording holds"
+    )]
     LostAfter(u64),
     #[error("{} already exists", .0.display())]
     Exists(PathBuf),
@@ -86,7 +88,7 @@ pub enum Error {
     NotVerge,
     #[error("the DIO stream reports no pins")]
     NoPins,
-    #[error("a DIO stream sent pairs")]
+    #[error("a DIO stream sent samples")]
     DioPairs,
     #[error("cancelled")]
     Cancelled,

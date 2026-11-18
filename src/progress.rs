@@ -113,7 +113,7 @@ impl Left {
             (Left::InIsp, None) => Some("`verge isp reset` starts that image.".to_owned()),
             (Left::Partial | Left::Unverified, Some(again)) => Some(match board {
                 Some(board) => format!(
-                    "In ISP mode the tool cannot tell its board, so flash it again with the same image, which is built for {}: `{again}`.",
+                    "This probe said it was {} before it went into ISP mode, where it cannot report its board. Flash it again with the same image, which is built for it: `{again}`.",
                     board.a()
                 ),
                 None => format!("`{again}` flashes it again."),
@@ -127,19 +127,19 @@ impl fmt::Display for Left {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Left::InIsp => {
-                "stopped before anything was written: the unit is in ISP mode, with the image it held"
+                "stopped before anything was written: the probe is in ISP mode, with the image it held"
             }
             Left::Partial => {
-                "stopped during the flash: the unit is in ISP mode, with a partial image"
+                "stopped during the flash: the probe is in ISP mode, with a partial image"
             }
             Left::Unverified => {
-                "stopped during the verify: the unit is in ISP mode, with the image written but not checked"
+                "stopped during the verify: the probe is in ISP mode, with the image written but not checked"
             }
             Left::Flashed => {
-                "stopped after the image was written and verified: the unit is restarting into it"
+                "stopped after the image was written and verified: the probe is restarting into it"
             }
             Left::Reset => {
-                "stopped after the reset: the unit is restarting into the image it holds"
+                "stopped after the reset: the probe is restarting into the image it holds"
             }
         })
     }

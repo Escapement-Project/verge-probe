@@ -415,7 +415,7 @@ fn to_device(
     Err(LinkError::Usb(match refused {
         None => "on Windows a control request reaches a device only through a vendor interface, and this one has none".into(),
         Some(error) => format!(
-            "on Windows a control request reaches a device only through an interface the tool can claim, and none could be claimed: {error}"
+            "on Windows a control request reaches a device only through an interface claimed for it, and none could be claimed: {error}"
         ),
     }))
 }

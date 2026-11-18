@@ -66,13 +66,13 @@ pub enum RecordError {
     MarkerTime,
     #[error("cancelled")]
     Cancelled,
-    #[error("merging the markers into {}; the file keeps its pairs, without markers", path.display())]
+    #[error("merging the markers into {}; the file keeps its samples, without markers", path.display())]
     Merge {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("{} is no longer the file recorded to; that file keeps its pairs, without markers", path.display())]
+    #[error("{} is no longer the file recorded to; that file keeps its samples, without markers", path.display())]
     Replaced { path: PathBuf },
     /// A tickwave recording's error, boxed: an export's can hold a [`RecordError`] in turn.
     #[cfg(feature = "tickwave")]

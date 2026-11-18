@@ -327,7 +327,7 @@ fn two_units_in_isp_mode_are_refused() {
     let Err(UpdateError::Refused(reason)) = result else {
         panic!("{result:?}");
     };
-    assert!(reason.starts_with("2 units are in ISP mode"), "{reason}");
+    assert!(reason.starts_with("2 probes are in ISP mode"), "{reason}");
     assert!(!bus.log().iter().any(|l| l.contains("ROM command")));
 }
 
@@ -697,7 +697,7 @@ fn a_second_bootloader_that_arrives_while_connecting_refuses_the_flash() {
     let Err(UpdateError::Refused(reason)) = result else {
         panic!("{result:?}");
     };
-    assert!(reason.starts_with("2 units are in ISP mode"), "{reason}");
+    assert!(reason.starts_with("2 probes are in ISP mode"), "{reason}");
     assert!(
         !bus.log()
             .iter()
@@ -725,10 +725,7 @@ fn a_bootloader_replaced_while_connecting_refuses_the_flash() {
     let Err(UpdateError::Refused(reason)) = result else {
         panic!("{result:?}");
     };
-    assert!(
-        reason.contains("changed while the tool connected"),
-        "{reason}"
-    );
+    assert!(reason.contains("changed during the connection"), "{reason}");
     assert!(!bus.log().iter().any(|l| l.contains("ROM command 0x02")));
 }
 
@@ -886,7 +883,7 @@ fn a_pro_sent_to_its_bootloader_by_the_tool_is_not_then_flashed_with_ours() {
         &Cancel::new(),
     );
     assert!(
-        matches!(&entered, Err(UpdateError::Refused(reason)) if reason.starts_with("the unit is an MCU-Link Pro")),
+        matches!(&entered, Err(UpdateError::Refused(reason)) if reason.starts_with("the probe is an MCU-Link Pro")),
         "{entered:?}"
     );
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
@@ -919,7 +916,7 @@ fn a_unit_known_to_be_another_board_goes_into_isp_mode_only_for_stock() {
     let pro = detect(&SimBus::scenario("pro").unwrap()).unwrap().remove(0);
     let refused = update::check_entry(&pro, false);
     assert!(
-        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.starts_with("the unit is an MCU-Link Pro")),
+        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.starts_with("the probe is an MCU-Link Pro")),
         "{refused:?}"
     );
     update::check_entry(&pro, true).unwrap();
@@ -961,7 +958,7 @@ fn the_update_itself_checks_the_board() {
     ] {
         assert!(
             matches!(&result, Err(UpdateError::Refused(reason))
-                if reason.contains("the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only")),
+                if reason.contains("the probe is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only")),
             "{result:?}"
         );
     }
@@ -1060,7 +1057,7 @@ fn a_pro_with_its_swd_jumper_takes_only_an_image_that_declares_it() {
         &Cancel::new(),
     );
     assert!(
-        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.contains("the unit is an MCU-Link Pro")),
+        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.contains("the probe is an MCU-Link Pro")),
         "{refused:?}"
     );
     assert!(!bus.log().iter().any(|l| l.contains("control")));
@@ -1256,7 +1253,10 @@ fn a_port_among_bootloaders_that_look_the_same_is_refused() {
     let Err(UpdateError::Refused(reason)) = result else {
         panic!("{result:?}");
     };
-    assert!(reason.contains("cannot tell which bootloader"), "{reason}");
+    assert!(
+        reason.contains("nothing tells which bootloader"),
+        "{reason}"
+    );
     assert!(!bus.log().iter().any(|l| l.contains("ROM command")));
 
     let bus = SimBus::scenario("isp-ours").unwrap();
@@ -1275,7 +1275,7 @@ fn a_port_with_no_bootloader_is_refused() {
         panic!("{result:?}");
     };
     assert!(
-        reason.starts_with("no unit is in ISP mode at 1-9"),
+        reason.starts_with("no probe is in ISP mode at 1-9"),
         "{reason}"
     );
 }
@@ -1354,7 +1354,10 @@ fn a_bootloader_arriving_during_a_flash_by_port_stops_it() {
     let Err(UpdateError::Refused(reason)) = result else {
         panic!("{result:?}");
     };
-    assert!(reason.contains("cannot tell which bootloader"), "{reason}");
+    assert!(
+        reason.contains("nothing tells which bootloader"),
+        "{reason}"
+    );
     assert!(bus.flash(0).is_empty());
 }
 

@@ -88,7 +88,7 @@ impl Filter {
             kinds.push("in ISP mode".to_owned());
         }
         if kinds.is_empty() {
-            return "no unit".to_owned();
+            return "no probe".to_owned();
         }
         let when = if self.attached {
             "attached now or later"
@@ -123,7 +123,7 @@ impl Filter {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArmError {
     #[error(
-        "the image carries no Verge version, so the batch cannot tell which units running Verge are older than it"
+        "the image carries no Verge version, so the batch cannot tell which probes running Verge are older than it"
     )]
     OursUndated,
     /// `image` follows "the image": what [`board::image_is_for`] says.
@@ -204,7 +204,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             return Verdict::Skip("an MCU-Link mini, which verge does not work with".into());
         }
         State::Unreadable { reason, .. } => {
-            return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
+            return Verdict::Skip(format!("it could not be asked what it runs: {reason}"));
         }
         State::Held { .. } => {
             return Verdict::Skip(
@@ -216,7 +216,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             firmware: Jumpered::Ours,
         } => {
             return Verdict::Skip(
-                "its SWD jumper is fitted, so the tool cannot ask which build it runs".into(),
+                "its SWD jumper is fitted, so it cannot say which build it runs".into(),
             );
         }
         State::SwdJumper {
@@ -882,7 +882,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                 .map(|s| format!(", serial {s}"))
                 .unwrap_or_default();
             return Some(format!(
-                "A unit ({lost}{serial}) reports no USB port. The batch knows units by their port, so it waits until that unit is unplugged."
+                "A probe ({lost}{serial}) reports no USB port. The batch knows probes by their port, so it waits until that probe is unplugged."
             ));
         }
         if let Some(mini) = devices
@@ -913,28 +913,28 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                         );
                         Some(match entry.map(|e| &e.hardware) {
                             Some(Hardware::Board(board)) => format!(
-                                "The unit at {at}, {}, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `{again}`.",
+                                "The probe at {at} failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. It said it was {} before, and in ISP mode it cannot report its board, so flash it again with the batch's image, which is built for it: `{again}`.",
                                 board.a()
                             ),
                             _ => format!(
-                                "The unit at {at} failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged; `{again}` flashes it again with the batch's image."
+                                "The probe at {at} failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged; `{again}` flashes it again with the batch's image."
                             ),
                         })
                     }
                     Some(Status::JumperFitted) => Some(format!(
-                        "The unit at {at} is in ISP mode with its jumper fitted. The batch waits until it is unplugged; take the jumper off before plugging it in again."
+                        "The probe at {at} is in ISP mode with its jumper fitted. The batch waits until it is unplugged; take the jumper off before plugging it in again."
                     )),
                     Some(Status::NotRestarted { maybe_jumper }) => Some(format!(
-                        "The unit at {at} was flashed, but {}. The batch waits until it is unplugged; plugged back in, it starts the new image.",
+                        "The probe at {at} was flashed, but {}. The batch waits until it is unplugged; plugged back in, it starts the new image.",
                         update::not_restarted(*maybe_jumper)
                     )),
                     _ => Some(format!(
-                        "A unit in ISP mode that this batch does not take is attached at {at}. The batch waits until it is unplugged or flashed with `verge isp flash`."
+                        "A probe in ISP mode that this batch does not take is attached at {at}. The batch waits until it is unplugged or flashed with `verge isp flash`."
                     )),
                 }
             }
             several => Some(format!(
-                "{} units are in ISP mode, and every LPC55S69 bootloader looks the same. The batch waits until at most one is.",
+                "{} probes are in ISP mode, and every LPC55S69 bootloader looks the same. The batch waits until at most one is.",
                 several.len()
             )),
         }

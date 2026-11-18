@@ -81,14 +81,14 @@ pub enum LoadError {
         "no MCU-LINK_CMSIS-DAP_V*.s19 ({searched}). Install NXP's LinkServer, or name its probe_firmware directory"
     )]
     NoStock { searched: String },
-    #[error("the unit already runs {tag}")]
+    #[error("the probe already runs {tag}")]
     AlreadyRuns { tag: String },
-    #[error("the unit runs {build}, which is newer than release {tag}")]
+    #[error("the probe runs {build}, which is newer than release {tag}")]
     Newer { build: String, tag: String },
-    #[error("the unit is {board}, which no Verge image supports. NXP's firmware can go on it")]
+    #[error("the probe is {board}, which no Verge image supports. NXP's firmware can go on it")]
     OtherBoard { board: String },
     /// `image` follows "the image": what [`board::image_is_for`] says.
-    #[error("the unit is {board}, and the image {image}. NXP's firmware can go on it")]
+    #[error("the probe is {board}, and the image {image}. NXP's firmware can go on it")]
     NotForBoard { board: String, image: String },
     #[error(
         "{path} is NXP's firmware for the MCU-Link mini, and verge does not work with the mini"
@@ -194,7 +194,7 @@ pub fn board_unknown(unit: &Unit) -> Option<&'static str> {
         State::Probe { .. } | State::Unreadable { .. } | State::SwdJumper { .. }
     );
     (running && unit.hardware() == Hardware::Unknown).then_some(
-        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it.",
+        "This probe's firmware does not say which board it is, so nothing can check that the image is built for it.",
     )
 }
 

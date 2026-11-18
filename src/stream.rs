@@ -58,7 +58,9 @@ pub enum StreamError {
     Short(usize),
     #[error("0x{0:02x} starts no stream message")]
     Unknown(u8),
-    #[error("stream format {0} is one this tool does not read: update the firmware or the tool")]
+    #[error(
+        "stream format {0} is newer than this version reads: update the host software or the firmware"
+    )]
     Format(u8),
 }
 
@@ -151,7 +153,7 @@ pub struct Pair {
     pub current_code: u16,
     pub low: bool,
     /// Read on the high range too near the amplifier's floor to trust, in either range setting
-    /// (docs/host-interface.md, "Pairs: `0xa0`").
+    /// (docs/host-interface.md, "Samples: `0xa0`").
     #[serde(default)]
     pub under_range: bool,
 }

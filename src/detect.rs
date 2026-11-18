@@ -177,7 +177,9 @@ impl Hardware {
                 None if number == Ours::BOARD_ON_BOARD => {
                     Hardware::Other("an on-board MCU-Link".into())
                 }
-                None => Hardware::Other(format!("board {number}, which this tool does not know")),
+                None => {
+                    Hardware::Other(format!("board {number}, which this version does not know"))
+                }
             },
         }
     }

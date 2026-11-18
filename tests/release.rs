@@ -755,7 +755,7 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
             Some(1 << 5),
             Some(not_for(
                 "an MCU-Link Pro",
-                "is built for no board this tool knows",
+                "is built for no board this version knows",
             )),
         ),
         ("plain, nothing declared", &plain, None, None),

@@ -62,37 +62,37 @@ pub enum UpdateError {
     /// A command for a unit in ISP mode found none. A running unit may enter it without the
     /// jumper, which the front end can say.
     #[error(
-        "no unit is in ISP mode. Fit the ISP jumper, then plug the unit in: the bootloader samples the pin at reset, so a jumper fitted afterwards does nothing"
+        "no probe is in ISP mode. Fit the ISP jumper, then plug the probe in: the bootloader reads the pin as it starts, so a jumper fitted afterwards does nothing"
     )]
     NoneInIsp,
     #[error(
-        "the unit did not come back as the bootloader within {} s. Use the ISP jumper",
+        "the probe did not come back as its bootloader within {} s. Use the ISP jumper",
         .0.as_secs()
     )]
     NoBootloader(Duration),
     #[error(
-        "the bootloader enumerated but did not answer within {} s: {last}",
+        "the bootloader appeared on USB but did not answer within {} s: {last}",
         .waited.as_secs()
     )]
     RomSilent { waited: Duration, last: String },
     #[error(
-        "the unit did not come back within {} s of the reset. If it stays away, fit the ISP jumper and flash it again",
+        "the probe did not come back within {} s of the reset. If it stays away, fit the ISP jumper and flash it again",
         .0.as_secs()
     )]
     NoReturn(Duration),
     #[error(
-        "the unit came back as {id}{}, an ID the tool does not look for, so it cannot reach the unit. The image it was given uses that ID",
+        "the probe came back as {id}{}, an ID outside the ones the update looks for, so the probe cannot be reached. The image flashed onto it uses that ID",
         product.as_ref().map(|p| format!(" ({p})")).unwrap_or_default()
     )]
     OtherId { id: String, product: Option<String> },
     #[error(
-        "{count} units appeared while the tool waited for this one, and they report no USB port to tell them apart"
+        "{count} probes appeared during the wait for this one, and they report no USB port to tell them apart"
     )]
     Ambiguous { count: usize },
     /// A cancel after the unit was asked for its bootloader, saying what it left there.
     #[error("{0}")]
     Cancelled(Left),
-    #[error("stopped before anything was sent to the unit, so nothing was changed")]
+    #[error("stopped before anything was sent to the probe, so nothing changed")]
     Stopped,
 }
 
@@ -212,7 +212,7 @@ pub fn check_entry(unit: &Unit, stock: bool) -> Result<(), UpdateError> {
         Hardware::Board(Board::McuLink) | Hardware::Unknown => Ok(()),
         _ if stock => Ok(()),
         other => Err(UpdateError::Refused(format!(
-            "the unit is {other}. In ISP mode nothing tells which board it is, so a flash there could not check that a Verge image is built for it"
+            "the probe is {other}. In ISP mode nothing tells which board it is, so a flash there could not check that a Verge image is built for it"
         ))),
     }
 }
@@ -263,7 +263,7 @@ pub fn entry_path(
         )
     });
     path.ok_or_else(|| {
-        let mut reason = "this unit has no jumper-free path into its bootloader".to_owned();
+        let mut reason = "this probe has no jumper-free path into its bootloader".to_owned();
         for note in &offer.notes {
             reason.push_str(". ");
             reason.push_str(note.trim_end_matches('.'));
@@ -274,7 +274,7 @@ pub fn entry_path(
 
 /// What to do after [`UpdateError::RomSilent`]: the unit's bootloader enumerated and does not
 /// answer, and power starts it afresh.
-pub const ROM_SILENT_ADVICE: &str = "Unplug the unit and plug it back in, then try again. Without the ISP jumper it starts the image it holds; with the jumper fitted it comes back in ISP mode.";
+pub const ROM_SILENT_ADVICE: &str = "Unplug the probe and plug it back in, then try again. Without the ISP jumper it starts the image it holds; with the jumper fitted it comes back in ISP mode.";
 
 /// [`enter_bootloader`], where `stop` keeps the unit out of its bootloader until the request is
 /// sent and `cancel` stops the wait after it. `alone` is [`entry_path`]'s.
@@ -369,21 +369,21 @@ pub fn only_bootloader(devices: &[UsbDevice]) -> Result<UsbDevice, UpdateError> 
         .any(|d| d.role() == Some(Role::MiniBootloader));
     match roms.as_slice() {
         [] if mini => Err(UpdateError::Refused(
-            "the unit in ISP mode is an MCU-Link mini, and verge does not work with the mini"
+            "the probe in ISP mode is an MCU-Link mini, and verge does not work with the mini"
                 .into(),
         )),
         [_] if mini => Err(UpdateError::Refused(MINI_TOO.into())),
         [rom] => Ok((*rom).clone()),
         [] => Err(UpdateError::NoneInIsp),
         several => Err(UpdateError::Refused(format!(
-            "{} units are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. Unplug all but one",
+            "{} probes are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. Unplug all but one",
             several.len(),
             ports(several)
         ))),
     }
 }
 
-const MINI_TOO: &str = "an MCU-Link mini is in ISP mode too, and the tool works with a bootloader only while no other is attached: unplug the mini first";
+const MINI_TOO: &str = "an MCU-Link mini is in ISP mode too, and a flash needs one bootloader alone on the bus: unplug the mini first";
 
 /// The ports of `devices`, as a list.
 fn ports(devices: &[&UsbDevice]) -> String {
@@ -423,7 +423,7 @@ pub fn select_bootloader<B: Bus>(
             && let Some(at) = &first.location
         {
             return Err(UpdateError::Refused(format!(
-                "{} units are in ISP mode, at {}. Pick one with --port, as --port {at}, or unplug all but one",
+                "{} probes are in ISP mode, at {}. Pick one with --port, as --port {at}, or unplug all but one",
                 roms.len(),
                 ports(&roms)
             )));
@@ -432,12 +432,12 @@ pub fn select_bootloader<B: Bus>(
     };
     let Some(rom) = roms.iter().find(|d| d.location.as_deref() == Some(port)) else {
         return Err(UpdateError::Refused(format!(
-            "no unit is in ISP mode at {port}. `verge list` names each unit's port"
+            "no probe is in ISP mode at {port}. `verge list` names each probe's port"
         )));
     };
     if roms.len() > 1 && !bus.tells_bootloaders_apart() {
         return Err(UpdateError::Refused(format!(
-            "{} units are in ISP mode, and on this system the tool cannot tell which bootloader is the one at {port}. Unplug all but one",
+            "{} probes are in ISP mode, and on this system nothing tells which bootloader is the one at {port}. Unplug all but one",
             roms.len()
         )));
     }
@@ -494,11 +494,11 @@ fn connect<B: Bus>(
         }
         bus.sleep(timing.poll * 2);
     };
-    tracing::info!("bootloader {} answers", info.version);
+    tracing::debug!("bootloader {} answers", info.version);
     let answering = select_bootloader(bus, &bus.devices()?, port)?;
     if answering.instance != rom.instance {
         return Err(UpdateError::Refused(format!(
-            "the unit in ISP mode changed while the tool connected to it ({rom} then {answering}), so nothing was written. Check what is attached and try again"
+            "the probe in ISP mode changed during the connection ({rom} then {answering}), so nothing was written. Check what is attached and try again"
         )));
     }
     Ok((boot, info))
@@ -692,7 +692,7 @@ pub fn install<B: Bus>(
             update_unless(bus, unit, payload, timing, progress, cancel, stop)
         }
         Some(Path::Jumper) => Err(UpdateError::Refused(format!(
-            "this unit cannot be updated without the jumper now. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and flash it with an image built for {}. In ISP mode the tool cannot check the board",
+            "this probe cannot be updated without the jumper now. {} To use the jumper: unplug the probe, fit the ISP jumper, plug it back in, and flash it with an image built for {}. In ISP mode nothing can check the board",
             offer.notes.join(" "),
             match unit.hardware() {
                 Hardware::Unknown => "it".to_owned(),
@@ -700,7 +700,7 @@ pub fn install<B: Bus>(
             }
         ))),
         None => Err(UpdateError::Refused(format!(
-            "this unit cannot be updated as it is. {}",
+            "this probe cannot be updated as it is. {}",
             offer.notes.join(" ")
         ))),
     }

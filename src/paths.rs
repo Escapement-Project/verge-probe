@@ -37,18 +37,18 @@ impl Path {
     pub fn describe(self) -> &'static str {
         match self {
             Path::OursJumperFree => {
-                "The tool asks the firmware to restart into its bootloader, flashes it, and restarts it."
+                "Asks the firmware to restart into its bootloader, flashes the probe and restarts it."
             }
             Path::StockJumperFree => {
-                "The tool sends the request NXP's LinkServer uses, then flashes and restarts the unit."
+                "Sends the request NXP's LinkServer uses, then flashes and restarts the probe."
             }
             Path::DaplinkRsJumperFree => {
-                "The tool asks daplink-rs to restart into its bootloader, flashes it, and restarts it."
+                "Asks daplink-rs to restart into its bootloader, flashes the probe and restarts it."
             }
             Path::Jumper => {
-                "Unplug the unit, fit the ISP jumper, and plug it back in so that its bootloader starts. Flash it, then unplug it and take the jumper off."
+                "Unplug the probe, fit the ISP jumper, and plug it back in so that its bootloader starts. Flash it, then unplug it and take the jumper off."
             }
-            Path::FlashNow => "The unit is in ISP mode. The tool can flash it now.",
+            Path::FlashNow => "The probe is in ISP mode already.",
         }
     }
 }
@@ -56,11 +56,11 @@ impl Path {
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Path::OursJumperFree => "jumper-free (Verge)",
-            Path::StockJumperFree => "jumper-free (NXP's firmware)",
-            Path::DaplinkRsJumperFree => "jumper-free (daplink-rs)",
+            Path::OursJumperFree => "Jumper-free (Verge)",
+            Path::StockJumperFree => "Jumper-free (NXP's firmware)",
+            Path::DaplinkRsJumperFree => "Jumper-free (daplink-rs)",
             Path::Jumper => "ISP jumper",
-            Path::FlashNow => "flash now",
+            Path::FlashNow => "Flash now",
         })
     }
 }
@@ -73,7 +73,7 @@ pub const USB_PERMISSIONS: &str =
 /// Said before flashing a unit that was in ISP mode already. A jumper-free update flashes the
 /// bootloader that appears on the port of the unit it restarted, so it needs no such warning.
 pub const ISP_IDENTITY_WARNING: &str =
-    "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.";
+    "In ISP mode an MCU-Link looks like any other LPC55S69 board.";
 
 /// The paths open to one unit, best first, and what the user should know about the rest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -113,15 +113,15 @@ fn ports(units: &[&Unit]) -> String {
 fn waits_for(bootloaders: &[&Unit], minis: &[&Unit]) -> String {
     match (bootloaders, minis) {
         (_, [_, ..]) => format!(
-            "An MCU-Link mini is in ISP mode, at {}. Unplug it, then update this one: the tool works with a bootloader only while no other is attached.",
+            "An MCU-Link mini is in ISP mode, at {}. Unplug it, then update this one: a flash needs one bootloader alone on the bus.",
             ports(minis)
         ),
         ([_], []) => format!(
-            "Another unit is in ISP mode, at {}. Flash that one or unplug it, then update this one: the tool flashes only while one bootloader is attached.",
+            "Another probe is in ISP mode, at {}. Flash that one or unplug it, then update this one: a flash needs one bootloader alone on the bus.",
             ports(bootloaders)
         ),
         (_, []) => format!(
-            "{} other units are in ISP mode, at {}. Flash them or unplug them, then update this one: the tool flashes only while one bootloader is attached.",
+            "{} other probes are in ISP mode, at {}. Flash them or unplug them, then update this one: a flash needs one bootloader alone on the bus.",
             bootloaders.len(),
             ports(bootloaders)
         ),
@@ -172,7 +172,7 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 "NXP's firmware V{version} has no jumper-free update. NXP added it in V3.122."
             )),
             None => offer.notes.push(
-                "NXP's firmware did not report its version, so the tool will not try the jumper-free update.".into(),
+                "NXP's firmware did not report its version, so no jumper-free update is tried.".into(),
             ),
         },
         State::Probe {
@@ -186,7 +186,7 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 "This daplink-rs build has no bootloader to restart into.".into(),
             ),
             Some(_) => offer.notes.push(
-                "This daplink-rs build restarts into a bootloader other than the LPC55S69's ROM, so the tool does not ask it to.".into(),
+                "This daplink-rs build restarts into a bootloader other than the LPC55S69's ROM, so it gets no such request.".into(),
             ),
             None => offer.notes.push(
                 "This daplink-rs build has no command to restart into its bootloader.".into(),
@@ -196,17 +196,17 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
         State::Unreadable { reason, .. } if reason == crate::detect::DENIED => {
             offer.notes.push(if cfg!(target_os = "linux") {
                 format!(
-                    "This user may not open the unit. The udev rules in Getting started let it: {USB_PERMISSIONS}"
+                    "This user may not open the probe. The udev rules in Getting started let it: {USB_PERMISSIONS}"
                 )
             } else {
-                "This user may not open the unit.".to_owned()
+                "This user may not open the probe.".to_owned()
             });
             return offer;
         }
         State::Unreadable { reason, guess } => {
             offer
                 .notes
-                .push(format!("The tool could not ask this unit what it runs: {reason}."));
+                .push(format!("This probe could not be asked what it runs: {reason}."));
             if asking_again_may_free(guess) {
                 offer.notes.push(
                     "Close whatever has it open and look again for the jumper-free path.".into(),
@@ -215,7 +215,7 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
         }
         State::Held { .. } => {
             offer.notes.push(
-                "Close the debugger first. Another program holds its CMSIS-DAP interface, and the tool does not update a unit in use.".into(),
+                "Close the debugger first. Another program holds its CMSIS-DAP interface, and a probe in use gets no update.".into(),
             );
             return offer;
         }
@@ -223,11 +223,11 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
             firmware: Jumpered::Ours,
         } => {
             offer.notes.push(
-                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface, so the tool cannot ask which build this unit runs.".into(),
+                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface, so this probe cannot say which build it runs.".into(),
             );
             if cfg!(windows) {
                 offer.notes.push(
-                    "On Windows the tool can send the restart request only through that interface. Take the SWD jumper off to update the unit without the ISP jumper.".into(),
+                    "On Windows the restart request goes only through that interface. Take the SWD jumper off to update the probe without the ISP jumper.".into(),
                 );
             } else {
                 offer.paths.push(Path::OursJumperFree);
@@ -237,12 +237,12 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
             firmware: Jumpered::Stock(version),
         } => offer.notes.push(match version {
             Some(version) if version.has_jumper_free_update() => {
-                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface that NXP's jumper-free update goes through: unplug the unit, take the SWD jumper off and plug it back in to use that update.".into()
+                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface that NXP's jumper-free update goes through: unplug the probe, take the SWD jumper off and plug it back in to use that update.".into()
             }
             Some(version) => format!(
                 "The SWD jumper is fitted. NXP's firmware V{version} has no jumper-free update either way. NXP added it in V3.122."
             ),
-            None => "The SWD jumper is fitted, and NXP's product string gives no version, so the tool does not know whether it has a jumper-free update.".into(),
+            None => "The SWD jumper is fitted, and NXP's product string gives no version, so nothing tells whether it has a jumper-free update.".into(),
         }),
         State::Bootloader if in_isp > 1 => {
             // Only Linux ties a bootloader to its port (`Bus::tells_bootloaders_apart`).
@@ -253,14 +253,14 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 _ => "Unplug all but one.".to_owned(),
             };
             offer.notes.push(format!(
-                "{in_isp} units are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. {pick}",
+                "{in_isp} probes are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. {pick}",
                 ports(&bootloaders),
             ));
             return offer;
         }
         State::Bootloader if !minis.is_empty() => {
             offer.notes.push(
-                "An MCU-Link mini is in ISP mode too, and the tool works with a bootloader only while no other is attached: unplug the mini first."
+                "An MCU-Link mini is in ISP mode too, and a flash needs one bootloader alone on the bus: unplug the mini first."
                     .into(),
             );
             return offer;
@@ -353,7 +353,7 @@ mod tests {
         let all = [isp.clone(), isp.clone()];
         let offer = offer(&isp, &all);
         assert!(offer.paths.is_empty());
-        assert!(offer.notes[0].contains("2 units are in ISP mode"));
+        assert!(offer.notes[0].contains("2 probes are in ISP mode"));
     }
 
     /// The jumper would put a second unit in ISP mode as surely as the jumper-free entry, so
@@ -365,7 +365,7 @@ mod tests {
             let offer = offer(&probe, &all);
             assert_eq!(offer.paths, [], "{}", probe.state);
             assert!(
-                offer.notes[0].starts_with("Another unit is in ISP mode"),
+                offer.notes[0].starts_with("Another probe is in ISP mode"),
                 "{:?}",
                 offer.notes
             );
