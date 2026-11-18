@@ -77,6 +77,26 @@ impl HidPipe for hidapi::HidDevice {
     }
 }
 
+/// Blocks SIGINT, SIGTERM and SIGHUP on the calling thread, and so on every thread it starts
+/// afterwards. A signal handler that runs on a thread waiting for a HID read fails that read, as
+/// hidapi's Linux backend waits in `poll()`, which no handler restarts, and the reply to the
+/// command in flight is lost. A front end that handles these signals starts its handler's thread
+/// first (`ctrlc::set_handler` does), then calls this before it starts any thread that opens a
+/// unit, so the signals reach the handler's thread alone. Does nothing off Unix.
+pub fn block_stop_signals() {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{SigSet, Signal};
+        let mut signals = SigSet::empty();
+        for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+            signals.add(signal);
+        }
+        if let Err(error) = signals.thread_block() {
+            tracing::debug!("stop signals left to every thread: {error}");
+        }
+    }
+}
+
 /// One ROM bootloader, as McuBoot's client sees it.
 pub struct HidRom<P = hidapi::HidDevice> {
     pipe: P,
