@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use escapement_tickwave_format::annotations::{Colour, View};
 use escapement_tickwave_format::decode::{DecodeError, Footer};
 use escapement_tickwave_format::header::{
     AnalogCoding, Declaration, DeclaredChannel, DeclaredKind, Derived, Exact, IntCoding, JSON_SAFE,
@@ -714,6 +715,7 @@ impl DioOpen {
             extra: vec![extra],
             bundle: Some(Bundle::Generated { stem: stem.into() }),
             drop_gaps_past_end: false,
+            view: Some(verge_view()),
             lost_after: BTreeMap::new(),
         };
         let ends = vec![end; self.pins.len()];
@@ -1193,9 +1195,22 @@ impl Open {
             extra: vec![extra],
             bundle: Some(Bundle::Generated { stem: stem.into() }),
             drop_gaps_past_end: false,
+            view: Some(verge_view()),
             lost_after,
         };
         Ok(self.writer.finish(end - self.base, &ends, finish)?)
+    }
+}
+
+/// How a recording opens elsewhere: every channel, in Verge's colour in data (the design tokens'
+/// `series-verge`), as the project's published recordings store it.
+fn verge_view() -> View {
+    View {
+        colour: Some(Colour {
+            day: "#0f8a6c".into(),
+            night: "#1aa384".into(),
+        }),
+        ..View::default()
     }
 }
 

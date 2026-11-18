@@ -406,6 +406,15 @@ fn level_at(d: &Decoded, c: usize, tick: i64) -> Option<bool> {
     }
 }
 
+/// The view a finished file stores, as a viewer elsewhere reads it.
+fn stored_view(file: Vec<u8>) -> Option<View> {
+    use escapement_tickwave_view::{Cache, Recording};
+    Recording::open(std::sync::Arc::new(file), Cache::new(1 << 20))
+        .unwrap()
+        .stored_view()
+        .unwrap()
+}
+
 fn encode(messages: &[Message]) -> Vec<u8> {
     let mut encoder = Encoder::new(Context::default());
     let mut file = Vec::new();
@@ -593,6 +602,7 @@ fn a_file_writer_flushes_then_compacts_to_the_same_content() {
     assert!(shifts[LOW_RANGE] > shifts[V], "{shifts:?}");
     let (whole_samples, whole_markers, _) = content(&whole);
     assert_eq!((samples, markers), (whole_samples, whole_markers));
+    assert_eq!(stored_view(compacted), Some(verge_view()));
     // Nothing is left beside it.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
@@ -1413,6 +1423,7 @@ fn a_dio_streams_recording_holds_its_pins_alone() {
         assert_eq!(d.gaps, [vec![lost], vec![lost]]);
         assert_eq!(level_at(&d, 0, 0), Some(true));
         assert_eq!(level_at(&d, 1, 9_999), Some(false));
+        assert_eq!(stored_view(file), Some(verge_view()));
     }
 }
 
