@@ -147,6 +147,7 @@ fn blinking_beside_an_update_with_exclusive_opens() {
         name: "release v0.3.0".into(),
         version: ImageVersion::Ours("v0.3.0".into()),
         source: Source::Release(None),
+        repo: Default::default(),
     };
     let filter = Filter {
         board: Board::McuLink,

@@ -80,12 +80,16 @@ impl std::fmt::Display for Feature {
 pub enum ProError {
     #[error("the tool could not ask {name} what it runs: {reason}")]
     Unreadable { name: String, reason: String },
-    #[error("{name} is {state}, not running Verge, so the tool cannot reach its {feature}")]
+    #[error("{name} runs {state}, not Verge, so the tool cannot reach its {feature}")]
     NotVerge {
         name: String,
         state: String,
         feature: Feature,
     },
+    #[error(
+        "{name} has its SWD jumper fitted, which takes away the interfaces the tool reaches its {feature} through. Take the jumper off and plug the unit in again"
+    )]
+    SwdJumper { name: String, feature: Feature },
     #[error("{name} is not an MCU-Link Pro, so it has no {feature}")]
     NotPro { name: String, feature: Feature },
     #[error("{name} has no DIO pins: only an MCU-Link Pro and a standalone MCU-Link have them")]
@@ -142,6 +146,12 @@ pub fn validate(unit: &Unit, feature: Feature) -> Result<(), ProError> {
             name,
             reason: reason.clone(),
         });
+    }
+    if let crate::detect::State::SwdJumper {
+        firmware: crate::detect::Jumpered::Ours,
+    } = &unit.state
+    {
+        return Err(ProError::SwdJumper { name, feature });
     }
     let Some(ours) = unit.verge() else {
         return Err(ProError::NotVerge {

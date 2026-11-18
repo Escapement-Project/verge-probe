@@ -40,7 +40,7 @@ pub use detect::{Firmware, State, Unit, detect};
 pub use image::Image;
 pub use paths::{Offer, Path, offer};
 pub use probe_rs;
-pub use progress::{Cancel, Progress, Step};
+pub use progress::{Cancel, Left, Progress, Step};
 pub use source::{Loaded, Source};
 pub use update::{Outcome, Timing, UpdateError};
 

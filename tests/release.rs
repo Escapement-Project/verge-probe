@@ -717,7 +717,7 @@ fn a_stalled_request_fails_with_a_message() {
 }
 
 /// An image of ours goes on a board only where its declaration names it, and an image that
-/// declares nothing names the full MCU-Link alone. A release says so only once it is downloaded.
+/// declares nothing names the standalone MCU-Link alone. A release says so only once it is downloaded.
 /// Stock's own image goes on any board.
 #[test]
 fn an_image_of_ours_goes_only_on_a_board_it_declares() {
@@ -727,9 +727,9 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
     let pro = detect(&pro_bus).unwrap().remove(0);
     let plain_bus = SimBus::scenario("stock").unwrap();
     let plain = detect(&plain_bus).unwrap().remove(0);
-    let not_for = |board: &str, built_for: &str| LoadError::NotForBoard {
+    let not_for = |board: &str, image: &str| LoadError::NotForBoard {
         board: board.into(),
-        built_for: built_for.into(),
+        image: image.into(),
     };
     let cases: [(
         &str,
@@ -741,7 +741,10 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
             "pro, nothing declared",
             &pro,
             None,
-            Some(not_for("an MCU-Link Pro", "the full MCU-Link only")),
+            Some(not_for(
+                "an MCU-Link Pro",
+                "declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
+            )),
         ),
         ("pro, the pro declared", &pro, Some(PRO), None),
         ("pro, both declared", &pro, Some(PLAIN | PRO), None),
@@ -750,14 +753,20 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
             "pro, board 5 declared",
             &pro,
             Some(1 << 5),
-            Some(not_for("an MCU-Link Pro", "no board this tool knows")),
+            Some(not_for(
+                "an MCU-Link Pro",
+                "is built for no board this tool knows",
+            )),
         ),
         ("plain, nothing declared", &plain, None, None),
         (
             "plain, the pro declared",
             &plain,
             Some(PRO),
-            Some(not_for("a full MCU-Link", "the MCU-Link Pro only")),
+            Some(not_for(
+                "a standalone MCU-Link",
+                "is built for the MCU-Link Pro only",
+            )),
         ),
         ("plain, both declared", &plain, Some(PLAIN | PRO), None),
     ];
@@ -902,4 +911,41 @@ fn a_release_is_downloaded_only_when_agreed() {
     );
     assert!(asked.is_empty());
     assert_eq!(downloads(), 3);
+}
+
+/// Release tags start with "v": a tag given without it finds the release, and a tag that names
+/// none still says which tag was asked for.
+#[test]
+fn a_tag_without_its_v_finds_the_release() {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let github = github(&http);
+    assert_eq!(github.tagged("0.3.0").unwrap().tag, "v0.3.0");
+    assert_eq!(
+        github.tagged("9.9.9").unwrap_err(),
+        ReleaseError::NotFound {
+            repo: repo().to_string(),
+            tag: Some("9.9.9".into())
+        }
+    );
+}
+
+/// GitHub turning down a token the tool sent is said as such: public releases need none, so
+/// a stale token in the environment is the likely cause, not the rate limit.
+#[test]
+fn a_refused_token_is_named() {
+    #[derive(Clone)]
+    struct Unauthorised;
+    impl Http for Unauthorised {
+        fn get(&self, url: &str, _: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
+            Err(HttpError::Status {
+                status: 401,
+                url: url.to_owned(),
+            })
+        }
+    }
+    let with = GitHub::new(Unauthorised, repo(), Some("stale".into()));
+    assert_eq!(with.latest().unwrap_err(), ReleaseError::TokenRefused(401));
+    let without = GitHub::new(Unauthorised, repo(), None);
+    assert_eq!(without.latest().unwrap_err(), ReleaseError::Refused(401));
 }

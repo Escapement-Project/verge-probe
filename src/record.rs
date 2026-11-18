@@ -61,6 +61,22 @@ pub enum RecordError {
     Replaced { path: PathBuf },
 }
 
+impl RecordError {
+    /// Whether writing failed because the reader of a pipe the recording went to has gone.
+    #[must_use]
+    pub fn is_broken_pipe(&self) -> bool {
+        let io = match self {
+            RecordError::Io(io) | RecordError::Create { source: io, .. } => Some(io),
+            RecordError::Csv(error) => match error.kind() {
+                csv::ErrorKind::Io(io) => Some(io),
+                _ => None,
+            },
+            _ => None,
+        };
+        io.is_some_and(|io| io.kind() == io::ErrorKind::BrokenPipe)
+    }
+}
+
 type Result<T> = std::result::Result<T, RecordError>;
 
 /// The levels of the DIO pins a stream reports, as its edges move them.

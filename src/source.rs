@@ -71,7 +71,7 @@ impl<'a> Payload<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("{path}: {error}")]
+    #[error("{}", file_message(.path, .error))]
     File { path: String, error: ImageError },
     #[error(transparent)]
     Release(#[from] ReleaseError),
@@ -83,14 +83,25 @@ pub enum LoadError {
     AlreadyRuns { tag: String },
     #[error("the unit runs {build}, which is newer than release {tag}")]
     Newer { build: String, tag: String },
-    #[error("the unit is {board}, which no Verge image supports. NXP's stock image can go on it")]
+    #[error("the unit is {board}, which no Verge image supports. NXP's firmware can go on it")]
     OtherBoard { board: String },
+    /// `image` follows "the image": what [`board::image_is_for`] says.
+    #[error("the unit is {board}, and the image {image}. NXP's firmware can go on it")]
+    NotForBoard { board: String, image: String },
     #[error(
-        "the unit is {board}, and this image is built for {built_for}. NXP's stock image can go on it"
+        "{path} is NXP's firmware for the MCU-Link mini, and verge does not work with the mini"
     )]
-    NotForBoard { board: String, built_for: String },
+    Mini { path: String },
     #[error("{name}: {error}")]
     Image { name: String, error: ImageError },
+}
+
+/// A file's error, naming the file once: a read error names it already.
+fn file_message(path: &str, error: &ImageError) -> String {
+    match error {
+        ImageError::Read { .. } => error.to_string(),
+        error => format!("{path}: {error}"),
+    }
 }
 
 fn from_file(path: &std::path::Path) -> Result<Image, LoadError> {
@@ -138,7 +149,7 @@ pub fn check_unit(unit: Option<&Unit>, source: &Source) -> Result<(), LoadError>
 
 /// Whether `image` may go on `unit`. Stock's own image, as `version` says it is, goes anywhere
 /// stock runs. Anything else is ours, a release or a file, and goes only on a board its
-/// declaration names, or the full MCU-Link where it declares none.
+/// declaration names, or the standalone MCU-Link where it declares none.
 ///
 /// A unit that does not say which board it is passes: one in ISP mode, under
 /// [`crate::paths::ISP_IDENTITY_WARNING`], and a running one under [`board_unknown`], which the
@@ -155,16 +166,16 @@ pub fn check_board(
         Hardware::Unknown => Ok(()),
         Hardware::Other(board) => Err(LoadError::OtherBoard { board }),
         Hardware::Board(on) => {
-            let boards = image.boards().map_err(|error| LoadError::Image {
+            let image_error = |error| LoadError::Image {
                 name: "the image".into(),
                 error,
-            })?;
-            if boards.contains(&on) {
+            };
+            if image.boards().map_err(image_error)?.contains(&on) {
                 Ok(())
             } else {
                 Err(LoadError::NotForBoard {
                     board: on.a().to_owned(),
-                    built_for: board::built_for(&boards),
+                    image: board::image_is_for(image).map_err(image_error)?,
                 })
             }
         }
@@ -331,6 +342,17 @@ pub fn flash_command(source: &Source, version: &ImageVersion) -> String {
     }
 }
 
+/// [`flash_command`], naming `repo` where a release comes from a repository other than the
+/// default, so that the command finds the same release and its kept copy.
+#[must_use]
+pub fn flash_command_in(source: &Source, version: &ImageVersion, repo: &Repo) -> String {
+    let command = flash_command(source, version);
+    match source {
+        Source::Release(_) if *repo != Repo::default() => format!("{command} --repo {repo}"),
+        _ => command,
+    }
+}
+
 /// A path as one word for a shell, quoted where it has to be: in single quotes for a POSIX shell,
 /// in double quotes on Windows, where a path cannot hold one.
 fn shell_word(path: &std::path::Path) -> String {
@@ -347,18 +369,38 @@ fn shell_word(path: &std::path::Path) -> String {
     }
 }
 
-fn load_file(path: &std::path::Path) -> Result<Loaded, LoadError> {
+/// An image file. LinkServer's files are known by their names: NXP's firmware for the
+/// MCU-Link and the Pro goes on any board, as with [`Source::Stock`], and the mini's is refused.
+pub fn load_file(path: &std::path::Path) -> Result<Loaded, LoadError> {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file_name.starts_with("MCU-MINI_") {
+        return Err(LoadError::Mini {
+            path: path.display().to_string(),
+        });
+    }
     let image = from_file(path)?;
     image.check_for_mculink().map_err(|error| LoadError::File {
         path: path.display().to_string(),
         error,
     })?;
-    let name = format!("{} ({})", path.display(), image.format);
+    let (name, version) = match stock::version_of(&file_name) {
+        Some(version) => (
+            format!("NXP's firmware V{version} from {}", path.display()),
+            ImageVersion::Stock(version),
+        ),
+        None => (
+            format!("{} ({})", path.display(), image.format),
+            ImageVersion::Unknown,
+        ),
+    };
     Ok(Loaded {
         image,
         name,
         release: None,
-        version: ImageVersion::Unknown,
+        version,
     })
 }
 
@@ -379,7 +421,11 @@ fn load_stock(dir: Option<&PathBuf>) -> Result<Loaded, LoadError> {
     let image = from_file(&found.path)?;
     Ok(Loaded {
         image,
-        name: format!("stock V{} from {}", found.version, found.path.display()),
+        name: format!(
+            "NXP's firmware V{} from {}",
+            found.version,
+            found.path.display()
+        ),
         release: None,
         version: ImageVersion::Stock(found.version),
     })
@@ -388,6 +434,30 @@ fn load_stock(dir: Option<&PathBuf>) -> Result<Loaded, LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A release from a repository other than the default is named with it; anything else is not.
+    #[test]
+    fn a_flash_command_names_a_repository_other_than_the_default() {
+        let release = Source::Release(Some("v0.3.0".into()));
+        let version = ImageVersion::Ours("v0.3.0".into());
+        let other: Repo = "someone/mculink-verge".parse().unwrap();
+        assert_eq!(
+            flash_command_in(&release, &version, &other),
+            "verge isp flash --release v0.3.0 --repo someone/mculink-verge"
+        );
+        assert_eq!(
+            flash_command_in(&release, &version, &Repo::default()),
+            "verge isp flash --release v0.3.0"
+        );
+        assert_eq!(
+            flash_command_in(
+                &Source::File("a.s19".into()),
+                &ImageVersion::Unknown,
+                &other
+            ),
+            "verge isp flash --file a.s19"
+        );
+    }
 
     /// A path a shell would split or misread is quoted; a plain one is left as it is.
     #[test]

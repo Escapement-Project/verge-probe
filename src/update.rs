@@ -13,7 +13,7 @@ use crate::ids::Role;
 use crate::image::{Image, ImageError};
 use crate::isp::{self, IspError};
 use crate::paths::{self, Path};
-use crate::progress::{Cancel, Progress, Step};
+use crate::progress::{Cancel, Left, Progress, Step};
 use crate::source::{self, Payload};
 
 /// How long each wait lasts, in the bus's time.
@@ -58,12 +58,25 @@ pub enum UpdateError {
     Isp(#[from] IspError),
     #[error("{0}")]
     Refused(String),
-    #[error("the unit did not come back as the bootloader within {0:?}. Use the ISP jumper")]
+    /// A command for a unit in ISP mode found none. A running unit may enter it without the
+    /// jumper, which the front end can say.
+    #[error(
+        "no unit is in ISP mode. Fit the ISP jumper, then plug the unit in: the bootloader samples the pin at reset, so a jumper fitted afterwards does nothing"
+    )]
+    NoneInIsp,
+    #[error(
+        "the unit did not come back as the bootloader within {} s. Use the ISP jumper",
+        .0.as_secs()
+    )]
     NoBootloader(Duration),
-    #[error("the bootloader enumerated but did not answer within {waited:?}: {last}")]
+    #[error(
+        "the bootloader enumerated but did not answer within {} s: {last}",
+        .waited.as_secs()
+    )]
     RomSilent { waited: Duration, last: String },
     #[error(
-        "the unit did not come back within {0:?} of the reset. If it stays away, fit the ISP jumper and flash it again"
+        "the unit did not come back within {} s of the reset. If it stays away, fit the ISP jumper and flash it again",
+        .0.as_secs()
     )]
     NoReturn(Duration),
     #[error(
@@ -75,9 +88,10 @@ pub enum UpdateError {
         "{count} units appeared while the tool waited for this one, and they report no USB port to tell them apart"
     )]
     Ambiguous { count: usize },
-    #[error("cancelled")]
-    Cancelled,
-    #[error("stopped before the unit was asked for its bootloader, so nothing was changed")]
+    /// A cancel after the unit was asked for its bootloader, saying what it left there.
+    #[error("{0}")]
+    Cancelled(Left),
+    #[error("stopped before anything was sent to the unit, so nothing was changed")]
     Stopped,
 }
 
@@ -123,27 +137,37 @@ pub fn select<'a>(units: &'a [Unit], serial: Option<&str>) -> Result<&'a Unit, U
         ))),
         ([], None) => Err(UpdateError::Refused("no MCU-Link is attached".into())),
         (several, _) => {
-            let serials: Vec<&str> = several.iter().map(|u| u.serial().unwrap_or("?")).collect();
+            let names: Vec<String> = several
+                .iter()
+                .map(|u| match (u.serial(), &u.device.location) {
+                    (Some(serial), _) => serial.to_owned(),
+                    (None, Some(port)) => format!("one at {port} with no serial"),
+                    (None, None) => "one with no serial".to_owned(),
+                })
+                .collect();
             Err(UpdateError::Refused(format!(
                 "{} MCU-Links are attached ({}); pick one by serial",
                 several.len(),
-                serials.join(", ")
+                names.join(", ")
             )))
         }
     }
 }
 
+/// Looks at the bus until `look` finds something or `limit` runs out. A cancel meanwhile is
+/// [`UpdateError::Cancelled`] with what it `left`.
 fn wait_until<B: Bus, T>(
     bus: &B,
     timing: &Timing,
     limit: Duration,
     cancel: &Cancel,
+    left: Left,
     mut look: impl FnMut(&[UsbDevice]) -> Option<T>,
 ) -> Result<Option<T>, UpdateError> {
     let deadline = bus.now() + limit;
     loop {
         if cancel.is_cancelled() {
-            return Err(UpdateError::Cancelled);
+            return Err(UpdateError::Cancelled(left));
         }
         if let Some(found) = look(&bus.devices()?) {
             return Ok(Some(found));
@@ -209,12 +233,50 @@ pub fn enter_bootloader<B: Bus>(
     enter(bus, unit, true, timing, progress, cancel, cancel)
 }
 
-/// [`enter_bootloader`], where `stop` keeps the unit out of its bootloader until the request is
-/// sent and `cancel` stops the wait after it.
+/// The jumper-free path `unit` takes into its bootloader, given every unit attached (`all`), or why
+/// it has none.
 ///
 /// Another unit in ISP mode closes the jumper-free path, because the flash that follows could not
 /// tell the two bootloaders apart. With `alone`, nothing follows: other bootloaders are left out
-/// of that check where the bus tells them apart and this unit has a port to find its own by.
+/// where the bus tells them apart (`apart`, as [`Bus::tells_bootloaders_apart`] says) and this
+/// unit has a port to find its own by.
+pub fn entry_path(
+    unit: &Unit,
+    all: &[Unit],
+    alone: bool,
+    apart: bool,
+) -> Result<Path, UpdateError> {
+    let considered: Vec<Unit> = if alone && apart && unit.device.location.is_some() {
+        all.iter()
+            .filter(|u| u.device.role() != Some(Role::Bootloader))
+            .cloned()
+            .collect()
+    } else {
+        all.to_vec()
+    };
+    let offer = paths::offer(unit, &considered);
+    let path = offer.paths.iter().copied().find(|path| {
+        matches!(
+            path,
+            Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree
+        )
+    });
+    path.ok_or_else(|| {
+        let mut reason = "this unit has no jumper-free path into its bootloader".to_owned();
+        for note in &offer.notes {
+            reason.push_str(". ");
+            reason.push_str(note.trim_end_matches('.'));
+        }
+        UpdateError::Refused(reason)
+    })
+}
+
+/// What to do after [`UpdateError::RomSilent`]: the unit's bootloader enumerated and does not
+/// answer, and power starts it afresh.
+pub const ROM_SILENT_ADVICE: &str = "Unplug the unit and plug it back in, then try again. Without the ISP jumper it starts the image it holds; with the jumper fitted it comes back in ISP mode.";
+
+/// [`enter_bootloader`], where `stop` keeps the unit out of its bootloader until the request is
+/// sent and `cancel` stops the wait after it. `alone` is [`entry_path`]'s.
 fn enter<B: Bus>(
     bus: &B,
     unit: &Unit,
@@ -229,30 +291,7 @@ fn enter<B: Bus>(
         return Err(UpdateError::Stopped);
     }
     let before: Vec<String> = all.iter().map(|u| u.device.instance.clone()).collect();
-    let considered: Vec<Unit> =
-        if alone && bus.tells_bootloaders_apart() && unit.device.location.is_some() {
-            all.iter()
-                .filter(|u| u.device.role() != Some(Role::Bootloader))
-                .cloned()
-                .collect()
-        } else {
-            all.clone()
-        };
-    let offer = paths::offer(unit, &considered);
-    let path = offer.paths.iter().copied().find(|path| {
-        matches!(
-            path,
-            Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree
-        )
-    });
-    let Some(path) = path else {
-        let mut reason = "this unit has no jumper-free path into its bootloader".to_owned();
-        for note in &offer.notes {
-            reason.push_str(". ");
-            reason.push_str(note.trim_end_matches('.'));
-        }
-        return Err(UpdateError::Refused(reason));
-    };
+    let path = entry_path(unit, &all, alone, bus.tells_bootloaders_apart())?;
 
     progress.start(Step::EnterBootloader, 0);
     if let State::SwdJumper { .. } = unit.state {
@@ -289,7 +328,7 @@ fn enter<B: Bus>(
             ) => {
                 if let Some(odd) = dap::request_stock_bootloader(&mut link, *version)? {
                     progress.note(&format!(
-                        "Stock accepted the request, and DAP_Disconnect then answered {odd}. Waiting for the bootloader anyway."
+                        "NXP's firmware accepted the request, and DAP_Disconnect then answered {odd}. Waiting for the bootloader anyway."
                     ));
                 }
             }
@@ -298,13 +337,20 @@ fn enter<B: Bus>(
     }
 
     progress.start(Step::WaitForBootloader, 0);
-    let found = wait_until(bus, timing, timing.bootloader_appears, cancel, |devices| {
-        let new: Vec<&UsbDevice> = devices
-            .iter()
-            .filter(|d| d.role() == Some(Role::Bootloader) && !before.contains(&d.instance))
-            .collect();
-        the_one(&new, &unit.device)
-    })?;
+    let found = wait_until(
+        bus,
+        timing,
+        timing.bootloader_appears,
+        cancel,
+        Left::InIsp,
+        |devices| {
+            let new: Vec<&UsbDevice> = devices
+                .iter()
+                .filter(|d| d.role() == Some(Role::Bootloader) && !before.contains(&d.instance))
+                .collect();
+            the_one(&new, &unit.device)
+        },
+    )?;
     found.ok_or(UpdateError::NoBootloader(timing.bootloader_appears))?
 }
 
@@ -322,19 +368,32 @@ pub fn only_bootloader(devices: &[UsbDevice]) -> Result<UsbDevice, UpdateError> 
         .any(|d| d.role() == Some(Role::MiniBootloader));
     match roms.as_slice() {
         [] if mini => Err(UpdateError::Refused(
-            "the unit in ISP mode is an MCU-Link mini, a different board; this firmware is for the full MCU-Link".into(),
+            "the unit in ISP mode is an MCU-Link mini, and verge does not work with the mini"
+                .into(),
         )),
-        [_] if mini => Err(UpdateError::Refused(
-            "an MCU-Link mini is in ISP mode too. The tool flashes only while one bootloader, and no other, is attached: unplug the mini first".into(),
-        )),
+        [_] if mini => Err(UpdateError::Refused(MINI_TOO.into())),
         [rom] => Ok((*rom).clone()),
-        [] => Err(UpdateError::Refused(
-            "no unit is in ISP mode. Fit the ISP jumper, then plug the unit in: the bootloader samples the pin at reset, so a jumper fitted afterwards does nothing".into(),
-        )),
+        [] => Err(UpdateError::NoneInIsp),
         several => Err(UpdateError::Refused(format!(
-            "{} units are in ISP mode and every LPC55S69 bootloader looks the same. Unplug all but one",
-            several.len()
+            "{} units are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. Unplug all but one",
+            several.len(),
+            ports(several)
         ))),
+    }
+}
+
+const MINI_TOO: &str = "an MCU-Link mini is in ISP mode too, and the tool works with a bootloader only while no other is attached: unplug the mini first";
+
+/// The ports of `devices`, as a list.
+fn ports(devices: &[&UsbDevice]) -> String {
+    let ports: Vec<&str> = devices
+        .iter()
+        .map(|d| d.location.as_deref().unwrap_or("a port it does not report"))
+        .collect();
+    match ports.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -349,13 +408,27 @@ pub fn select_bootloader<B: Bus>(
     devices: &[UsbDevice],
     port: Option<&str>,
 ) -> Result<UsbDevice, UpdateError> {
-    let Some(port) = port else {
-        return only_bootloader(devices);
-    };
     let roms: Vec<&UsbDevice> = devices
         .iter()
         .filter(|d| d.role() == Some(Role::Bootloader))
         .collect();
+    let Some(port) = port else {
+        let mini = devices
+            .iter()
+            .any(|d| d.role() == Some(Role::MiniBootloader));
+        if let [first, _, ..] = roms.as_slice()
+            && !mini
+            && bus.tells_bootloaders_apart()
+            && let Some(at) = &first.location
+        {
+            return Err(UpdateError::Refused(format!(
+                "{} units are in ISP mode, at {}. Pick one with --port, as --port {at}, or unplug all but one",
+                roms.len(),
+                ports(&roms)
+            )));
+        }
+        return only_bootloader(devices);
+    };
     let Some(rom) = roms.iter().find(|d| d.location.as_deref() == Some(port)) else {
         return Err(UpdateError::Refused(format!(
             "no unit is in ISP mode at {port}. `verge list` names each unit's port"
@@ -382,9 +455,7 @@ pub fn flash_target<B: Bus>(
             .iter()
             .any(|d| d.role() == Some(Role::MiniBootloader))
     {
-        return Err(UpdateError::Refused(
-            "an MCU-Link mini is in ISP mode too. The tool does not flash while one is attached: unplug the mini first".into(),
-        ));
+        return Err(UpdateError::Refused(MINI_TOO.into()));
     }
     select_bootloader(bus, devices, port)
 }
@@ -402,7 +473,7 @@ fn connect<B: Bus>(
     let deadline = bus.now() + timing.rom_answers;
     let (boot, info) = loop {
         if cancel.is_cancelled() {
-            return Err(UpdateError::Cancelled);
+            return Err(UpdateError::Cancelled(Left::InIsp));
         }
         let last = match bus.open_isp(rom) {
             Ok(protocol) => {
@@ -440,6 +511,8 @@ pub struct Flashed {
     before: Vec<String>,
     /// The unit's serial from before it entered ISP mode, where the tool knew the unit.
     serial: Option<String>,
+    /// What a cancel while it restarts leaves: a flashed image, or the one it held.
+    left: Left,
 }
 
 /// Flashes the unit in ISP mode, at `port` or the only one ([`flash_target`]), verifies it, and
@@ -457,7 +530,10 @@ pub fn flash_bootloader<B: Bus>(
 
     progress.start(Step::Connect, 0);
     let (mut boot, info) = connect(bus, &rom, port, timing, cancel)?;
-    isp::program(&mut boot, image, &info, progress, cancel)?;
+    isp::program(&mut boot, image, &info, progress, cancel).map_err(|error| match error {
+        IspError::Cancelled(left) => UpdateError::Cancelled(left),
+        error => UpdateError::Isp(error),
+    })?;
     progress.start(Step::Reset, 0);
     let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
     isp::reset(&mut boot);
@@ -465,6 +541,7 @@ pub fn flash_bootloader<B: Bus>(
         rom,
         before,
         serial: None,
+        left: Left::Flashed,
     })
 }
 
@@ -483,19 +560,26 @@ pub fn wait_for_return<B: Bus>(
     // Windows a bootloader that comes back to the same port keeps its instance, so there it is
     // the unit only once it has been seen gone.
     let mut gone = false;
-    let back = wait_until(bus, timing, timing.firmware_returns, cancel, |devices| {
-        if !devices.iter().any(|d| d.instance == rom.instance) {
-            gone = true;
-        }
-        let new: Vec<&UsbDevice> = devices
-            .iter()
-            .filter(|d| d.role().is_some())
-            .filter(|d| {
-                !flashed.before.contains(&d.instance) || (gone && d.instance == rom.instance)
-            })
-            .collect();
-        the_one(&new, rom)
-    })?;
+    let back = wait_until(
+        bus,
+        timing,
+        timing.firmware_returns,
+        cancel,
+        flashed.left,
+        |devices| {
+            if !devices.iter().any(|d| d.instance == rom.instance) {
+                gone = true;
+            }
+            let new: Vec<&UsbDevice> = devices
+                .iter()
+                .filter(|d| d.role().is_some())
+                .filter(|d| {
+                    !flashed.before.contains(&d.instance) || (gone && d.instance == rom.instance)
+                })
+                .collect();
+            the_one(&new, rom)
+        },
+    )?;
     let device = match back {
         Some(found) => found?,
         None if !gone && bus.devices()?.iter().any(|d| d.instance == rom.instance) => {
@@ -663,8 +747,62 @@ pub fn reset_now<B: Bus>(
         rom,
         before,
         serial: None,
+        left: Left::Reset,
     };
     wait_for_return(bus, &flashed, timing, progress, cancel)
+}
+
+/// How long a unit [`restart`] restarts has to come back on USB.
+pub const RESTART_RETURNS: Duration = Duration::from_secs(5);
+
+/// Why [`restart`] failed. Each front end words it.
+#[derive(Debug, thiserror::Error)]
+pub enum RestartError {
+    /// The unit could not be opened to send the request.
+    #[error(transparent)]
+    Open(BusError),
+    /// The unit did not take the request.
+    #[error(transparent)]
+    Request(LinkError),
+    /// Looking at the bus for the unit's return failed.
+    #[error(transparent)]
+    Look(BusError),
+    /// The unit did not come back within [`RESTART_RETURNS`].
+    #[error("it did not come back within {} s", RESTART_RETURNS.as_secs())]
+    NoReturn,
+}
+
+/// Restarts a unit running Verge, as unplugging it would, and waits for it to come back. The
+/// request goes to the probe's USB core rather than through CMSIS-DAP, so it reaches a unit a
+/// debugger holds.
+pub fn restart<B: Bus>(bus: &B, unit: &Unit) -> Result<(), RestartError> {
+    bus.device_control_out(
+        &unit.device,
+        dap::REBOOT_REQUEST_TYPE,
+        dap::REBOOT_REQUEST,
+        dap::REBOOT_RESTART,
+        0,
+    )
+    .map_err(RestartError::Open)?
+    .map_err(RestartError::Request)?;
+    // It leaves USB, resets and enumerates again. Windows can give it back the same instance, so
+    // there it counts as back only once it has been seen gone.
+    let deadline = bus.now() + RESTART_RETURNS;
+    let mut gone = false;
+    while bus.now() < deadline {
+        bus.sleep(Duration::from_millis(100));
+        let devices = bus.devices().map_err(RestartError::Look)?;
+        match devices.iter().find(|d| d.serial == unit.device.serial) {
+            None => gone = true,
+            Some(device) if gone || device.instance != unit.device.instance => {
+                if device.role() == Some(Role::Probe) {
+                    return Ok(());
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    Err(RestartError::NoReturn)
 }
 
 /// What the bootloader of the unit in ISP mode says about itself, and the unit: the one at

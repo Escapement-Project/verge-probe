@@ -225,13 +225,17 @@ pub fn identify(link: &mut dyn DapLink) -> Result<Option<Ours>, DapError> {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EntryError {
-    #[error("stock V{0} predates the jumper-free update (V3.122 and later); use the ISP jumper")]
+    #[error(
+        "NXP's firmware V{0} predates the jumper-free update (V3.122 and later); use the ISP jumper"
+    )]
     StockTooOld(StockVersion),
     #[error(
-        "stock did not say which version it is, so the tool will not send it the update request"
+        "NXP's firmware did not say which version it is, so the tool will not send it the update request"
     )]
     StockVersionUnknown,
-    #[error("stock answered the update request with {0}, not 81 00 01; use the ISP jumper")]
+    #[error(
+        "NXP's firmware answered the update request with {0}, not 81 00 01; use the ISP jumper"
+    )]
     StockRefused(String),
     #[error("daplink-rs did not restart into its bootloader: {0}")]
     DaplinkRsRefused(String),

@@ -49,6 +49,14 @@ impl Guess {
     }
 }
 
+/// Why the tool could not ask a unit what it runs, where the system does not let this user open
+/// it ([`BusError::Denied`]).
+pub const DENIED: &str = "this user may not open it";
+
+/// Why the tool could not ask a unit what it runs, where another program holds it and Verge Aux
+/// did not answer for it.
+pub const HELD: &str = "another program has it open";
+
 /// What a unit with its SWD jumper fitted runs, as its USB descriptors say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Jumpered {
@@ -217,6 +225,24 @@ impl Unit {
         .or(self.device.serial.as_deref())
     }
 
+    /// Whether the unit runs Verge as far as the tool can tell, so takes a restart request: it
+    /// said so, its SWD jumper's descriptors say so, or a unit another program holds looks like
+    /// Verge by its USB strings. One this user may not open cannot be sent the request either.
+    #[must_use]
+    pub fn takes_restart(&self) -> bool {
+        self.verge().is_some()
+            || matches!(
+                self.state,
+                State::SwdJumper {
+                    firmware: Jumpered::Ours
+                }
+            )
+            || matches!(
+                &self.state,
+                State::Unreadable { reason, guess: Guess::Ours } if reason != DENIED
+            )
+    }
+
     /// What Verge says it is, asked over CMSIS-DAP or Verge Aux.
     #[must_use]
     pub fn verge(&self) -> Option<&Ours> {
@@ -287,11 +313,11 @@ impl fmt::Display for State {
             State::Probe {
                 firmware: Firmware::Stock { version: Some(v) },
                 ..
-            } => write!(f, "stock V{v}"),
+            } => write!(f, "NXP's firmware V{v}"),
             State::Probe {
                 firmware: Firmware::Stock { version: None },
                 ..
-            } => write!(f, "stock, version not reported"),
+            } => write!(f, "NXP's firmware, version not reported"),
             State::Probe {
                 firmware: Firmware::DaplinkRs { .. },
                 identity,
@@ -307,15 +333,15 @@ impl fmt::Display for State {
             ),
             State::Unreadable { guess, .. } => match guess {
                 Guess::Ours => write!(f, "probably Verge, could not ask"),
-                Guess::Stock(Some(v)) => write!(f, "probably stock V{v}, could not ask"),
-                Guess::Stock(None) => write!(f, "probably stock, could not ask"),
+                Guess::Stock(Some(v)) => write!(f, "probably NXP's firmware V{v}, could not ask"),
+                Guess::Stock(None) => write!(f, "probably NXP's firmware, could not ask"),
                 Guess::DaplinkRs => write!(f, "probably daplink-rs, could not ask"),
                 Guess::Unknown => write!(f, "a CMSIS-DAP firmware, could not ask"),
             },
             State::SwdJumper { firmware } => match firmware {
                 Jumpered::Ours => write!(f, "Verge, SWD jumper fitted"),
-                Jumpered::Stock(Some(v)) => write!(f, "stock V{v}, SWD jumper fitted"),
-                Jumpered::Stock(None) => write!(f, "stock, SWD jumper fitted"),
+                Jumpered::Stock(Some(v)) => write!(f, "NXP's firmware V{v}, SWD jumper fitted"),
+                Jumpered::Stock(None) => write!(f, "NXP's firmware, SWD jumper fitted"),
             },
             State::Bootloader => write!(f, "in ISP mode, waiting for an image"),
             State::MiniBootloader => write!(f, "an MCU-Link mini in ISP mode"),
@@ -379,7 +405,8 @@ fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
         Role::Probe | Role::DaplinkRs if !device.dap_v2 => match swd_jumper(&device) {
             Some(firmware) => State::SwdJumper { firmware },
             None => State::Unreadable {
-                reason: "it has no CMSIS-DAP v2 interface (stock V2.x speaks HID only)".into(),
+                reason: "it has no CMSIS-DAP v2 interface (NXP's firmware V2.x speaks HID only)"
+                    .into(),
                 guess: Guess::from_strings(&device),
             },
         },
@@ -400,10 +427,14 @@ fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
                         tracing::debug!("{device}: Verge Aux did not say what it runs: {error}");
                     }
                     State::Unreadable {
-                        reason: "another program has it open".into(),
+                        reason: HELD.into(),
                         guess: Guess::from_strings(&device),
                     }
                 }
+            },
+            Err(BusError::Denied { .. }) => State::Unreadable {
+                reason: DENIED.into(),
+                guess: Guess::from_strings(&device),
             },
             Err(error) => State::Unreadable {
                 reason: error.to_string(),
@@ -423,7 +454,7 @@ fn ask_aux<B: Bus>(bus: &B, device: &UsbDevice) -> Result<Ours, String> {
         .map_err(|error| error.to_string())?;
     dap::parse_identify(&reply)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "it answered 0x82 as stock would".to_owned())
+        .ok_or_else(|| "it answered 0x82 as NXP's firmware would".to_owned())
 }
 
 /// `DAP_Info`, then what the firmware is: vendor command 0x82 for ours or stock, and only

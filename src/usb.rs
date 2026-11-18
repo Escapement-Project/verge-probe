@@ -96,6 +96,9 @@ impl UsbBus {
             ErrorKind::Busy => BusError::Busy {
                 device: name.clone(),
             },
+            ErrorKind::PermissionDenied => BusError::Denied {
+                device: name.clone(),
+            },
             _ => open_error(error.to_string()),
         })?;
         let configuration = usb
@@ -128,6 +131,9 @@ impl UsbBus {
                         .wait()
                         .map_err(|error| match error.kind() {
                             ErrorKind::Busy => BusError::Busy {
+                                device: name.clone(),
+                            },
+                            ErrorKind::PermissionDenied => BusError::Denied {
                                 device: name.clone(),
                             },
                             _ => open_error(error.to_string()),

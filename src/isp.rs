@@ -6,7 +6,7 @@ use mboot::protocols::{CommunicationError, Protocol};
 use mboot::tags::property::{PropertyTag, PropertyTagDiscriminants};
 
 use crate::image::{Image, PAGE};
-use crate::progress::{Cancel, Progress, Step};
+use crate::progress::{Cancel, Left, Progress, Step};
 
 /// The bytes moved per bootloader command. A multiple of the page, so each write starts on a page
 /// as flash requires; also how often progress is reported and a cancel is noticed.
@@ -31,10 +31,8 @@ pub enum IspError {
         "the bootloader reports flash from 0x{start:08x} to 0x{end:08x}, and the image reaches 0x{needed:08x}"
     )]
     DoesNotFit { start: u32, end: u64, needed: u64 },
-    #[error(
-        "cancelled; the unit stays in ISP mode with a partial image, and flashing it again recovers it"
-    )]
-    Cancelled,
+    #[error("{0}")]
+    Cancelled(Left),
 }
 
 /// What the bootloader says about itself.
@@ -114,7 +112,12 @@ pub fn program<P: Protocol>(
     let mut done = 0;
     for (address, data) in pieces() {
         if cancel.is_cancelled() {
-            return Err(IspError::Cancelled);
+            let left = if done == 0 {
+                Left::InIsp
+            } else {
+                Left::Partial
+            };
+            return Err(IspError::Cancelled(left));
         }
         boot.flash_erase_region(address, data.len() as u32, INTERNAL)?;
         done += data.len() as u64;
@@ -125,7 +128,7 @@ pub fn program<P: Protocol>(
     let mut done = 0;
     for (address, data) in pieces() {
         if cancel.is_cancelled() {
-            return Err(IspError::Cancelled);
+            return Err(IspError::Cancelled(Left::Partial));
         }
         boot.write_memory(address, INTERNAL, data)?;
         done += data.len() as u64;
@@ -136,7 +139,7 @@ pub fn program<P: Protocol>(
     let mut done = 0;
     for (address, data) in pieces() {
         if cancel.is_cancelled() {
-            return Err(IspError::Cancelled);
+            return Err(IspError::Cancelled(Left::Unverified));
         }
         let read = boot.read_memory(address, data.len() as u32, INTERNAL)?;
         if read.bytes.len() != data.len() {

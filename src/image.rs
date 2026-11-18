@@ -123,6 +123,15 @@ pub enum ImageError {
     BadDeclaration { address: u32, reason: String },
 }
 
+/// An IO error's message without the "(os error 2)" Rust adds to it.
+fn without_os_code(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    match (error.raw_os_error(), text.rfind(" (os error ")) {
+        (Some(_), Some(at)) => text[..at].to_owned(),
+        _ => text,
+    }
+}
+
 /// A firmware image ready to flash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
@@ -145,7 +154,7 @@ impl Image {
     pub fn from_path(path: &Path) -> Result<Image, ImageError> {
         let bytes = std::fs::read(path).map_err(|error| ImageError::Read {
             path: path.display().to_string(),
-            reason: error.to_string(),
+            reason: without_os_code(&error),
         })?;
         Image::parse(&bytes)
     }

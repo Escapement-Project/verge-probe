@@ -179,6 +179,8 @@ pub struct SimUnit {
     pub jumper: bool,
     /// Another program holds the CMSIS-DAP interface.
     pub busy: bool,
+    /// The system does not let this user open the unit, as on Linux without the udev rules.
+    pub denied: bool,
     /// Another program holds Verge Aux.
     pub aux_busy: bool,
     /// An MCU-Link mini, whose bootloader enumerates as `1fc9:0022`.
@@ -687,6 +689,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ),
     ("busy", "Verge, held open by another program"),
     (
+        "denied",
+        "Verge, which this user may not open, as on Linux without the udev rules",
+    ),
+    (
         "arrivals",
         "an empty bench where five units are plugged in over ten seconds, for a batch",
     ),
@@ -811,6 +817,7 @@ impl SimBus {
             generation: 0,
             jumper: false,
             busy: false,
+            denied: false,
             aux_busy: false,
             mini: false,
             stale_replies: Vec::new(),
@@ -892,6 +899,10 @@ impl SimBus {
 
     pub fn set_busy(&self, unit: usize, busy: bool) {
         self.world().units[unit].busy = busy;
+    }
+
+    pub fn set_denied(&self, unit: usize, denied: bool) {
+        self.world().units[unit].denied = denied;
     }
 
     pub fn set_aux_busy(&self, unit: usize, busy: bool) {
@@ -1182,6 +1193,10 @@ impl SimBus {
                 let unit = bus.add_ours("14d05d4");
                 bus.set_busy(unit, true);
             }
+            "denied" => {
+                let unit = bus.add_ours("14d05d4");
+                bus.set_denied(unit, true);
+            }
             "arrivals" => {
                 let stock = |v: &str| SimFirmware::Stock {
                     version: StockVersion::parse(v).expect("a version like 3.172"),
@@ -1281,6 +1296,11 @@ impl Bus for SimBus {
             device: device.to_string(),
         })?;
         let u = &world.units[unit];
+        if u.denied {
+            return Err(BusError::Denied {
+                device: device.to_string(),
+            });
+        }
         if u.busy {
             return Err(BusError::Busy {
                 device: device.to_string(),
@@ -1313,6 +1333,11 @@ impl Bus for SimBus {
             device: device.to_string(),
         })?;
         let u = &world.units[unit];
+        if u.denied {
+            return Err(BusError::Denied {
+                device: device.to_string(),
+            });
+        }
         if !(matches!(u.mode, Mode::Firmware(SimFirmware::Ours { .. }))
             && matches!(
                 u.board,

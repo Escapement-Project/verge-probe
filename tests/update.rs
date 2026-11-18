@@ -9,7 +9,7 @@ use std::time::Duration;
 #[cfg(not(windows))]
 use escapement_verge_probe::detect::Jumpered;
 use escapement_verge_probe::image::{Image, PAGE};
-use escapement_verge_probe::progress::{Cancel, Progress, Step};
+use escapement_verge_probe::progress::{Cancel, Left, Progress, Step};
 use escapement_verge_probe::sim::{Mode, SimBus, SimFirmware, firmware_image};
 use escapement_verge_probe::source::{ImageVersion, Payload};
 use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
@@ -25,6 +25,8 @@ struct Steps {
     last_done: u64,
     notes: Vec<String>,
     cancel_after: Option<(Step, u64, Cancel)>,
+    /// Cancels as this step starts.
+    cancel_at: Option<(Step, Cancel)>,
 }
 
 impl Progress for Steps {
@@ -34,6 +36,11 @@ impl Progress for Steps {
     fn start(&mut self, step: Step, total: u64) {
         self.started.push((step, total));
         self.last_done = 0;
+        if let Some((at, cancel)) = &self.cancel_at
+            && *at == step
+        {
+            cancel.cancel();
+        }
     }
     fn advance(&mut self, done: u64) {
         assert!(done >= self.last_done, "progress went backwards");
@@ -481,12 +488,7 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
     };
     let result = update::flash_now(&bus, &image, None, &Timing::default(), &mut steps, &cancel);
     assert!(
-        matches!(
-            result,
-            Err(UpdateError::Isp(
-                escapement_verge_probe::isp::IspError::Cancelled
-            ))
-        ),
+        matches!(result, Err(UpdateError::Cancelled(Left::Partial))),
         "{result:?}"
     );
     assert_eq!(bus.mode(0), Mode::Bootloader);
@@ -500,6 +502,96 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
     )
     .unwrap();
     assert!(matches!(running(&outcome), Firmware::Ours(o) if o.firmware == "v0.3.0"));
+}
+
+/// A cancel says what it left on the unit, by the part of the update it landed in, and gives a
+/// command to recover it only where the unit stays in ISP mode.
+#[test]
+fn a_cancel_says_what_it_left_on_the_unit() {
+    let new = firmware_image(&ours("v0.3.0"));
+    let written: std::collections::BTreeMap<u32, Vec<u8>> =
+        expected_pages(&new).into_iter().collect();
+    // The step a cancel lands in: as it starts, or once this many bytes of it are done.
+    let cases = [
+        (Step::WaitForBootloader, None, Left::InIsp),
+        (Step::Connect, None, Left::InIsp),
+        (Step::Erase, None, Left::InIsp),
+        (Step::Erase, Some(1), Left::Partial),
+        (Step::Write, Some(1), Left::Partial),
+        (Step::Verify, Some(1), Left::Unverified),
+        (Step::Reset, None, Left::Flashed),
+        (Step::WaitForFirmware, None, Left::Flashed),
+    ];
+    for (step, after, expected) in cases {
+        let case = format!("{step:?} {after:?}");
+        let bus = SimBus::scenario("ours").unwrap();
+        let unit = the_unit(&bus, "CJ3E7A91C2");
+        let before = bus.flash(0);
+        let cancel = Cancel::new();
+        let mut steps = Steps {
+            cancel_after: after.map(|bytes| (step, bytes, cancel.clone())),
+            cancel_at: after.is_none().then(|| (step, cancel.clone())),
+            ..Steps::default()
+        };
+        let result = update::update(
+            &bus,
+            &unit,
+            Payload::new(&new, &FILE),
+            &Timing::default(),
+            &mut steps,
+            &cancel,
+        );
+        let left = match result {
+            Err(UpdateError::Cancelled(left)) => left,
+            other => panic!("{case}: {other:?}"),
+        };
+        assert_eq!(left, expected, "{case}");
+        // The unit settles: a bootloader asked for appears, a reset unit comes back.
+        bus.sleep(Duration::from_secs(5));
+        let flash = bus.flash(0);
+        match left {
+            Left::InIsp => assert_eq!(flash, before, "{case}"),
+            Left::Partial => {
+                assert_ne!(flash, before, "{case}");
+                assert_ne!(flash, written, "{case}");
+            }
+            Left::Unverified => assert_eq!(flash, written, "{case}"),
+            Left::Flashed | Left::Reset => {}
+        }
+        match bus.mode(0) {
+            Mode::Bootloader => assert!(left.in_isp(), "{case}"),
+            Mode::Firmware(firmware) => {
+                assert!(!left.in_isp(), "{case}");
+                assert_eq!(firmware, ours("v0.3.0"), "{case}");
+            }
+            Mode::Silent => panic!("{case}: the unit is off the bus"),
+        }
+        let again = "verge isp flash --file v0.3.0.s19";
+        let recovery = left.recovery(Some(again), None);
+        assert_eq!(recovery.is_some(), left.in_isp(), "{case}: {recovery:?}");
+        assert_eq!(
+            recovery.is_some_and(|text| text.contains(again)),
+            left.in_isp(),
+            "{case}"
+        );
+    }
+}
+
+/// A cancel while a reset unit restarts leaves it starting the image it held.
+#[test]
+fn a_cancel_after_a_reset_leaves_the_unit_restarting() {
+    let bus = SimBus::scenario("isp").unwrap();
+    let cancel = Cancel::new();
+    let mut steps = Steps {
+        cancel_at: Some((Step::WaitForFirmware, cancel.clone())),
+        ..Steps::default()
+    };
+    let result = update::reset_now(&bus, None, &Timing::default(), &mut steps, &cancel);
+    assert!(
+        matches!(result, Err(UpdateError::Cancelled(Left::Reset))),
+        "{result:?}"
+    );
+    assert_eq!(Left::Reset.recovery(Some("verge isp flash"), None), None);
 }
 
 #[test]
@@ -831,7 +923,7 @@ fn a_unit_known_to_be_another_board_goes_into_isp_mode_only_for_stock() {
         "{refused:?}"
     );
     update::check_entry(&pro, true).unwrap();
-    // The full MCU-Link, and a unit that does not name its board, go either way.
+    // The standalone MCU-Link, and a unit that does not name its board, go either way.
     for scenario in ["stock", "ours", "unnamed-board"] {
         let unit = detect(&SimBus::scenario(scenario).unwrap())
             .unwrap()
@@ -869,7 +961,7 @@ fn the_update_itself_checks_the_board() {
     ] {
         assert!(
             matches!(&result, Err(UpdateError::Refused(reason))
-                if reason.contains("the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only")),
+                if reason.contains("the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only")),
             "{result:?}"
         );
     }
@@ -1325,4 +1417,25 @@ fn verge_goes_back_to_daplink_rs_and_is_seen_running_it() {
         matches!(running(&outcome), Firmware::DaplinkRs { reboot: Some(r) } if r.reaches_isp()),
         "{outcome:?}"
     );
+}
+
+/// A restart reaches a unit running Verge, which comes back; anything else does not take it.
+#[test]
+fn a_restart_waits_for_the_unit_to_come_back() {
+    let bus = SimBus::scenario("ours").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    update::restart(&bus, &unit).unwrap();
+    let back = detect(&bus).unwrap().remove(0);
+    assert_eq!(back.serial(), unit.serial());
+    assert_ne!(
+        back.device.instance, unit.device.instance,
+        "a new enumeration"
+    );
+
+    let bus = SimBus::scenario("stock").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    assert!(matches!(
+        update::restart(&bus, &unit),
+        Err(update::RestartError::Request(_))
+    ));
 }

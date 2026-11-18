@@ -61,6 +61,9 @@ pub enum BusError {
     Enumerate(String),
     #[error("{device} is in use by another program")]
     Busy { device: String },
+    /// The system does not let this user open it: on Linux, the udev rules are missing.
+    #[error("this user may not open {device}")]
+    Denied { device: String },
     #[error("{device} is no longer attached")]
     Gone { device: String },
     #[error("could not open {device}: {reason}")]

@@ -88,7 +88,7 @@ fn the_bench_reads_back_as_recorded() {
         }
     }
     assert_eq!(units[0].state.to_string(), "Verge, build 14d05d4");
-    assert_eq!(units[1].state.to_string(), "stock V3.172");
+    assert_eq!(units[1].state.to_string(), "NXP's firmware V3.172");
 }
 
 /// A stock version other than the recorded one must not read back as the recorded strings.
@@ -158,13 +158,13 @@ fn a_pro_held_by_a_debugger_is_asked_over_verge_aux() {
         Some(escapement_verge_probe::version::Build::parse("26ea505"))
     );
     assert_eq!(units[0].serial(), units[0].device.serial.as_deref());
+    // No update while the debugger holds it, and not the jumper either: closing it is enough.
     let offer = offer(&units[0], &units);
-    assert_eq!(offer.paths, [Path::Jumper]);
+    assert_eq!(offer.paths, []);
     assert!(
-        offer
-            .notes
-            .iter()
-            .any(|n| n.contains("holds its CMSIS-DAP"))
+        offer.notes[0].starts_with("Close the debugger first."),
+        "{:?}",
+        offer.notes
     );
 
     bus.set_aux_busy(0, true);
@@ -266,7 +266,7 @@ fn stocks_product_string_names_the_board() {
 #[test]
 fn a_label_names_the_board_without_an_article() {
     for (hardware, label) in [
-        (Hardware::Board(Board::McuLink), "MCU-Link"),
+        (Hardware::Board(Board::McuLink), "standalone MCU-Link"),
         (Hardware::Board(Board::McuLinkPro), "MCU-Link Pro"),
         (
             Hardware::from_stock_product("MCU-LINK MR (r0C3) CMSIS-DAP V3.172"),
@@ -346,7 +346,7 @@ fn a_unit_with_its_swd_jumper_is_read_from_its_usb_descriptors() {
             Jumpered::Stock(v3172),
             Hardware::Board(Board::McuLink),
             vec![Path::Jumper],
-            "stock V3.172, SWD jumper fitted",
+            "NXP's firmware V3.172, SWD jumper fitted",
         ),
     ] {
         let bus = SimBus::scenario(scenario).unwrap();
@@ -385,7 +385,7 @@ fn old_stock_with_its_swd_jumper_is_not_told_to_take_it_off() {
     let offer = offer(&units[0], &units);
     assert_eq!(offer.paths, [Path::Jumper]);
     assert!(
-        offer.notes[0].contains("Stock V3.108 has no jumper-free update"),
+        offer.notes[0].contains("NXP's firmware V3.108 has no jumper-free update"),
         "{:?}",
         offer.notes
     );
@@ -479,4 +479,20 @@ fn naming_another_unit_leaves_daplink_rs_unopened() {
         ),
         "{unit:?}"
     );
+}
+
+/// A unit running Verge takes a restart request even while another program holds it, as its
+/// product string says; one this user may not open, or one running NXP's firmware, does not.
+#[test]
+fn a_restart_goes_to_verge_unless_the_unit_cannot_be_opened() {
+    let takes = |name: &str| {
+        detect(&SimBus::scenario(name).unwrap())
+            .unwrap()
+            .remove(0)
+            .takes_restart()
+    };
+    assert!(takes("ours"));
+    assert!(takes("busy"));
+    assert!(!takes("denied"));
+    assert!(!takes("stock"));
 }

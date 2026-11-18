@@ -174,12 +174,18 @@ impl Http for Ureq {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReleaseError {
-    #[error("{repo} has no published release{}", tag.as_ref().map(|t| format!(" tagged {t}")).unwrap_or_default())]
+    #[error("{repo} has {}", match tag {
+        Some(tag) => format!("no published release tagged {tag}"),
+        None => "no release yet".to_owned(),
+    })]
     NotFound { repo: String, tag: Option<String> },
     #[error(
         "GitHub refused the request (HTTP {0}): the rate limit for unauthenticated use, or a private repository without a token"
     )]
     Refused(u16),
+    /// GitHub turned down the token the tool sent. A public release needs none.
+    #[error("GitHub refused the token it was given (HTTP {0}). Public releases need none")]
+    TokenRefused(u16),
     #[error(transparent)]
     Http(HttpError),
     #[error(
@@ -409,6 +415,12 @@ impl<H: Http> GitHub<H> {
         &self.repo
     }
 
+    /// Whether this build can check a release's signature, and so install one.
+    #[must_use]
+    pub fn has_key(&self) -> bool {
+        self.key.is_some()
+    }
+
     fn get(&self, url: &str, accept: &str) -> Result<Vec<u8>, HttpError> {
         let auth = self.token.as_ref().map(|token| format!("Bearer {token}"));
         let mut headers = vec![
@@ -430,6 +442,9 @@ impl<H: Http> GitHub<H> {
                     repo: self.repo.to_string(),
                     tag: tag.map(str::to_owned),
                 },
+                HttpError::Status { status: 401, .. } if self.token.is_some() => {
+                    ReleaseError::TokenRefused(401)
+                }
                 HttpError::Status {
                     status: status @ (401 | 403 | 429),
                     ..
@@ -453,12 +468,27 @@ impl<H: Http> GitHub<H> {
         self.release(&url, None)
     }
 
+    /// The release tagged `tag`. Release tags start with "v", so a tag given without it that
+    /// names no release is looked for with it.
     pub fn tagged(&self, tag: &str) -> Result<Release, ReleaseError> {
-        let url = format!(
-            "{API}/repos/{}/{}/releases/tags/{tag}",
-            self.repo.owner, self.repo.name
-        );
-        self.release(&url, Some(tag))
+        let url = |tag: &str| {
+            format!(
+                "{API}/repos/{}/{}/releases/tags/{tag}",
+                self.repo.owner, self.repo.name
+            )
+        };
+        match self.release(&url(tag), Some(tag)) {
+            Err(ReleaseError::NotFound { .. }) if !tag.starts_with('v') => self
+                .release(&url(&format!("v{tag}")), Some(tag))
+                .map_err(|error| match error {
+                    ReleaseError::NotFound { repo, .. } => ReleaseError::NotFound {
+                        repo,
+                        tag: Some(tag.to_owned()),
+                    },
+                    error => error,
+                }),
+            found => found,
+        }
     }
 
     fn fetch(&self, asset: &Asset) -> Result<Vec<u8>, ReleaseError> {

@@ -7,11 +7,12 @@ use serde::Serialize;
 
 use crate::dap::Ours;
 use crate::detect::{Hardware, State, Unit};
+use crate::image::{Image, ImageError};
 
 /// A board this tool knows by number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Board {
-    /// The plain MCU-Link.
+    /// The standalone MCU-Link.
     McuLink,
     McuLinkPro,
 }
@@ -41,7 +42,7 @@ impl Board {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Board::McuLink => "MCU-Link",
+            Board::McuLink => "standalone MCU-Link",
             Board::McuLinkPro => "MCU-Link Pro",
         }
     }
@@ -50,7 +51,7 @@ impl Board {
     #[must_use]
     pub fn a(self) -> &'static str {
         match self {
-            Board::McuLink => "a full MCU-Link",
+            Board::McuLink => "a standalone MCU-Link",
             Board::McuLinkPro => "an MCU-Link Pro",
         }
     }
@@ -65,15 +66,12 @@ impl Board {
 
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Board::McuLink => "full MCU-Link",
-            Board::McuLinkPro => "MCU-Link Pro",
-        })
+        f.write_str(self.name())
     }
 }
 
-/// The boards an image runs on, to follow "built for" in a sentence: "the full MCU-Link only",
-/// or "the full MCU-Link and the MCU-Link Pro".
+/// The boards an image runs on, to follow "built for" in a sentence: "the standalone MCU-Link
+/// only", or "the standalone MCU-Link and the MCU-Link Pro".
 #[must_use]
 pub fn built_for(boards: &[Board]) -> String {
     let names: Vec<String> = boards.iter().map(|board| format!("the {board}")).collect();
@@ -82,4 +80,17 @@ pub fn built_for(boards: &[Board]) -> String {
         [one] => format!("{one} only"),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// What `image` says about its boards, to follow "the image" in a sentence: "is built for the
+/// MCU-Link Pro only". An image with no declaration runs on the standalone MCU-Link only, as a
+/// Verge image; the clause says that is what verge takes it for.
+pub fn image_is_for(image: &Image) -> Result<String, ImageError> {
+    Ok(match image.declaration()? {
+        Some(_) => format!("is built for {}", built_for(&image.boards()?)),
+        None => format!(
+            "declares no boards, so verge takes it as a Verge image for the {} only",
+            Board::McuLink
+        ),
+    })
 }

@@ -25,6 +25,7 @@ use crate::ids::Role;
 use crate::image::{Image, ImageError};
 use crate::paths::{self, Path};
 use crate::progress::{Cancel, Progress};
+use crate::release::Repo;
 use crate::source::{self, ImageVersion, Payload, Source};
 use crate::update::{self, Outcome, Timing, UpdateError};
 use crate::version::{Build, Relation, StockVersion};
@@ -67,8 +68,10 @@ impl Filter {
         let mut firmware = Vec::new();
         match self.stock {
             StockFilter::None => {}
-            StockFilter::Any => firmware.push("stock".to_owned()),
-            StockFilter::Below(version) => firmware.push(format!("stock below V{version}")),
+            StockFilter::Any => firmware.push("NXP's firmware".to_owned()),
+            StockFilter::Below(version) => {
+                firmware.push(format!("NXP's firmware older than V{version}"));
+            }
         }
         match self.ours {
             OursFilter::None => {}
@@ -121,8 +124,9 @@ pub enum ArmError {
         "the image carries no Verge version, so the batch cannot tell which units running Verge are older than it"
     )]
     OursUndated,
-    #[error("the batch takes the {board}, and the image is built for {built_for}")]
-    NotForBoard { board: Board, built_for: String },
+    /// `image` follows "the image": what [`board::image_is_for`] says.
+    #[error("the batch takes the {board}, and the image {image}")]
+    NotForBoard { board: Board, image: String },
     #[error(transparent)]
     Image(#[from] ImageError),
 }
@@ -135,6 +139,8 @@ pub struct Armed {
     pub version: ImageVersion,
     /// Where it came from, so that advice can name it.
     pub source: Source,
+    /// The repository a release came from, which advice names where it is not the default.
+    pub repo: Repo,
 }
 
 impl Armed {
@@ -162,7 +168,7 @@ pub fn check(filter: &Filter, image: &Image, version: &ImageVersion) -> Result<(
     } else {
         Err(ArmError::NotForBoard {
             board: filter.board,
-            built_for: board::built_for(&boards),
+            image: board::image_is_for(image)?,
         })
     }
 }
@@ -181,7 +187,7 @@ pub enum Verdict {
 pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
     match &unit.state {
         State::MiniBootloader => {
-            return Verdict::Skip("an MCU-Link mini, a different board".into());
+            return Verdict::Skip("an MCU-Link mini, which verge does not work with".into());
         }
         State::Unreadable { reason, .. } => {
             return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
@@ -203,7 +209,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             firmware: Jumpered::Stock(_),
         } => {
             return Verdict::Skip(
-                "its SWD jumper is fitted, which takes away the interface stock's update request goes through".into(),
+                "its SWD jumper is fitted, which takes away the interface NXP's update request goes through".into(),
             );
         }
         // It names no board, so no batch's board filter could take it.
@@ -280,15 +286,15 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
             }
             match (filter.stock, running) {
                 (StockFilter::None, _) => {
-                    Verdict::Skip("runs stock, which this batch does not take".into())
+                    Verdict::Skip("runs NXP's firmware, which this batch does not take".into())
                 }
                 (StockFilter::Any, _) => Verdict::Take,
                 (StockFilter::Below(limit), Some(running)) if *running < limit => Verdict::Take,
-                (StockFilter::Below(limit), Some(running)) => {
-                    Verdict::Skip(format!("runs stock V{running}, not below V{limit}"))
-                }
+                (StockFilter::Below(limit), Some(running)) => Verdict::Skip(format!(
+                    "runs NXP's firmware V{running}, not older than V{limit}"
+                )),
                 (StockFilter::Below(_), None) => {
-                    Verdict::Skip("stock did not report its version".into())
+                    Verdict::Skip("NXP's firmware did not report its version".into())
                 }
             }
         }
@@ -491,6 +497,8 @@ pub trait Observer: Progress {
     fn unplug(&mut self, _port: &str, _blinking: bool) {}
     /// The batch pauses, saying why, or resumes with `None`.
     fn paused(&mut self, _reason: Option<&str>) {}
+    /// The batch has no unit to start, and waits a poll before it looks again.
+    fn idle(&mut self, _tally: &Tally) {}
 }
 
 /// Ignores everything.
@@ -630,6 +638,8 @@ pub struct Batch<'b, B: Bus> {
     entries: Vec<Entry>,
     queue: VecDeque<String>,
     paused: Option<String>,
+    /// The port of the unit the batch waits on because it failed and is in ISP mode.
+    failed_in_isp: Option<String>,
     records: Vec<Record>,
     stop: Cancel,
     cancel: Cancel,
@@ -671,6 +681,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
             entries: Vec::new(),
             queue: VecDeque::new(),
             paused: None,
+            failed_in_isp: None,
             records: Vec::new(),
             stop,
             cancel,
@@ -708,6 +719,14 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
     #[must_use]
     pub fn paused(&self) -> Option<&str> {
         self.paused.as_deref()
+    }
+
+    /// The unit the batch waits on because it failed and is in ISP mode, for a frontend that
+    /// words that wait its own way.
+    #[must_use]
+    pub fn failed_in_isp(&self) -> Option<&Entry> {
+        let at = self.failed_in_isp.as_deref()?;
+        self.entries.iter().find(|e| e.port == at)
     }
 
     /// Every unit the batch has met, each once, by how it ended, including those unplugged since;
@@ -871,7 +890,11 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                 match entry.map(|e| &e.status) {
                     Some(Status::Waiting) => None,
                     Some(Status::Failed(_)) => {
-                        let again = source::flash_command(&self.armed.source, &self.armed.version);
+                        let again = source::flash_command_in(
+                            &self.armed.source,
+                            &self.armed.version,
+                            &self.armed.repo,
+                        );
                         Some(match entry.map(|e| &e.hardware) {
                             Some(Hardware::Board(board)) => format!(
                                 "The unit at {at}, {}, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `{again}`.",
@@ -899,6 +922,28 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                 several.len()
             )),
         }
+    }
+
+    /// The port of the one bootloader attached, where it is a unit of this batch that failed:
+    /// the wait [`Batch::guard`] gives that reason for, behind the waits it puts first.
+    fn failed_rom(&self, devices: &[UsbDevice]) -> Option<String> {
+        if devices
+            .iter()
+            .any(|d| d.location.is_none() || d.role() == Some(Role::MiniBootloader))
+        {
+            return None;
+        }
+        let mut roms = devices
+            .iter()
+            .filter(|d| d.role() == Some(Role::Bootloader));
+        let (Some(rom), None) = (roms.next(), roms.next()) else {
+            return None;
+        };
+        let at = port(rom);
+        self.entries
+            .iter()
+            .any(|e| e.port == at && matches!(e.status, Status::Failed(_)))
+            .then_some(at)
     }
 
     /// The next unit to start: a waiting bootloader first, since it blocks every other entry.
@@ -1033,6 +1078,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
         }
 
         let paused = self.guard(&devices);
+        self.failed_in_isp = paused.as_ref().and_then(|_| self.failed_rom(&devices));
         if paused != self.paused {
             observer.paused(paused.as_deref());
             self.paused = paused;
@@ -1045,6 +1091,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
             return self.run(&at, observer);
         }
         self.blink();
+        observer.idle(&self.tally());
         self.bus.sleep(self.timing.poll);
         Ok(())
     }
@@ -1149,6 +1196,22 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
             }
             Ok(Outcome::NotRestarted { maybe_jumper }) => {
                 (Status::NotRestarted { maybe_jumper }, None)
+            }
+            Err(UpdateError::Cancelled(left)) => {
+                let again = source::flash_command_in(
+                    &self.armed.source,
+                    &self.armed.version,
+                    &self.armed.repo,
+                );
+                let board = match unit.hardware() {
+                    Hardware::Board(board) => Some(board),
+                    _ => None,
+                };
+                let reason = match left.recovery(Some(&again), board) {
+                    Some(recovery) => format!("{left}. {recovery}"),
+                    None => format!("{left}."),
+                };
+                (Status::Failed(reason), None)
             }
             Err(error) => (Status::Failed(error.to_string()), None),
         };

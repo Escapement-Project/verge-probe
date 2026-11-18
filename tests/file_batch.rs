@@ -41,6 +41,7 @@ fn a_failure_stays_in_the_tally_when_another_unit_takes_its_port() {
         name: "a file".into(),
         version: ImageVersion::Unknown,
         source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
+        repo: Default::default(),
     };
     let filter = Filter {
         board: Board::McuLink,
@@ -91,6 +92,7 @@ fn a_failure_on_stock_stays_in_the_tally_when_a_unit_running_ours_takes_its_port
         name: "a file".into(),
         version: ImageVersion::Unknown,
         source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
+        repo: Default::default(),
     };
     let filter = Filter {
         board: Board::McuLink,
@@ -146,6 +148,7 @@ fn another_unit_running_ours_on_the_port_is_a_unit_of_its_own() {
         name: "a file".into(),
         version: ImageVersion::Unknown,
         source: escapement_verge_probe::Source::File("mculink_cjtag.s19".into()),
+        repo: Default::default(),
     };
     let filter = Filter {
         board: Board::McuLink,

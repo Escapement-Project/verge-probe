@@ -56,13 +56,18 @@ impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Path::OursJumperFree => "jumper-free (Verge)",
-            Path::StockJumperFree => "jumper-free (stock)",
+            Path::StockJumperFree => "jumper-free (NXP's firmware)",
             Path::DaplinkRsJumperFree => "jumper-free (daplink-rs)",
             Path::Jumper => "ISP jumper",
             Path::FlashNow => "flash now",
         })
     }
 }
+
+/// Where Getting started says how to let a user open the probe on Linux: "USB permissions on
+/// Linux".
+pub const USB_PERMISSIONS: &str =
+    "https://escapement-project.github.io/verge/docs/getting-started/#usb-permissions-on-linux";
 
 /// Said before flashing a unit that was in ISP mode already. A jumper-free update flashes the
 /// bootloader that appears on the port of the unit it restarted, so it needs no such warning.
@@ -84,45 +89,89 @@ impl Offer {
     }
 }
 
-/// The paths `unit` allows, given every attached unit.
+/// Where an offer with no path names the unit's ports.
+fn ports(units: &[&Unit]) -> String {
+    let ports: Vec<&str> = units
+        .iter()
+        .map(|unit| {
+            unit.device
+                .location
+                .as_deref()
+                .unwrap_or("a port it does not report")
+        })
+        .collect();
+    match ports.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Why a running unit waits while `bootloaders` and `minis` are attached: the tool flashes only
+/// while one bootloader is, and an update or the jumper would make another.
+fn waits_for(bootloaders: &[&Unit], minis: &[&Unit]) -> String {
+    match (bootloaders, minis) {
+        (_, [_, ..]) => format!(
+            "An MCU-Link mini is in ISP mode, at {}. Unplug it, then update this one: the tool works with a bootloader only while no other is attached.",
+            ports(minis)
+        ),
+        ([_], []) => format!(
+            "Another unit is in ISP mode, at {}. Flash that one or unplug it, then update this one: the tool flashes only while one bootloader is attached.",
+            ports(bootloaders)
+        ),
+        (_, []) => format!(
+            "{} other units are in ISP mode, at {}. Flash them or unplug them, then update this one: the tool flashes only while one bootloader is attached.",
+            bootloaders.len(),
+            ports(bootloaders)
+        ),
+    }
+}
+
+/// Whether a unit the tool could not ask may have a jumper-free path once it can be asked: what
+/// its USB strings suggest it runs has one.
+#[must_use]
+pub fn asking_again_may_free(guess: &Guess) -> bool {
+    matches!(guess, Guess::Ours | Guess::DaplinkRs)
+        || matches!(guess, Guess::Stock(Some(v)) if v.has_jumper_free_update())
+}
+
+/// The paths `unit` allows, given every attached unit. An offer with no path has a note first
+/// that says why.
 ///
 /// Every LPC55S69 ROM enumerates alike, so the tool flashes a bootloader only when it is the only
-/// one, and starts a jumper-free entry only when no other unit is in ISP mode.
+/// one, and offers a running unit no path while another unit is in ISP mode: either path would
+/// put a second one there.
 #[must_use]
 pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
-    let in_isp = all.iter().filter(|other| other.is_bootloader()).count();
-    let minis = all
+    let bootloaders: Vec<&Unit> = all.iter().filter(|other| other.is_bootloader()).collect();
+    let minis: Vec<&Unit> = all
         .iter()
         .filter(|other| other.state == State::MiniBootloader)
-        .count();
+        .collect();
+    let in_isp = bootloaders.len();
     let mut offer = Offer::default();
-    let jumper_free = |offer: &mut Offer, path: Path| {
-        if in_isp + minis == 0 {
-            offer.paths.push(path);
-        } else {
-            offer.notes.push(
-                "Another unit is in ISP mode, so the jumper-free path waits until it is flashed or unplugged: the tool flashes only while one bootloader, and no other, is attached."
-                    .into(),
-            );
-        }
-    };
+    let running = !matches!(unit.state, State::Bootloader | State::MiniBootloader);
+    if running && in_isp + minis.len() > 0 {
+        offer.notes.push(waits_for(&bootloaders, &minis));
+        return offer;
+    }
     match &unit.state {
         State::Probe {
             firmware: Firmware::Ours(_),
             ..
-        } => jumper_free(&mut offer, Path::OursJumperFree),
+        } => offer.paths.push(Path::OursJumperFree),
         State::Probe {
             firmware: Firmware::Stock { version },
             ..
         } => match version {
             Some(version) if version.has_jumper_free_update() => {
-                jumper_free(&mut offer, Path::StockJumperFree);
+                offer.paths.push(Path::StockJumperFree);
             }
             Some(version) => offer.notes.push(format!(
-                "Stock V{version} has no jumper-free update. NXP added it in V3.122."
+                "NXP's firmware V{version} has no jumper-free update. NXP added it in V3.122."
             )),
             None => offer.notes.push(
-                "Stock did not report its version, so the tool will not try the jumper-free update.".into(),
+                "NXP's firmware did not report its version, so the tool will not try the jumper-free update.".into(),
             ),
         },
         State::Probe {
@@ -130,7 +179,7 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
             ..
         } => match reboot {
             Some(reboot) if reboot.reaches_isp() => {
-                jumper_free(&mut offer, Path::DaplinkRsJumperFree);
+                offer.paths.push(Path::DaplinkRsJumperFree);
             }
             Some(reboot) if reboot.kind == crate::daplink_rs::KIND_NONE => offer.notes.push(
                 "This daplink-rs build has no bootloader to restart into.".into(),
@@ -142,21 +191,33 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 "This daplink-rs build has no command to restart into its bootloader.".into(),
             ),
         },
+        // The bootloader would refuse the same user, so no path is open until it may.
+        State::Unreadable { reason, .. } if reason == crate::detect::DENIED => {
+            offer.notes.push(if cfg!(target_os = "linux") {
+                format!(
+                    "This user may not open the unit. The udev rules in Getting started let it: {USB_PERMISSIONS}"
+                )
+            } else {
+                "This user may not open the unit.".to_owned()
+            });
+            return offer;
+        }
         State::Unreadable { reason, guess } => {
             offer
                 .notes
                 .push(format!("The tool could not ask this unit what it runs: {reason}."));
-            if matches!(guess, Guess::Ours | Guess::DaplinkRs)
-                || matches!(guess, Guess::Stock(Some(v)) if v.has_jumper_free_update())
-            {
+            if asking_again_may_free(guess) {
                 offer.notes.push(
                     "Close whatever has it open and look again for the jumper-free path.".into(),
                 );
             }
         }
-        State::Held { .. } => offer.notes.push(
-            "Another program holds its CMSIS-DAP interface, which the jumper-free update goes through. Close it and look again.".into(),
-        ),
+        State::Held { .. } => {
+            offer.notes.push(
+                "Close the debugger first. Another program holds its CMSIS-DAP interface, and the tool does not update a unit in use.".into(),
+            );
+            return offer;
+        }
         State::SwdJumper {
             firmware: Jumpered::Ours,
         } => {
@@ -168,29 +229,37 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                     "On Windows the tool can send the restart request only through that interface. Take the SWD jumper off to update the unit without the ISP jumper.".into(),
                 );
             } else {
-                jumper_free(&mut offer, Path::OursJumperFree);
+                offer.paths.push(Path::OursJumperFree);
             }
         }
         State::SwdJumper {
             firmware: Jumpered::Stock(version),
         } => offer.notes.push(match version {
             Some(version) if version.has_jumper_free_update() => {
-                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface that stock's jumper-free update goes through: unplug the unit, take the SWD jumper off and plug it back in to use that update.".into()
+                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface that NXP's jumper-free update goes through: unplug the unit, take the SWD jumper off and plug it back in to use that update.".into()
             }
             Some(version) => format!(
-                "The SWD jumper is fitted. Stock V{version} has no jumper-free update either way. NXP added it in V3.122."
+                "The SWD jumper is fitted. NXP's firmware V{version} has no jumper-free update either way. NXP added it in V3.122."
             ),
-            None => "The SWD jumper is fitted, and stock's product string gives no version, so the tool does not know whether it has a jumper-free update.".into(),
+            None => "The SWD jumper is fitted, and NXP's product string gives no version, so the tool does not know whether it has a jumper-free update.".into(),
         }),
         State::Bootloader if in_isp > 1 => {
+            // Only Linux ties a bootloader to its port (`Bus::tells_bootloaders_apart`).
+            let pick = match &unit.device.location {
+                Some(port) if cfg!(target_os = "linux") => format!(
+                    "`verge isp flash --port {port}` flashes this one, or unplug all but one."
+                ),
+                _ => "Unplug all but one.".to_owned(),
+            };
             offer.notes.push(format!(
-                "{in_isp} units are in ISP mode and every LPC55S69 bootloader looks the same. Unplug all but one."
+                "{in_isp} units are in ISP mode, at {}, and every LPC55S69 bootloader looks the same. {pick}",
+                ports(&bootloaders),
             ));
             return offer;
         }
-        State::Bootloader if minis > 0 => {
+        State::Bootloader if !minis.is_empty() => {
             offer.notes.push(
-                "An MCU-Link mini is in ISP mode too. The tool flashes only while one bootloader, and no other, is attached: unplug the mini first."
+                "An MCU-Link mini is in ISP mode too, and the tool works with a bootloader only while no other is attached: unplug the mini first."
                     .into(),
             );
             return offer;
@@ -200,9 +269,9 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
             return offer;
         }
         State::MiniBootloader => {
-            offer.notes.push(
-                "This is an MCU-Link mini, a different board. This firmware is for the full MCU-Link.".into(),
-            );
+            offer
+                .notes
+                .push("verge does not work with the MCU-Link mini.".into());
             return offer;
         }
     }
@@ -286,20 +355,56 @@ mod tests {
         assert!(offer.notes[0].contains("2 units are in ISP mode"));
     }
 
+    /// The jumper would put a second unit in ISP mode as surely as the jumper-free entry, so
+    /// neither is offered: the note says what the unit waits for.
     #[test]
-    fn a_bootloader_elsewhere_holds_back_jumper_free_entry() {
-        for probe in [ours(), stock(172)] {
+    fn a_bootloader_elsewhere_holds_back_every_path() {
+        for probe in [ours(), stock(172), stock(108)] {
             let all = [probe.clone(), unit(State::Bootloader)];
-            assert_eq!(offer(&probe, &all).paths, [Path::Jumper]);
+            let offer = offer(&probe, &all);
+            assert_eq!(offer.paths, [], "{}", probe.state);
+            assert!(
+                offer.notes[0].starts_with("Another unit is in ISP mode"),
+                "{:?}",
+                offer.notes
+            );
         }
     }
 
     #[test]
-    fn a_mini_elsewhere_holds_back_jumper_free_entry_too() {
-        for probe in [ours(), stock(172)] {
+    fn a_mini_elsewhere_holds_back_every_path_too() {
+        for probe in [ours(), stock(172), stock(108)] {
             let all = [probe.clone(), unit(State::MiniBootloader)];
-            assert_eq!(offer(&probe, &all).paths, [Path::Jumper]);
+            let offer = offer(&probe, &all);
+            assert_eq!(offer.paths, [], "{}", probe.state);
+            assert!(
+                offer.notes[0].starts_with("An MCU-Link mini is in ISP mode"),
+                "{:?}",
+                offer.notes
+            );
         }
+    }
+
+    /// A unit a debugger holds is not sent to the jumper: closing the debugger is enough.
+    #[test]
+    fn a_held_unit_waits_for_its_debugger() {
+        let held = unit(State::Held {
+            ours: Ours {
+                version: 2,
+                capabilities: 0,
+                firmware: "14d05d4".into(),
+                board: None,
+                scan_formats: 0,
+                extended_capabilities: 0,
+            },
+        });
+        let offer = offer(&held, std::slice::from_ref(&held));
+        assert_eq!(offer.paths, []);
+        assert!(
+            offer.notes[0].starts_with("Close the debugger first."),
+            "{:?}",
+            offer.notes
+        );
     }
 
     #[test]

@@ -143,6 +143,7 @@ fn release() -> Armed {
         name: "release v0.3.0".into(),
         version: ImageVersion::Ours("v0.3.0".into()),
         source: Source::Release(None),
+        repo: Default::default(),
     }
 }
 
@@ -282,7 +283,7 @@ fn a_failure_does_not_stop_the_batch_and_its_bootloader_is_named() {
     // In ISP mode nothing tells the board, so the pause names it and the batch's own image.
     let paused = batch.paused().unwrap();
     assert!(
-        paused.contains("The unit at 1-1, a full MCU-Link, failed and is in ISP mode"),
+        paused.contains("The unit at 1-1, a standalone MCU-Link, failed and is in ISP mode"),
         "{paused}"
     );
     assert!(
@@ -429,7 +430,7 @@ fn the_filter_takes_only_what_it_names() {
         Status::Skipped(reason) => reason,
         other => panic!("{port}: {other:?}"),
     };
-    assert!(skipped("1-1").contains("not below V3.172"));
+    assert!(skipped("1-1").contains("not older than V3.172"));
     assert_eq!(status(&batch, "1-2"), Status::Updated);
     assert!(skipped("1-3").contains("does not take"));
     // Below the limit, but with no jumper-free update of its own.
@@ -467,7 +468,7 @@ fn each_unit_gets_a_record_line() {
     assert_eq!(json["port"], "1-1");
     assert_eq!(json["result"], "updated");
     assert_eq!(json["serial_before"], "QK7RM2VTX8D41");
-    assert_eq!(json["firmware_before"], "stock V3.172");
+    assert_eq!(json["firmware_before"], "NXP's firmware V3.172");
     assert_eq!(json["firmware_after"], "Verge, build v0.3.0");
     assert!(json["serial_after"].as_str().unwrap().starts_with("CJ"));
     assert!(json["time"].as_str().unwrap().ends_with('Z'));
@@ -614,7 +615,7 @@ fn a_batch_does_not_take_ours_on_a_pro() {
     drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
     assert_eq!(
         status(&batch, "1-1"),
-        Status::Skipped("an MCU-Link Pro, not a full MCU-Link".into())
+        Status::Skipped("an MCU-Link Pro, not a standalone MCU-Link".into())
     );
     assert_eq!(status(&batch, "1-2"), Status::Updated);
     assert!(!bus.log().iter().any(|l| l.starts_with("1-1: control")));
@@ -1006,6 +1007,7 @@ fn a_batch_that_cannot_date_ours_does_not_arm() {
         name: "stock V3.172".into(),
         version: ImageVersion::Stock(StockVersion::parse("3.172").unwrap()),
         source: Source::Stock(None),
+        repo: Default::default(),
     };
     let file = Armed {
         version: ImageVersion::Unknown,
@@ -1060,7 +1062,7 @@ fn a_batch_for_the_pro_takes_pros_with_an_image_that_declares_it() {
         refused.err(),
         Some(ArmError::NotForBoard {
             board: Board::McuLinkPro,
-            built_for: "the full MCU-Link only".into()
+            image: "declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only".into()
         })
     );
 
@@ -1091,7 +1093,7 @@ fn a_batch_for_the_pro_takes_pros_with_an_image_that_declares_it() {
     assert_eq!(status(&batch, "1-1"), Status::Updated);
     assert_eq!(
         status(&batch, "1-2"),
-        Status::Skipped("a full MCU-Link, not an MCU-Link Pro".into())
+        Status::Skipped("a standalone MCU-Link, not an MCU-Link Pro".into())
     );
     let back = escapement_verge_probe::detect(&bus).unwrap().remove(0);
     assert_eq!(
@@ -1511,4 +1513,126 @@ fn a_batch_skips_daplink_rs_and_says_why() {
         judge(&units[0], &any, &ImageVersion::Unknown),
         Verdict::Skip("runs daplink-rs, which names no board, so a batch does not take it".into())
     );
+}
+
+/// A cancel during a unit's flash ends its record with what the cancel left and the command that
+/// flashes the batch's image again, naming the board.
+#[test]
+fn a_cancelled_unit_is_recorded_with_its_recovery() {
+    struct CancelAtWrite {
+        records: Vec<Record>,
+        cancel: Cancel,
+    }
+    impl Progress for CancelAtWrite {
+        fn start(&mut self, step: escapement_verge_probe::Step, _: u64) {
+            if step == escapement_verge_probe::Step::Write {
+                self.cancel.cancel();
+            }
+        }
+    }
+    impl Observer for CancelAtWrite {
+        fn record(&mut self, record: &Record) {
+            self.records.push(record.clone());
+        }
+    }
+    let bus = SimBus::default();
+    let cancel = Cancel::new();
+    // From another repository, which the recovery command has to name to find the same release.
+    let armed = Armed {
+        repo: "someone/mculink-verge".parse().unwrap(),
+        ..release()
+    };
+    let mut batch = Batch::arm(
+        &bus,
+        armed,
+        filter(),
+        Timing::default(),
+        Cancel::new(),
+        cancel.clone(),
+        None,
+    )
+    .unwrap();
+    let mut observer = CancelAtWrite {
+        records: Vec::new(),
+        cancel,
+    };
+    batch.step(&mut observer).unwrap();
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    while bus.now() < Duration::from_secs(30) && observer.records.is_empty() {
+        batch.step(&mut observer).unwrap();
+    }
+    let record = &observer.records[0];
+    assert_eq!(record.result, Settled::Failed);
+    let reason = record.reason.as_deref().unwrap();
+    assert!(
+        reason.starts_with(
+            "stopped during the flash: the unit is in ISP mode, with a partial image."
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(
+            "which is built for a standalone MCU-Link: `verge isp flash --release v0.3.0 --repo someone/mculink-verge`"
+        ),
+        "{reason}"
+    );
+}
+
+/// A frontend that words the wait for a failed unit its own way finds that unit, and only while
+/// the batch waits on it.
+#[test]
+fn the_failed_unit_in_isp_mode_the_batch_waits_on_is_named() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let a = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.set_fail_writes(a, true);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert!(batch.paused().is_some());
+    let failed = batch.failed_in_isp().expect("the failed unit");
+    assert_eq!(failed.port, "1-1");
+    assert!(matches!(failed.status, Status::Failed(_)));
+
+    // A second unit in ISP mode beside it: the batch waits on both, and on neither by name.
+    let b = bus.add_bootloader(false);
+    batch.step(&mut seen).unwrap();
+    assert!(batch.paused().is_some());
+    assert!(batch.failed_in_isp().is_none());
+    bus.unplug(b);
+    batch.step(&mut seen).unwrap();
+    assert_eq!(batch.failed_in_isp().map(|e| e.port.as_str()), Some("1-1"));
+
+    bus.unplug(a);
+    batch.step(&mut seen).unwrap();
+    assert_eq!(batch.paused(), None);
+    assert!(batch.failed_in_isp().is_none());
+}
+
+/// The wait for a unit that failed in ISP mode gives the command that flashes it again with the
+/// batch's own release, naming the repository it came from.
+#[test]
+fn the_wait_for_a_failed_unit_names_the_releases_repository() {
+    let bus = SimBus::default();
+    let armed = Armed {
+        repo: "someone/mculink-verge".parse().unwrap(),
+        ..release()
+    };
+    let mut batch = Batch::arm(
+        &bus,
+        armed,
+        filter(),
+        Timing::default(),
+        Cancel::new(),
+        Cancel::new(),
+        None,
+    )
+    .unwrap();
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let a = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.set_fail_writes(a, true);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    let paused = batch.paused().expect("waiting on the failed unit");
+    assert!(paused.contains("--repo someone/mculink-verge`"), "{paused}");
 }
