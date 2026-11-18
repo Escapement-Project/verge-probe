@@ -695,8 +695,8 @@ pub struct Sample {
     pub millivolts: u32,
     pub nanoamps: u32,
     /// The pair's own range. Step 5 can give it a current from the pairs either side, which then
-    /// share it. A sample from the stream always has one.
-    pub range: Option<CurrentRange>,
+    /// share it.
+    pub range: CurrentRange,
     /// The pair's own reading was under range (Pair::under_range).
     #[serde(default)]
     pub under_range: bool,
@@ -791,7 +791,7 @@ impl Converter {
             time_ns: pair.time_ns,
             millivolts: pair.millivolts,
             nanoamps,
-            range: Some(CurrentRange::new(pair.low)),
+            range: CurrentRange::new(pair.low),
             under_range: pair.under_range,
         });
     }

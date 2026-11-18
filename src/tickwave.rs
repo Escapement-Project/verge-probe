@@ -1072,7 +1072,7 @@ impl Open {
         }
         self.writer.sample(V, u64::from(sample.millivolts))?;
         self.writer.sample(I, u64::from(sample.nanoamps))?;
-        let flags = [sample.range == Some(CurrentRange::Low), sample.under_range];
+        let flags = [sample.range == CurrentRange::Low, sample.under_range];
         for (k, flag) in flags.into_iter().enumerate() {
             let c = LOW_RANGE + k;
             match self.range[k] {

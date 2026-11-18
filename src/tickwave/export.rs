@@ -363,11 +363,7 @@ impl<'a> Pairs<'a> {
                     time_ns: l.ns(tick),
                     millivolts: code(0)?,
                     nanoamps: code(1)?,
-                    range: Some(if self.low.level {
-                        CurrentRange::Low
-                    } else {
-                        CurrentRange::High
-                    }),
+                    range: CurrentRange::new(self.low.level),
                     under_range: self.under.level,
                 },
             ));
@@ -559,7 +555,7 @@ fn export_with_pins(
                 time_ns: 0,
                 millivolts: 0,
                 nanoamps: 0,
-                range: None,
+                range: CurrentRange::High,
                 under_range: false,
             }
         };

@@ -419,10 +419,9 @@ impl Csv {
         self.before(sample.time_ns)?;
         let fields = self.fields();
         let range = match sample.range {
-            Some(CurrentRange::Low) => "low",
-            Some(CurrentRange::High) if sample.under_range => "under",
-            Some(CurrentRange::High) => "high",
-            None => "",
+            CurrentRange::Low => "low",
+            CurrentRange::High if sample.under_range => "under",
+            CurrentRange::High => "high",
         };
         self.row(format_args!(
             "{},{},{},{},{range}{fields}",

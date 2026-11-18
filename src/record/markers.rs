@@ -190,7 +190,7 @@ impl CsvMarkers {
 mod tests {
     use super::*;
     use crate::record::Sink;
-    use crate::stream::{Marker, Sample};
+    use crate::stream::{CurrentRange, Marker, Sample};
     use std::io::Read;
 
     fn pairs(sink: &mut Sink, count: u32) {
@@ -200,7 +200,7 @@ mod tests {
                 time_ns: u64::from(sequence) * 1_000_000,
                 millivolts: 3000,
                 nanoamps: 10,
-                range: None,
+                range: CurrentRange::High,
                 under_range: false,
             }])
             .unwrap();
@@ -338,7 +338,7 @@ mod tests {
                     time_ns: 40_000_000,
                     millivolts: 3000,
                     nanoamps: 10,
-                    range: None,
+                    range: CurrentRange::High,
                     under_range: false,
                 }])
                 .unwrap();
@@ -389,7 +389,7 @@ mod tests {
                 time_ns: 0,
                 millivolts: 3000,
                 nanoamps: 10,
-                range: None,
+                range: CurrentRange::High,
                 under_range: false,
             },
             Sample {
@@ -397,7 +397,7 @@ mod tests {
                 time_ns: 1_000_000,
                 millivolts: 3000,
                 nanoamps: 20,
-                range: None,
+                range: CurrentRange::High,
                 under_range: false,
             },
         ])
@@ -457,7 +457,7 @@ mod tests {
             time_ns: 40_000_000,
             millivolts: 3000,
             nanoamps: 10,
-            range: None,
+            range: CurrentRange::High,
             under_range: false,
         }])
         .unwrap();
