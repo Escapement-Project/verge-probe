@@ -46,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 A line reads like `CJF2551AD5: an MCU-Link Pro, Verge, build d4c4c41`. A probe running NXP's
-firmware reads `stock V3.174` instead. `unit.verge()` gives the identity of a probe that answered as
-Verge, and `None` for any other.
+firmware reads `NXP's firmware V3.174` instead. `unit.verge()` gives the identity of a probe that
+answered as Verge, and `None` for any other.
 
 ## Debugging, with Verge's commands beside it
 
