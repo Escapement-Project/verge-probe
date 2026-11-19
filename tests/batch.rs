@@ -1264,8 +1264,8 @@ fn entry_requests(bus: &SimBus) -> usize {
     bus.log().iter().filter(|l| *l == "1-1: DAP 8101").count()
 }
 
-/// The third review's proof: a unit that did not come back is taken once more, and that once is
-/// counted when its update starts. One that came back and left again before its turn was never
+/// A unit that did not come back is taken once more, and that once is counted when its update
+/// starts. One that came back and left again before its turn was never
 /// taken once more.
 #[test]
 fn a_retry_counts_only_once_it_has_run() {
@@ -1306,8 +1306,8 @@ fn a_retry_counts_only_once_it_has_run() {
     );
 }
 
-/// The third review's proof: after a unit on a port does not come back, another unit in that
-/// port, known by its serial, is a unit of its own. Its failure leaves the port free for the next.
+/// After a unit on a port does not come back, another unit in that port, known by its serial, is
+/// a unit of its own. Its failure leaves the port free for the next.
 #[test]
 fn another_unit_on_the_port_is_not_the_one_that_did_not_come_back() {
     let bus = SimBus::default();
@@ -1390,8 +1390,8 @@ fn the_tally_counts_each_unit_once_by_how_it_ended() {
 }
 
 /// A file has no version, so a unit back on its port running ours cannot be told current by the
-/// image. It is still the unit that left there: counted once, by how it ended. The second review
-/// of the fixes proved it counted twice, as failed and updated.
+/// image. It is still the unit that left there: counted once, by how it ended, not twice, as
+/// failed and updated.
 #[test]
 fn a_file_batch_counts_a_unit_that_came_back_once() {
     let file = || Armed {

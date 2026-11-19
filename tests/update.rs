@@ -866,10 +866,10 @@ fn a_bootloader_that_never_restarts_is_its_own_outcome() {
     }
 }
 
-/// The second review's proof: `enter_bootloader` on a Pro, then `flash_now` with ours, as
-/// `verge isp enter` and the `verge isp flash` it advised did, put ours on the Pro. A unit in ISP
-/// mode cannot say which board it is, so nothing after the entry can refuse it. The entry refuses
-/// instead, unless stock's own image follows.
+/// `enter_bootloader` on a Pro, then `flash_now` with ours, as `verge isp enter` and the `verge
+/// isp flash` it advises do, must not put ours on the Pro. A unit in ISP mode cannot say which
+/// board it is, so nothing after the entry can refuse it. The entry refuses instead, unless
+/// stock's own image follows.
 #[test]
 fn a_pro_sent_to_its_bootloader_by_the_tool_is_not_then_flashed_with_ours() {
     let bus = SimBus::scenario("pro").unwrap();

@@ -320,8 +320,8 @@ mod tests {
         ));
     }
 
-    /// The second review's proof: a command report whose length field says 4. McuBoot reads a
-    /// command packet's status at bytes 4 to 8 and its parameters from byte 8, so it panicked.
+    /// A command report whose length field says 4. McuBoot reads a command packet's status at
+    /// bytes 4 to 8 and its parameters from byte 8, so it panicked.
     #[test]
     fn a_short_command_report_is_an_error_not_a_panic() {
         for reply in [
@@ -353,9 +353,9 @@ mod tests {
         assert_eq!(hid.read_packet_raw(DATA).unwrap(), [1, 2, 3, 4]);
     }
 
-    /// The third review's proof, with the cases it lists and two more found in rblhost's
-    /// parsers: command reports of eight bytes or more that McuBoot panics on. Each must come
-    /// back as an error, as R3's shorter reports do.
+    /// Command reports of eight bytes or more that McuBoot panicked on, with two more cases found
+    /// in rblhost's parsers. Each must come back as an error, as the shorter reports in the test
+    /// above do.
     #[test]
     fn no_command_report_makes_mcuboot_panic() {
         let get_property = "01 00 0c 00 07 00 00 02 01 00 00 00 00 00 00 00";

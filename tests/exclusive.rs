@@ -1,7 +1,7 @@
 //! Batches on a bus that refuses a second open of a unit already open, as real USB does
 //! (nusb's claim, WinUSB and IOKit are exclusive); the simulated bench alone lets two handles open
 //! one unit. Each command holds its unit for 2 ms of real time, so the blink thread meets the
-//! update's own opens. The third review's evidence for decision 10, kept as a test.
+//! update's own opens.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
