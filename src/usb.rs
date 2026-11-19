@@ -9,11 +9,11 @@ use nusb::transfer::{
 };
 use nusb::{DeviceInfo, ErrorKind, MaybeFuture};
 
-use crate::aux::{self, AuxLink};
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{DapLink, LinkError};
 use crate::hid::HidRom;
 use crate::ids;
+use crate::verge_aux::{self, AuxLink};
 
 const USB_CLASS_HID: u8 = 0x03;
 const USB_CLASS_VENDOR: u8 = 0xFF;
@@ -67,7 +67,7 @@ fn describe(info: &DeviceInfo) -> UsbDevice {
             .any(|interface| interface.class() == USB_CLASS_HID),
         aux: info.interfaces().any(|interface| {
             interface.class() == USB_CLASS_VENDOR
-                && interface.interface_string() == Some(aux::INTERFACE_NAME)
+                && interface.interface_string() == Some(verge_aux::INTERFACE_NAME)
         }),
     }
 }
@@ -248,7 +248,7 @@ impl Bus for UsbBus {
     fn open_aux(&self, device: &UsbDevice) -> Result<NusbAux, BusError> {
         let (interface, out, input) = self.claim_bulk_pair(
             device,
-            |name| name == Some(aux::INTERFACE_NAME),
+            |name| name == Some(verge_aux::INTERFACE_NAME),
             "it has no Verge Aux interface",
         )?;
         Ok(NusbAux {
@@ -399,7 +399,7 @@ fn to_device(
         .interfaces()
         .filter(|interface| interface.class() == USB_CLASS_VENDOR)
         .collect();
-    vendor.sort_by_key(|interface| interface.interface_string() != Some(aux::INTERFACE_NAME));
+    vendor.sort_by_key(|interface| interface.interface_string() != Some(verge_aux::INTERFACE_NAME));
     let mut refused = None;
     for interface in vendor {
         match usb.claim_interface(interface.interface_number()).wait() {

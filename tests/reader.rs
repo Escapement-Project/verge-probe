@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use common::{end, header, pairs};
 
-use escapement_verge_probe::aux::{Aux, AuxLink};
 use escapement_verge_probe::dap::LinkError;
 use escapement_verge_probe::sim::{SimAux, SimBus};
 use escapement_verge_probe::stream::{
     Began, DioLost, Edge, Edges, EndReason, EnergyStream, Marker, Markers, Message, Reader,
     ReaderError,
 };
+use escapement_verge_probe::verge_aux::{Aux, AuxLink};
 use escapement_verge_probe::{
     Bus, DapTransport, EnergyCaptureSample, EnergyRanges, EnergyTotal, UsbDevice, VergeControl,
     detect,

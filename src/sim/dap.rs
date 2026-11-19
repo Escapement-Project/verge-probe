@@ -366,7 +366,7 @@ impl SimAux {
     }
 }
 
-impl crate::aux::AuxLink for SimAux {
+impl crate::verge_aux::AuxLink for SimAux {
     fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
         let mut world = self.world.lock().expect("the bench lock is not poisoned");
         self.live(&mut world)?;

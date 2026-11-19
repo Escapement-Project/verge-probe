@@ -3,9 +3,9 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::aux::{Aux, AuxError, AuxLink};
 use crate::record::Context;
 use crate::stream::{Converter, DioHeader, End, Header, Message, Total, skipped};
+use crate::verge_aux::{Aux, AuxError, AuxLink};
 use crate::{
     BoardKind, CaptureId, CommandError, EnergyCaptureSample, EnergyCaptureStart, EnergyError,
     EnergyRanges, EnergyTotal, VergeControl, VergeInfo,

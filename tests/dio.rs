@@ -13,7 +13,7 @@ fn aux_and_cmsis_dap_share_dio_state_and_refusals() {
     let bus = SimBus::scenario("ours-pro-held").unwrap();
     let unit = detect(&bus).unwrap().remove(0);
     let mut aux =
-        escapement_verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
+        escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
     let mut control = VergeControl::new(&mut aux);
     let info = control.info().unwrap().unwrap();
     assert!(info.supports_dio_on_aux());
@@ -45,7 +45,8 @@ fn dio_refusals_explain_old_aux_j15_and_a_board_without_them() {
         let bus = SimBus::scenario(scenario).unwrap();
         let unit = detect(&bus).unwrap().remove(0);
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&unit.device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&unit.device).unwrap())
+                .unwrap();
         let mut control = VergeControl::new(&mut aux);
         assert!(
             pro::check_offered("unit", &mut control, pro::Feature::Dio)

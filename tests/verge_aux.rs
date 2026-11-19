@@ -3,10 +3,10 @@
 
 use std::time::Duration;
 
-use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::dap::{DapLink, Ours};
 use escapement_verge_probe::sim::SimBus;
 use escapement_verge_probe::stream::{EndReason, Message};
+use escapement_verge_probe::verge_aux::Aux;
 use escapement_verge_probe::{
     Bus, CommandError, DapTransport, EnergyTotal, Marked, VergeControl, detect,
 };
@@ -194,7 +194,7 @@ fn opening_drops_what_the_last_program_left() {
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
-    escapement_verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
+    escapement_verge_probe::verge_aux::AuxLink::write(&mut first, &[0x82]).unwrap();
     drop(first);
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     assert_eq!(aux.exchange(&[0x8F, 2]).unwrap()[0], 0x8F);
@@ -204,7 +204,7 @@ fn opening_drops_what_the_last_program_left() {
 /// probe's OUT endpoint shut until a host reads what waits: the opener reads before it writes.
 #[test]
 fn opening_reads_past_a_reply_held_behind_a_stream_message() {
-    use escapement_verge_probe::aux::AuxLink;
+    use escapement_verge_probe::verge_aux::AuxLink;
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
@@ -486,11 +486,12 @@ fn a_reply_left_unread_outlasts_its_program() {
     let bus = SimBus::default();
     let device = pro(&bus);
     let mut first = bus.open_aux(&device).unwrap();
-    escapement_verge_probe::aux::AuxLink::write(&mut first, &[0x82]).unwrap();
+    escapement_verge_probe::verge_aux::AuxLink::write(&mut first, &[0x82]).unwrap();
     drop(first);
     let mut raw = bus.open_aux(&device).unwrap();
     assert_eq!(
-        escapement_verge_probe::aux::AuxLink::read(&mut raw, Duration::from_millis(50)).unwrap()[0],
+        escapement_verge_probe::verge_aux::AuxLink::read(&mut raw, Duration::from_millis(50))
+            .unwrap()[0],
         0x82,
         "the probe keeps it"
     );

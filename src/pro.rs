@@ -1,11 +1,11 @@
 //! Opening a selected Pro, or a standalone MCU-Link for its DIO pins, without competing with its
 //! debugger.
 
-use crate::aux::{Aux, AuxError, AuxLink};
 use crate::bus::BusError;
 use crate::dap::LinkError;
 use crate::detect::PickError;
 use crate::stream::Message;
+use crate::verge_aux::{Aux, AuxError, AuxLink};
 use crate::{Bus, CommandError, DapTransport, Unit, VergeControl, VergeInfo, VergeTransport};
 use std::convert::Infallible;
 use std::time::Duration;

@@ -1,7 +1,7 @@
-use escapement_verge_probe::aux::{Aux, AuxLink};
 use escapement_verge_probe::dap::{self, DapLink, Ours};
 use escapement_verge_probe::sim::{SimAux, SimBus};
 use escapement_verge_probe::stream::Message;
+use escapement_verge_probe::verge_aux::{Aux, AuxLink};
 use escapement_verge_probe::{Bus, CommandError, DapTransport, EnergyError, VergeControl, detect};
 use std::time::Duration;
 

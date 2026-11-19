@@ -1,12 +1,12 @@
 //! What `verge` does in a call or two: picking a unit, changing the DIO pins with the probe's
 //! checks, stopping whatever capture runs, and naming a pair's sense path.
 
-use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::detect::{PickError, pick};
 use escapement_verge_probe::dio::{self, DioChange, DioError};
 use escapement_verge_probe::pro::{self, Feature, FindError, ProError};
 use escapement_verge_probe::sim::{SimAux, SimBus};
 use escapement_verge_probe::stream::CurrentRange;
+use escapement_verge_probe::verge_aux::Aux;
 use escapement_verge_probe::{Bus, EnergyStop, SensePath, Unit, VergeControl, detect};
 
 fn bench(scenario: &str) -> (SimBus, Vec<Unit>) {

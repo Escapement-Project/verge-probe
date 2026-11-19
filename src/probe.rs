@@ -911,7 +911,7 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         }
     }
 
-    /// The transport the commands go through: an [`crate::aux::Aux`] for its stream messages.
+    /// The transport the commands go through: an [`crate::verge_aux::Aux`] for its stream messages.
     pub fn transport(&mut self) -> &mut T {
         self.transport
     }

@@ -2,12 +2,12 @@
 
 use std::fmt;
 
-use crate::aux::Aux;
 use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapError, Identity, Ours};
 use crate::daplink_rs;
 use crate::ids::Role;
+use crate::verge_aux::Aux;
 use crate::version::{Build, StockVersion};
 
 /// The firmware a unit that answered runs.

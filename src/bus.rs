@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use mboot::protocols::Protocol;
 
-use crate::aux::AuxLink;
 use crate::dap::{DapLink, LinkError};
 use crate::ids::{self, Role};
+use crate::verge_aux::AuxLink;
 
 /// A device as enumeration describes it, before anything opens it.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -374,11 +374,11 @@ fn a_full_disk_fails_the_writer() {
 #[test]
 fn a_tickwave_writer_holds_every_pair_and_its_header() {
     use escapement_verge_probe::Bus;
-    use escapement_verge_probe::aux::Aux;
     use escapement_verge_probe::sim::SimBus;
     use escapement_verge_probe::stream::{EnergyStream, Message, Reader};
     use escapement_verge_probe::tickwave::format::decode::Footer;
     use escapement_verge_probe::tickwave::format::header::ChannelKind;
+    use escapement_verge_probe::verge_aux::Aux;
     let bus = SimBus::scenario("ours-pro").unwrap();
     let device = escapement_verge_probe::detect(&bus)
         .unwrap()
