@@ -719,7 +719,6 @@ impl DioOpen {
         let finish = Finish {
             extra: vec![extra],
             bundle: Some(Bundle::Generated { stem: stem.into() }),
-            drop_gaps_past_end: false,
             view: Some(verge_view()),
             lost_after: BTreeMap::new(),
         };
@@ -1199,7 +1198,6 @@ impl Open {
         let finish = Finish {
             extra: vec![extra],
             bundle: Some(Bundle::Generated { stem: stem.into() }),
-            drop_gaps_past_end: false,
             view: Some(verge_view()),
             lost_after,
         };
