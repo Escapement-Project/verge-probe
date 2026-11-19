@@ -679,6 +679,7 @@ dependencies = [
 [[package]]
 name = "escapement-tickwave-format"
 version = "0.1.0"
+source = "git+https://github.com/Escapement-Project/tickwave?tag=v0.1.0#5137f0af47df9a00de078a7a74d54b16ba3b6299"
 dependencies = [
  "blake3",
  "rayon",
@@ -692,6 +693,7 @@ dependencies = [
 [[package]]
 name = "escapement-tickwave-view"
 version = "0.1.0"
+source = "git+https://github.com/Escapement-Project/tickwave?tag=v0.1.0#5137f0af47df9a00de078a7a74d54b16ba3b6299"
 dependencies = [
  "escapement-tickwave-format",
  "foldhash",
