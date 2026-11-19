@@ -37,14 +37,14 @@ use crate::cache::Cache;
 use crate::image::{Image, ImageError};
 use crate::progress::{Progress, Step};
 
-/// Where releases are looked up when nothing says otherwise. The organisation exists; the
-/// repository does not yet, so until it is published every lookup finds nothing.
+/// Where releases are looked up when nothing says otherwise.
 pub const DEFAULT_REPO: &str = "Escapement-Project/mculink-verge";
 
 /// The minisign public key releases are signed with: the base64 line of the `.pub` file
-/// `minisign -G` writes. `None` until that key pair exists; until then the tool can check no
-/// release's signature, so it installs none.
-pub const RELEASE_KEY: Option<&str> = None;
+/// `minisign -G` writes. A build with `None` can check no release's signature, so it installs
+/// none.
+pub const RELEASE_KEY: Option<&str> =
+    Some("RWRMeVBkfEs9OaKwx3TuHvAtEsmPjKFgKkqGmHxmqqPm/Lj5Uup2/eQX");
 
 const API: &str = "https://api.github.com";
 /// Generous for a 250 KB image, and small enough that a wrong URL cannot fill memory.
