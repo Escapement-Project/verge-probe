@@ -48,10 +48,10 @@ The capture keeps running in the firmware between polls, and the probe's accumul
 samples the host did not poll.
 
 ```sh
-cargo run --example pro_bridges -- CJ8C2F60A3 --spi
-cargo run --example pro_bridges -- CJ8C2F60A3 --dio
-cargo run --example pro_bridges -- CJ8C2F60A3 --i2c 0x50
-cargo run --example pro_bridges -- CJ8C2F60A3 --energy
+cargo run --example pro_bridges -- EVF2551AD5 --spi
+cargo run --example pro_bridges -- EVF2551AD5 --dio
+cargo run --example pro_bridges -- EVF2551AD5 --i2c 0x50
+cargo run --example pro_bridges -- EVF2551AD5 --energy
 ```
 
 Use `--i2c` only with a known device on the bridge pins. The example's transaction only reads.
