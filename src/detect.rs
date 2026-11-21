@@ -40,7 +40,7 @@ impl Guess {
         let serial = device.serial.as_deref().unwrap_or_default();
         if daplink_rs::is_mculink_build(device) {
             Guess::DaplinkRs
-        } else if serial.starts_with("CJ") || product.contains("Verge") {
+        } else if is_verge_serial(serial) || product.contains("Verge") {
             Guess::Ours
         } else if product.to_ascii_uppercase().contains("MCU-LINK") {
             Guess::Stock(StockVersion::from_product_string(product))
@@ -48,6 +48,25 @@ impl Guess {
             Guess::Unknown
         }
     }
+}
+
+/// What Verge's serials start with: EV, or CJ on v0.1 firmware. The eight hex digits after it come
+/// from the chip's unique ID, so an update from one prefix to the other keeps them.
+const VERGE_SERIAL_PREFIXES: [&str; 2] = ["EV", "CJ"];
+
+pub(crate) fn is_verge_serial(serial: &str) -> bool {
+    verge_chip_id(serial).is_some()
+}
+
+/// Whether two serials name the same chip: equal, or both Verge's with the same digits.
+pub(crate) fn same_chip(a: &str, b: &str) -> bool {
+    a == b || verge_chip_id(a).is_some_and(|id| verge_chip_id(b) == Some(id))
+}
+
+fn verge_chip_id(serial: &str) -> Option<&str> {
+    VERGE_SERIAL_PREFIXES
+        .iter()
+        .find_map(|prefix| serial.strip_prefix(prefix))
 }
 
 /// Why the tool could not ask a unit what it runs, where the system does not let this user open
@@ -635,5 +654,22 @@ mod tests {
             Hardware::from_ours_product("MCU-LINK (r0FB) CMSIS-DAP V3.172"),
             Hardware::Unknown
         );
+    }
+
+    #[test]
+    fn either_serial_prefix_guesses_ours_and_keeps_the_chip() {
+        for (serial, guess) in [
+            ("EVF2551AD5", Guess::Ours),
+            ("CJF2551AD5", Guess::Ours),
+            ("QK7RM2VTX8D41", Guess::Unknown),
+        ] {
+            let mut unit = device("CMSIS-DAP", 0x0100);
+            unit.serial = Some(serial.into());
+            assert_eq!(Guess::from_strings(&unit), guess, "{serial}");
+        }
+        assert!(same_chip("CJF2551AD5", "EVF2551AD5"));
+        assert!(same_chip("QK7RM2VTX8D41", "QK7RM2VTX8D41"));
+        assert!(!same_chip("CJF2551AD5", "EV3E7A91C2"));
+        assert!(!same_chip("QKF2551AD5", "EVF2551AD5"));
     }
 }

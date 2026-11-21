@@ -595,7 +595,10 @@ pub fn wait_for_return<B: Bus>(
                 d.role().is_none()
                     && match (&rom.location, &flashed.serial) {
                         (Some(_), _) => on_port_of(d, rom),
-                        (None, Some(serial)) => d.serial.as_ref() == Some(serial),
+                        (None, Some(serial)) => d
+                            .serial
+                            .as_deref()
+                            .is_some_and(|s| detect::same_chip(s, serial)),
                         (None, None) => false,
                     }
             });
