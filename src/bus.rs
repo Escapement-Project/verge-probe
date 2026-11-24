@@ -33,7 +33,7 @@ pub struct UsbDevice {
     /// Offers a HID interface, which is all stock V2.x and the ROM bootloader have.
     pub hid: bool,
     /// Offers Verge Aux, the Pro's interface for its supply and energy beside a debugger
-    /// ([`crate::aux`]).
+    /// ([`crate::verge_aux`]).
     pub aux: bool,
 }
 
