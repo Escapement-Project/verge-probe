@@ -125,10 +125,6 @@ pub enum DioError {
     Overlap(u8),
     #[error("the DIO pins are off: the Pro started with its USB-SIO jumper, J15, fitted")]
     Off,
-    /// A bench tool gave a standalone MCU-Link's pins to its command marker, which keeps them
-    /// until the unit restarts.
-    #[error("a bench tool's command marker holds {}", names(*.0))]
-    Held(u8),
     /// The pins of a direction group, which the change would split.
     #[error("{} change direction together", names(*.0))]
     Split(u8),
@@ -141,7 +137,7 @@ pub enum DioError {
 impl<T: VergeTransport + ?Sized> VergeControl<'_, T> {
     /// Changes the pins as `change` says, and returns their state after it. A change the probe
     /// would refuse is refused before it is sent, saying why. An empty change only reads, and
-    /// still says when the marker holds every pin or J15 turned them off.
+    /// still says when J15 turned the pins off.
     pub fn change_dio(&mut self, change: &DioChange) -> Result<DioState, DioError> {
         let overlap = change.overlap();
         if overlap != 0 {
@@ -156,15 +152,6 @@ impl<T: VergeTransport + ?Sized> VergeControl<'_, T> {
         let before = self.access_dio(0, 0, 0)?;
         if before.pins == 0 && pro {
             return Err(DioError::Off);
-        }
-        // On the standalone MCU-Link a pin missing from `pins` is one the marker holds.
-        let held = if before.pins == 0 {
-            ALL
-        } else {
-            change.pins() & !before.pins
-        };
-        if held != 0 {
-            return Err(DioError::Held(held));
         }
         if change.pins() == 0 {
             return Ok(before);

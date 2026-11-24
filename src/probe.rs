@@ -18,12 +18,11 @@ use thiserror::Error;
 use crate::protocol::{
     self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_DIO_STREAM, CAP_ENERGY_ACCUMULATOR,
     CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN,
-    CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND,
-    ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER,
-    INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
-    LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
-    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND,
-    TARGET_SENSE_COMMAND,
+    CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND,
+    I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, JTAG_CODEGEN_COMMAND,
+    JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND,
+    SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER,
+    SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -1335,30 +1334,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         }
     }
 
-    /// Starts a capture as [`Self::start_energy_capture`] does, and streams it from its first pair
-    /// with the edges of the DIO pins in `dio_mask`: `0x90` mode 5, which only Verge Aux carries.
-    /// The reply comes before the stream's header, which says which pins report.
-    pub fn start_energy_stream(
-        &mut self,
-        rate_pairs_per_second: u32,
-        dio_mask: u8,
-    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
-        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
-        let mut request = vec![5];
-        request.extend_from_slice(&rate_pairs_per_second.to_le_bytes());
-        request.push(dio_mask);
-        parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
-    }
-
-    /// Streams the running capture from its next pair, with the edges of the DIO pins in
-    /// `dio_mask`: mode 6, on Verge Aux only.
-    /// [`EnergyError::Stopped`] when nothing runs, and [`EnergyError::DmaError`] when the capture
-    /// failed or the probe had no room for the header.
-    pub fn stream_energy_capture(&mut self, dio_mask: u8) -> Result<(), CommandError<EnergyError>> {
-        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
-        parse_energy_status(&self.send(ENERGY_COMMAND, &[6, dio_mask])?)
-    }
-
     /// Starts a DIO stream on a board without energy capture: the edges of the DIO pins in
     /// `dio_mask`, with no pairs, on Verge Aux only (`0x90` mode 15). Its first message is a
     /// [`crate::stream::DioHeader`], and its times count from it. A stream already running ends
@@ -1459,18 +1434,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_calibration(&response)
     }
 
-    /// Gives the standalone MCU-Link's J8 pins in `pins`, bit n DIOn, to the firmware's bench
-    /// marker, which drives them high while each command runs; the rest go back to DIO as inputs.
-    /// Zero, as at boot, gives all four to DIO. Returns the pins the marker holds. A bench command:
-    /// a pin the marker holds is an output, whatever is wired to it.
-    pub fn set_marker_pins(&mut self, pins: u8) -> Result<u8, CommandError<Refused>> {
-        self.require_verge()?;
-        let response = self.send(J8_COMMAND, &[pins & 0x0F])?;
-        expect_accepted(&response)?;
-        Ok(response_byte(&response, 1)?)
-    }
-
-    /// Runs the SWD sample-position instrument.
+    /// Runs the SWD sample-position instrument, which only a code-lab firmware build has: other
+    /// builds answer [`CommandError::Unsupported`].
     pub fn sample_swd(
         &mut self,
         request: SampleRequest,
@@ -1615,18 +1580,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
             paced_clocks: response_byte(&response, 2)?,
         };
         refused(accepted, state)
-    }
-
-    /// Reads or sets whether CPU 0 stages DAP commands for CPU 1, and returns whether it does.
-    pub fn set_cpu_staging(
-        &mut self,
-        enabled: Option<bool>,
-    ) -> Result<bool, CommandError<Refused<bool>>> {
-        self.require_verge()?;
-        let mode = enabled.map_or(2, u8::from);
-        let response = self.send(CPU_STAGING_COMMAND, &[mode])?;
-        let accepted = vendor_status(response_byte(&response, 0)?)?;
-        refused(accepted, read_bool_at(&response, 1, "CPU staging state")?)
     }
 
     /// Reads one JTAG code-generation log entry, with zero selecting the newest entry.
@@ -2403,13 +2356,11 @@ impl<E: std::error::Error + 'static> From<SendError> for CommandError<E> {
 
 fn command_name(command_id: u8) -> &'static str {
     match command_id {
-        J8_COMMAND => "the J8 marker pins",
         TARGET_SENSE_COMMAND => "target sensing",
         SAMPLE_COMMAND => "the SWD sample instrument",
         CODE_LAB_COMMAND => "the code lab",
         SWD_CODEGEN_COMMAND => "SWD code generation",
         JTAG_CODEGEN_COMMAND | JTAG_PACING_COMMAND | JTAG_LOG_COMMAND => "JTAG code generation",
-        CPU_STAGING_COMMAND => "command staging",
         DIO_COMMAND => "the DIO pins",
         TARGET_POWER_COMMAND => "target power control",
         ENERGY_COMMAND => "energy capture",
@@ -2676,7 +2627,7 @@ mod tests {
             commands: Vec::new(),
         };
         assert!(matches!(
-            VergeControl::new(&mut transport).set_marker_pins(0),
+            VergeControl::new(&mut transport).code_lab_arenas(),
             Err(CommandError::Unsupported("Verge commands"))
         ));
         assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);

@@ -233,7 +233,7 @@ fn header_extra(header: &Header, context: &Context) -> BTreeMap<String, String> 
     extra
 }
 
-/// The stream header a recording's source states, as [`header_extra`] wrote it.
+/// The stream header a recording's source states, as this crate's recorder wrote it.
 pub fn header_from(extra: &BTreeMap<String, String>) -> Option<Header> {
     fn get<T: std::str::FromStr>(extra: &BTreeMap<String, String>, key: &str) -> Option<T> {
         extra.get(key)?.parse().ok()

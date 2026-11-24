@@ -37,11 +37,9 @@ fn dio_groups(u: &SimUnit) -> Option<&'static [u8]> {
 /// board without them has none. An input reads what is attached holds it at.
 fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8, now: Duration) -> Vec<u8> {
     let groups = dio_groups(u);
-    // Pins a bench tool's command marker holds are not DIO pins.
-    let pins = DIO_PINS & !u.marker_pins;
     let next = (u.dio_outputs & !mask) | (outputs & mask);
     let accepted = groups.is_some_and(|groups| {
-        mask & !pins == 0
+        mask & !DIO_PINS == 0
             && groups
                 .iter()
                 .all(|&group| next & group == 0 || next & group == group)
@@ -61,7 +59,7 @@ fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8, now: Duration) 
             ^ (u.energy.toggled() & !u.dio_outputs),
     ];
     if let Some(groups) = groups {
-        reply.extend_from_slice(&[pins, groups.len() as u8]);
+        reply.extend_from_slice(&[DIO_PINS, groups.len() as u8]);
         reply.extend_from_slice(groups);
     } else {
         reply.extend_from_slice(&[0, 0]);
@@ -319,8 +317,8 @@ impl DapLink for SimDap {
     }
 }
 
-/// A simulated Pro's Verge Aux interface: `0x82`, `0x8E`, `0x8F`, `0x90` and `0x94` as on CMSIS-DAP, `0x90` modes 5
-/// to 7 besides, and the energy stream.
+/// A simulated Pro's Verge Aux interface: `0x82`, `0x8E`, `0x8F`, `0x90` and `0x94` as on CMSIS-DAP, `0x90` modes 7,
+/// 9, 10, 13 and 15 besides, and the energy stream.
 pub struct SimAux {
     world: Arc<Mutex<World>>,
     unit: usize,
@@ -395,16 +393,10 @@ impl crate::verge_aux::AuxLink for SimAux {
                 .identified_stream(pro, now, Some(rate.try_into().expect("four bytes")), *pins),
             [ENERGY_COMMAND, 10, pins] => unit.energy.identified_stream(pro, now, None, *pins),
             [ENERGY_COMMAND, 13, bytes @ ..] => unit.energy.stop_stream_identified(pro, now, bytes),
-            [ENERGY_COMMAND, 5, rate @ .., pins] if rate.len() == 4 => {
-                unit.energy
-                    .start_stream(pro, now, rate.try_into().expect("four bytes"), *pins)
-            }
-            [ENERGY_COMMAND, 6, pins] => unit.energy.stream_running(pro, now, *pins),
             [ENERGY_COMMAND, 7] => unit.energy.stop_stream(now),
             [ENERGY_COMMAND, 15, pins] => {
                 let dio = dio_groups(unit).is_some();
-                unit.energy
-                    .start_dio_stream(pro, dio, now, *pins & !unit.marker_pins)
+                unit.energy.start_dio_stream(pro, dio, now, *pins)
             }
             [dap::VENDOR_DIO, ..] if !unit.dio_aux => vec![vec![dap::ID_DAP_INVALID]],
             [dap::VENDOR_DIO, ..]

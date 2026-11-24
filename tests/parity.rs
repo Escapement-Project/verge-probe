@@ -90,7 +90,7 @@ fn pins_are_named_and_parsed_as_the_command_line_takes_them() {
 }
 
 /// A change is checked against the pins' state before it is sent: a group it would split, pins
-/// the bench marker holds, pins named twice. An empty change reads.
+/// named twice. An empty change reads.
 #[test]
 fn a_dio_change_is_refused_before_it_is_sent_where_the_probe_would() {
     let (bus, units) = bench("ours-pro");
@@ -119,18 +119,6 @@ fn a_dio_change_is_refused_before_it_is_sent_where_the_probe_would() {
     assert_eq!((after.outputs, after.levels), (0b1111, 0b1000));
     // One read for the checks, one for the change.
     assert_eq!(sent(&bus) - reads, 2);
-
-    let (bus, units) = bench("ours-plain-marked");
-    let mut aux = open(&bus, &units[0]);
-    let mut control = VergeControl::new(&mut aux);
-    assert!(matches!(
-        control.change_dio(&DioChange::default().low(0b0101)),
-        Err(DioError::Held(0b0100))
-    ));
-    let after = control
-        .change_dio(&DioChange::default().low(0b0001))
-        .unwrap();
-    assert_eq!(after.outputs, 0b0001);
 }
 
 #[test]

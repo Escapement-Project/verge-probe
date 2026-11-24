@@ -24,8 +24,7 @@ pub const DIO_TIME: u8 = 0xA6;
 /// The longest label a marker carries.
 pub const LABEL_MAX: usize = 32;
 
-const HEADER_BYTES: usize = 79;
-const ID_HEADER_BYTES: usize = 103;
+const HEADER_BYTES: usize = 103;
 const DIO_HEADER_BYTES: usize = 10;
 const DIO_LOST_BYTES: usize = 19;
 const DIO_TIME_BYTES: usize = 10;
@@ -59,7 +58,7 @@ pub enum StreamError {
     #[error("0x{0:02x} starts no stream message")]
     Unknown(u8),
     #[error(
-        "stream format {0} is newer than this version reads: update the host software or the firmware"
+        "stream format {0} is not one this version reads: update the host software or the firmware"
     )]
     Format(u8),
 }
@@ -68,6 +67,8 @@ pub enum StreamError {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Header {
+    /// The capture's identity, which every stream header carries. `None` only in a header read
+    /// back from a recording, which does not keep it.
     #[serde(skip)]
     pub capture_id: Option<crate::CaptureId>,
     /// The clock the probe times pairs and edges by, in Hz.
@@ -431,34 +432,20 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
             }))
         }
         Some(&HEADER) => {
-            let identified = match bytes.get(1) {
-                Some(3) => false,
-                Some(4) => true,
+            match bytes.get(1) {
+                Some(4) => {}
                 Some(&other) => return Err(StreamError::Format(other)),
                 None => return Err(short()),
-            };
-            if bytes.len()
-                < if identified {
-                    ID_HEADER_BYTES
-                } else {
-                    HEADER_BYTES
-                }
-            {
+            }
+            if bytes.len() < HEADER_BYTES {
                 return Err(short());
             }
-            let capture_id = if identified {
-                Some(
-                    crate::CaptureId::from_bytes(bytes[72..96].try_into().expect("24 bytes"))
-                        .ok_or(StreamError::Identity)?,
-                )
-            } else {
-                None
-            };
-            // Step 5's fields follow the identity in format 4.
-            let at = if identified { 96 } else { 72 };
-            let flags = bytes[at + 2];
+            let capture_id =
+                crate::CaptureId::from_bytes(bytes[72..96].try_into().expect("24 bytes"))
+                    .ok_or(StreamError::Identity)?;
+            let flags = bytes[98];
             Ok(Message::Header(Header {
-                capture_id,
+                capture_id: Some(capture_id),
                 clock_hz: u32_at(bytes, 2),
                 period: u32_at(bytes, 6),
                 setting_ma: match bytes[10] {
@@ -474,9 +461,9 @@ pub fn parse(bytes: &[u8]) -> Result<Message, StreamError> {
                 dio_mask: bytes[68],
                 dio_levels: bytes[69],
                 edge_resolution_ns: u16_at(bytes, 70),
-                switch_weight_q16: u16_at(bytes, at).min(32768),
+                switch_weight_q16: u16_at(bytes, 96).min(32768),
                 rearm_between_pairs: flags & 1 != 0,
-                previous_shunt_nanoamps: (flags & 2 != 0).then_some(u32_at(bytes, at + 3)),
+                previous_shunt_nanoamps: (flags & 2 != 0).then_some(u32_at(bytes, 99)),
                 high_range_only: flags & 4 != 0,
             }))
         }
