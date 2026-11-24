@@ -102,49 +102,6 @@ fn a_pro_keeps_its_dio_pins_until_it_restarts() {
     assert_eq!((after.outputs, after.levels), (0, 0));
 }
 
-/// A bench tool's command marker takes J8 pins from DIO until the unit restarts: the unit leaves
-/// them out of its pins, stops driving one that was an output, and refuses to drive them.
-#[test]
-fn the_bench_marker_takes_dio_pins_until_a_restart() {
-    let bus = SimBus::scenario("ours-plain").unwrap();
-    let device = detect(&bus).unwrap().remove(0).device;
-    let mut link = bus.open_dap(&device).unwrap();
-    let driven = dap::dio(&mut link, 0b0100, 0b0100, 0b0100)
-        .unwrap()
-        .unwrap();
-    assert!(driven.accepted());
-    bus.mark_dio(0, 0b1100);
-    let held = dap::dio(&mut link, 0, 0, 0).unwrap().unwrap();
-    assert_eq!((held.pins, held.outputs, held.levels), (0b0011, 0, 0));
-    assert!(
-        !dap::dio(&mut link, 0b0100, 0b0100, 0b0100)
-            .unwrap()
-            .unwrap()
-            .accepted()
-    );
-    assert!(
-        dap::dio(&mut link, 0b0001, 0b0001, 0b0001)
-            .unwrap()
-            .unwrap()
-            .accepted()
-    );
-
-    link.control_out(dap::REBOOT_REQUEST_TYPE, dap::REBOOT_REQUEST, 0, 0)
-        .unwrap();
-    drop(link);
-    bus.sleep(Duration::from_secs(1));
-    let device = detect(&bus).unwrap().remove(0).device;
-    let mut link = bus.open_dap(&device).unwrap();
-    assert_eq!(dap::dio(&mut link, 0, 0, 0).unwrap().unwrap().pins, 0x0F);
-
-    // The marker is J8's alone.
-    let bus = SimBus::scenario("ours-pro").unwrap();
-    assert!(!bus.mark_dio(0, 0b1100));
-    let device = detect(&bus).unwrap().remove(0).device;
-    let mut link = bus.open_dap(&device).unwrap();
-    assert_eq!(dap::dio(&mut link, 0, 0, 0).unwrap().unwrap().pins, 0x0F);
-}
-
 /// A read through CMSIS-DAP while a DIO stream runs shows what is attached, as the stream does.
 #[test]
 fn a_read_beside_a_dio_stream_shows_a_toggling_pin() {

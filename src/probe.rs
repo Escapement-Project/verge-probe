@@ -19,10 +19,10 @@ use crate::protocol::{
     self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_DIO_STREAM, CAP_ENERGY_ACCUMULATOR,
     CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN,
     CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND,
-    I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, J8_COMMAND,
-    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND,
-    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ,
-    SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
+    I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, JTAG_CODEGEN_COMMAND,
+    JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND,
+    SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER,
+    SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -1458,17 +1458,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_calibration(&response)
     }
 
-    /// Gives the standalone MCU-Link's J8 pins in `pins`, bit n DIOn, to the firmware's bench
-    /// marker, which drives them high while each command runs; the rest go back to DIO as inputs.
-    /// Zero, as at boot, gives all four to DIO. Returns the pins the marker holds. A bench command:
-    /// a pin the marker holds is an output, whatever is wired to it.
-    pub fn set_marker_pins(&mut self, pins: u8) -> Result<u8, CommandError<Refused>> {
-        self.require_verge()?;
-        let response = self.send(J8_COMMAND, &[pins & 0x0F])?;
-        expect_accepted(&response)?;
-        Ok(response_byte(&response, 1)?)
-    }
-
     /// Runs the SWD sample-position instrument.
     pub fn sample_swd(
         &mut self,
@@ -2390,7 +2379,6 @@ impl<E: std::error::Error + 'static> From<SendError> for CommandError<E> {
 
 fn command_name(command_id: u8) -> &'static str {
     match command_id {
-        J8_COMMAND => "the J8 marker pins",
         TARGET_SENSE_COMMAND => "target sensing",
         SAMPLE_COMMAND => "the SWD sample instrument",
         CODE_LAB_COMMAND => "the code lab",
@@ -2662,7 +2650,7 @@ mod tests {
             commands: Vec::new(),
         };
         assert!(matches!(
-            VergeControl::new(&mut transport).set_marker_pins(0),
+            VergeControl::new(&mut transport).code_lab_arenas(),
             Err(CommandError::Unsupported("Verge commands"))
         ));
         assert_eq!(transport.commands, [(INFO_COMMAND, vec![])]);

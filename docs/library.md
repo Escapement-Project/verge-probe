@@ -397,12 +397,10 @@ target's rail time to settle before you talk to the target.
 A pin set is a mask, bit `k` for DIO`k`. `DioChange` names the pins to drive high, to drive low, and
 to make inputs. `change_dio` reads the pins first, and refuses a change the probe would refuse
 before it sends it. On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. On a
-standalone MCU-Link, each pin changes direction on its own, but a bench tool can give pins to its
-command marker, which keeps them until the probe restarts. A `DioError` says why: a group the change
-would split, pins the marker holds, the Pro's pins turned off by J15, or pins named twice, all found
-before anything is sent. Its `Command` variant is the command's own failure, the probe's refusal
-among them. An empty change only reads, and still says when the marker holds every pin or J15
-turned them off. `dio::names` and `dio::parse_pins` turn masks into names and back, as
+standalone MCU-Link, each pin changes direction on its own. A `DioError` says why: a group the
+change would split, the Pro's pins turned off by J15, or pins named twice, all found before anything
+is sent. Its `Command` variant is the command's own failure, the probe's refusal among them. An
+empty change only reads, and still says when J15 turned the pins off. `dio::names` and `dio::parse_pins` turn masks into names and back, as
 `DIO0, DIO3` and `0,dio3`.
 
 `access_dio(mask, outputs, levels)` sends the command as it is: a bit set in `mask` selects a

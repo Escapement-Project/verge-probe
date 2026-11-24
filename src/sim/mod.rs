@@ -226,9 +226,6 @@ pub struct SimUnit {
     /// A Pro whose HW_VER_5 strap says its energy circuit is not fitted: no energy capture, and
     /// DIO streams as a standalone MCU-Link has them.
     pub no_energy: bool,
-    /// The pins a bench tool's command marker holds on a standalone MCU-Link (`0x84`), which a DIO
-    /// stream leaves out until a restart.
-    pub marker_pins: u8,
     /// A Pro's target supply and energy capture, which a restart turns off and clears.
     pub energy: energy::SimEnergy,
 }
@@ -399,7 +396,6 @@ impl World {
             Event::Boot => {
                 self.units[unit].dio_outputs = 0;
                 self.units[unit].dio_levels = 0;
-                self.units[unit].marker_pins = 0;
                 self.units[unit].energy.reset();
                 let u = &self.units[unit];
                 // The ROM starts ISP mode when flash holds no image at all (UM11126, passive boot).
@@ -744,10 +740,6 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "one plain MCU-Link running a current Verge image",
     ),
     (
-        "ours-plain-marked",
-        "as ours-plain, a bench tool's command marker holding DIO2 and DIO3",
-    ),
-    (
         "ours-plain-busy",
         "as ours-plain, something attached toggling DIO1 every 50 ms",
     ),
@@ -838,7 +830,6 @@ impl SimBus {
             dio_levels: 0,
             dio_held: 0,
             no_energy: false,
-            marker_pins: 0,
             energy: energy::SimEnergy::default(),
         });
         world.units[index].mode = mode;
@@ -975,24 +966,6 @@ impl SimBus {
     /// Something attached holds these DIO pins high, bit n for DIOn, which they read as inputs.
     pub fn hold_dio(&self, unit: usize, high: u8) {
         self.world.lock().unwrap().units[unit].dio_held = high;
-    }
-
-    /// A bench tool's command marker (`0x84`) takes `pins` of a standalone unit's J8 until it
-    /// restarts: they stop being DIO pins, and leave the state a host set. Any other board refuses,
-    /// as the firmware does: false.
-    pub fn mark_dio(&self, unit: usize, pins: u8) -> bool {
-        let mut world = self.world();
-        let now = world.now;
-        let unit = &mut world.units[unit];
-        if unit.board != Some(crate::dap::Ours::BOARD_MCU_LINK) {
-            return false;
-        }
-        unit.marker_pins = pins & 0x0F;
-        unit.dio_outputs &= !unit.marker_pins;
-        unit.dio_levels &= !unit.marker_pins;
-        unit.energy
-            .set_dio(unit.dio_outputs, unit.dio_levels, unit.dio_held, now);
-        true
     }
 
     /// Makes a unit a board other than the plain MCU-Link, by the board byte ours reports.
@@ -1134,12 +1107,9 @@ impl SimBus {
                 bus.world().units[unit].no_energy = true;
                 bus.world().units[unit].dio_disabled = name == "ours-pro-unfitted-j15";
             }
-            "ours-plain" | "ours-plain-marked" | "ours-plain-busy" | "ours-plain-edge-loss" => {
+            "ours-plain" | "ours-plain-busy" | "ours-plain-edge-loss" => {
                 let unit = bus.add_ours("26ea505");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK);
-                if name == "ours-plain-marked" {
-                    assert!(bus.mark_dio(unit, 0b1100));
-                }
                 if name == "ours-plain-busy" || name == "ours-plain-edge-loss" {
                     bus.world().units[unit].energy.dio_toggle = 0b0010;
                 }
