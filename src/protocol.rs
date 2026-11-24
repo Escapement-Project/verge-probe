@@ -14,7 +14,6 @@ pub(crate) const CODE_LAB_COMMAND: u8 = 0x88;
 pub(crate) const SWD_CODEGEN_COMMAND: u8 = 0x89;
 pub(crate) const JTAG_CODEGEN_COMMAND: u8 = 0x8A;
 pub(crate) const JTAG_PACING_COMMAND: u8 = 0x8B;
-pub(crate) const CPU_STAGING_COMMAND: u8 = 0x8C;
 pub(crate) const JTAG_LOG_COMMAND: u8 = 0x8D;
 pub(crate) const SPI_COMMAND: u8 = 0x91;
 pub(crate) const I2C_COMMAND: u8 = 0x92;

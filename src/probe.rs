@@ -18,12 +18,11 @@ use thiserror::Error;
 use crate::protocol::{
     self, BUS_REPLY_HEADER, CAP_CAPTURE_ID, CAP_DIO, CAP_DIO_STREAM, CAP_ENERGY_ACCUMULATOR,
     CAP_ENERGY_CAPTURE, CAP_I2C, CAP_JTAG_CODEGEN, CAP_MARKS, CAP_SPI, CAP_SWD_CODEGEN,
-    CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, CPU_STAGING_COMMAND, DIO_COMMAND,
-    ENERGY_COMMAND, I2C_COMMAND, I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER,
-    INFO_COMMAND, J8_COMMAND, JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND,
-    LARGEST_PACKET, MARK_COMMAND, SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ,
-    SPI_MIN_CLOCK_HZ, SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND,
-    TARGET_SENSE_COMMAND,
+    CAP_TARGET_POWER, CAP_TARGET_SENSE, CODE_LAB_COMMAND, DIO_COMMAND, ENERGY_COMMAND, I2C_COMMAND,
+    I2C_MAX_CLOCK_HZ, I2C_MIN_CLOCK_HZ, I2C_REQUEST_HEADER, INFO_COMMAND, J8_COMMAND,
+    JTAG_CODEGEN_COMMAND, JTAG_LOG_COMMAND, JTAG_PACING_COMMAND, LARGEST_PACKET, MARK_COMMAND,
+    SAMPLE_COMMAND, SAMPLE_FILL_MAX, SPI_COMMAND, SPI_MAX_CLOCK_HZ, SPI_MIN_CLOCK_HZ,
+    SPI_REQUEST_HEADER, SWD_CODEGEN_COMMAND, TARGET_POWER_COMMAND, TARGET_SENSE_COMMAND,
 };
 pub use crate::protocol::{BoardKind, DioState, EnergyRanges, VendorStatus, VergeInfo};
 
@@ -1617,18 +1616,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         refused(accepted, state)
     }
 
-    /// Reads or sets whether CPU 0 stages DAP commands for CPU 1, and returns whether it does.
-    pub fn set_cpu_staging(
-        &mut self,
-        enabled: Option<bool>,
-    ) -> Result<bool, CommandError<Refused<bool>>> {
-        self.require_verge()?;
-        let mode = enabled.map_or(2, u8::from);
-        let response = self.send(CPU_STAGING_COMMAND, &[mode])?;
-        let accepted = vendor_status(response_byte(&response, 0)?)?;
-        refused(accepted, read_bool_at(&response, 1, "CPU staging state")?)
-    }
-
     /// Reads one JTAG code-generation log entry, with zero selecting the newest entry.
     pub fn read_jtag_generation_log(
         &mut self,
@@ -2409,7 +2396,6 @@ fn command_name(command_id: u8) -> &'static str {
         CODE_LAB_COMMAND => "the code lab",
         SWD_CODEGEN_COMMAND => "SWD code generation",
         JTAG_CODEGEN_COMMAND | JTAG_PACING_COMMAND | JTAG_LOG_COMMAND => "JTAG code generation",
-        CPU_STAGING_COMMAND => "command staging",
         DIO_COMMAND => "the DIO pins",
         TARGET_POWER_COMMAND => "target power control",
         ENERGY_COMMAND => "energy capture",
