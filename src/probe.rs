@@ -1334,30 +1334,6 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         }
     }
 
-    /// Starts a capture as [`Self::start_energy_capture`] does, and streams it from its first pair
-    /// with the edges of the DIO pins in `dio_mask`: `0x90` mode 5, which only Verge Aux carries.
-    /// The reply comes before the stream's header, which says which pins report.
-    pub fn start_energy_stream(
-        &mut self,
-        rate_pairs_per_second: u32,
-        dio_mask: u8,
-    ) -> Result<EnergyCaptureStart, CommandError<EnergyError>> {
-        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
-        let mut request = vec![5];
-        request.extend_from_slice(&rate_pairs_per_second.to_le_bytes());
-        request.push(dio_mask);
-        parse_energy_capture_start(&self.send(ENERGY_COMMAND, &request)?)
-    }
-
-    /// Streams the running capture from its next pair, with the edges of the DIO pins in
-    /// `dio_mask`: mode 6, on Verge Aux only.
-    /// [`EnergyError::Stopped`] when nothing runs, and [`EnergyError::DmaError`] when the capture
-    /// failed or the probe had no room for the header.
-    pub fn stream_energy_capture(&mut self, dio_mask: u8) -> Result<(), CommandError<EnergyError>> {
-        self.require_capability(CAP_ENERGY_CAPTURE, "energy capture")?;
-        parse_energy_status(&self.send(ENERGY_COMMAND, &[6, dio_mask])?)
-    }
-
     /// Starts a DIO stream on a board without energy capture: the edges of the DIO pins in
     /// `dio_mask`, with no pairs, on Verge Aux only (`0x90` mode 15). Its first message is a
     /// [`crate::stream::DioHeader`], and its times count from it. A stream already running ends

@@ -317,8 +317,8 @@ impl DapLink for SimDap {
     }
 }
 
-/// A simulated Pro's Verge Aux interface: `0x82`, `0x8E`, `0x8F`, `0x90` and `0x94` as on CMSIS-DAP, `0x90` modes 5
-/// to 7 besides, and the energy stream.
+/// A simulated Pro's Verge Aux interface: `0x82`, `0x8E`, `0x8F`, `0x90` and `0x94` as on CMSIS-DAP, `0x90` modes 7,
+/// 9, 10, 13 and 15 besides, and the energy stream.
 pub struct SimAux {
     world: Arc<Mutex<World>>,
     unit: usize,
@@ -393,11 +393,6 @@ impl crate::verge_aux::AuxLink for SimAux {
                 .identified_stream(pro, now, Some(rate.try_into().expect("four bytes")), *pins),
             [ENERGY_COMMAND, 10, pins] => unit.energy.identified_stream(pro, now, None, *pins),
             [ENERGY_COMMAND, 13, bytes @ ..] => unit.energy.stop_stream_identified(pro, now, bytes),
-            [ENERGY_COMMAND, 5, rate @ .., pins] if rate.len() == 4 => {
-                unit.energy
-                    .start_stream(pro, now, rate.try_into().expect("four bytes"), *pins)
-            }
-            [ENERGY_COMMAND, 6, pins] => unit.energy.stream_running(pro, now, *pins),
             [ENERGY_COMMAND, 7] => unit.energy.stop_stream(now),
             [ENERGY_COMMAND, 15, pins] => {
                 let dio = dio_groups(unit).is_some();

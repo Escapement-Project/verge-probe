@@ -18,8 +18,8 @@ fn points(value: &Value) -> Vec<(u16, u32)> {
         .collect()
 }
 
-/// A format 3 header as the probe sends it, up to step 5's fields: the clock and the pair period,
-/// then the stream's tables.
+/// A format 4 header as the probe sends it, up to step 5's fields: the clock and the pair period,
+/// the stream's tables, then a capture identity.
 fn header_prefix(
     clock_hz: u32,
     period: u32,
@@ -27,7 +27,7 @@ fn header_prefix(
     low: &[(u16, u32)],
     high: &[(u16, u32)],
 ) -> Vec<u8> {
-    let mut bytes = vec![stream::HEADER, 3];
+    let mut bytes = vec![stream::HEADER, 4];
     bytes.extend_from_slice(&clock_hz.to_le_bytes());
     bytes.extend_from_slice(&period.to_le_bytes());
     bytes.push(1);
@@ -43,11 +43,13 @@ fn header_prefix(
         }
     }
     bytes.extend_from_slice(&[0, 0, 0, 0]);
-    assert_eq!(bytes.len(), 72);
+    bytes.extend_from_slice(&[0x11; 16]);
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    assert_eq!(bytes.len(), 96);
     bytes
 }
 
-/// A whole format 3 header at `rate` pairs a second, which the 96 MHz clock divides, with step 5's
+/// A whole header at `rate` pairs a second, which the 96 MHz clock divides, with step 5's
 /// fields zero.
 fn header_bytes(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]) -> Vec<u8> {
     with_step_5(
@@ -65,7 +67,7 @@ fn converter(rate: u32, full_scale: u16, low: &[(u16, u32)], high: &[(u16, u32)]
     }
 }
 
-/// Step 5's fields after a header's prefix (or its identity): weight, flags and the current before.
+/// Step 5's fields after a header's identity: weight, flags and the current before.
 fn with_step_5(mut header: Vec<u8>, weight: u16, between: bool, before: Option<u32>) -> Vec<u8> {
     header.extend_from_slice(&weight.to_le_bytes());
     header.push(u8::from(between) | if before.is_some() { 2 } else { 0 });
@@ -299,23 +301,23 @@ fn messages_parse_as_the_probe_lays_them_out() {
         (96_000_000, 96_000, 3000, 1)
     );
     assert_eq!((parsed.low.len(), parsed.high[1].current_nanoamps), (2, 8));
-    assert_eq!(
-        stream::parse(&header[..78]),
-        Err(stream::StreamError::Short(78))
+    // The identity, then step 5's fields.
+    let mut current = with_step_5(
+        header_prefix(
+            96_000_000,
+            96_000,
+            3000,
+            &[(1, 2), (3, 4)],
+            &[(5, 6), (7, 8)],
+        ),
+        9786,
+        true,
+        Some(1_234_567),
     );
-    // Format 4 carries the identity, then step 5's fields.
-    let mut identified = header_prefix(
-        96_000_000,
-        96_000,
-        3000,
-        &[(1, 2), (3, 4)],
-        &[(5, 6), (7, 8)],
-    );
-    identified[1] = 4;
-    identified.extend_from_slice(&[0; 24]);
-    let mut current = with_step_5(identified.clone(), 9786, true, Some(1_234_567));
-    assert_eq!(stream::parse(&current), Err(stream::StreamError::Identity));
-    current[88] = 1;
+    // An identity whose counter is zero is none.
+    let mut zero = current.clone();
+    zero[88..96].fill(0);
+    assert_eq!(stream::parse(&zero), Err(stream::StreamError::Identity));
     let Message::Header(parsed) = stream::parse(&current).unwrap() else {
         panic!("header")
     };
@@ -340,9 +342,8 @@ fn messages_parse_as_the_probe_lays_them_out() {
         (parsed.rearm_between_pairs, parsed.previous_shunt_nanoamps),
         (false, None)
     );
-    // Formats 1 and 2 weighed pairs by a rate rounded down: refused, not misread. So is one
-    // past what this reads.
-    for format in [1, 2, 6] {
+    // Every format but 4, and the DIO stream's 5, is refused, not misread.
+    for format in [1, 2, 3, 6] {
         let mut other = header.clone();
         other[1] = format;
         assert_eq!(
@@ -538,7 +539,7 @@ fn a_held_high_range_stays_high_across_a_pause() {
         None,
     );
     header[17] = 0;
-    header[74] |= 4;
+    header[98] |= 4;
     let Message::Header(header) = stream::parse(&header).unwrap() else {
         panic!("not a header");
     };

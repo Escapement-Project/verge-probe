@@ -34,7 +34,7 @@ fn until(
 }
 
 fn rate(rate: u32) -> Vec<u8> {
-    let mut request = vec![0x90, 5];
+    let mut request = vec![0x90, 9];
     request.extend_from_slice(&rate.to_le_bytes());
     request.push(0);
     request
@@ -92,12 +92,12 @@ fn the_commands_answer_as_on_cmsis_dap() {
     // Anything else gets [0xff].
     assert_eq!(aux.exchange(&[0x00, 0x01]).unwrap(), [0xFF]);
     assert!(
-        link.exchange(&[0x90, 5, 0xE8, 3, 0, 0, 0]).unwrap()[1] == 0xFF,
-        "mode 5 is Verge Aux's alone"
+        link.exchange(&[0x90, 9, 0xE8, 3, 0, 0, 0]).unwrap()[1] == 0xFF,
+        "mode 9 is Verge Aux's alone"
     );
 }
 
-/// Mode 5: the reply, then the header, then every pair in order, then the end at a stop.
+/// Mode 9: the reply, then the header, then every pair in order, then the end at a stop.
 #[test]
 fn a_stream_carries_every_pair_to_its_end() {
     let bus = SimBus::default();
@@ -144,7 +144,7 @@ fn a_stream_carries_every_pair_to_its_end() {
     assert_eq!(end.last_sequence, next - 1 + streamed);
 }
 
-/// Mode 6 streams the running capture from its next pair; mode 7 ends it and the capture runs on;
+/// Mode 10 streams the running capture from its next pair; mode 7 ends it and the capture runs on;
 /// a start on CMSIS-DAP restarts the capture and ends a stream with reason 3.
 #[test]
 fn a_stream_ends_as_its_capture_does() {
@@ -153,7 +153,7 @@ fn a_stream_ends_as_its_capture_does() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     aux.exchange(&[0x8F, 1]).unwrap();
     assert_eq!(
-        aux.exchange(&[0x90, 6, 0]).unwrap(),
+        aux.exchange(&[0x90, 10, 0]).unwrap(),
         [0x90, 0, 1],
         "nothing runs yet"
     );
@@ -161,7 +161,7 @@ fn a_stream_ends_as_its_capture_does() {
     link.exchange(&[0x90, 0, 0xE8, 3, 0, 0]).unwrap();
     bus.sleep(Duration::from_millis(250));
 
-    assert_eq!(aux.exchange(&[0x90, 6, 0]).unwrap(), [0x90, 0, 0]);
+    assert_eq!(aux.exchange(&[0x90, 10, 0]).unwrap(), [0x90, 0, 0]);
     let Some(Message::Header(header)) = aux.message(Duration::from_secs(1)).unwrap() else {
         panic!("no header");
     };
@@ -179,7 +179,7 @@ fn a_stream_ends_as_its_capture_does() {
         "the capture runs on"
     );
 
-    aux.exchange(&[0x90, 6, 0]).unwrap();
+    aux.exchange(&[0x90, 10, 0]).unwrap();
     link.exchange(&[0x90, 0, 0xE8, 3, 0, 0]).unwrap();
     let ended = until(&mut aux, |m| matches!(m, Message::End(_)));
     assert!(
@@ -217,7 +217,7 @@ fn opening_reads_past_a_reply_held_behind_a_stream_message() {
     assert_eq!(aux.exchange(&[0x90, 1]).unwrap()[..3], [0x90, 0, 0]);
 }
 
-/// The typed stream calls: modes 5 to 7 through `VergeControl`, and the messages through its
+/// The typed stream calls: modes 9, 10 and 7 through `VergeControl`, and the messages through its
 /// transport between them. CMSIS-DAP refuses them.
 #[test]
 fn the_typed_stream_calls_drive_the_stream() {
@@ -226,14 +226,14 @@ fn the_typed_stream_calls_drive_the_stream() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     let mut verge = VergeControl::new(&mut aux);
     assert!(matches!(
-        verge.stream_energy_capture(0),
+        verge.stream_energy_capture_identified(0),
         Err(escapement_verge_probe::CommandError::Firmware(
             escapement_verge_probe::EnergyError::Stopped
         ))
     ));
     assert_eq!(
         verge
-            .start_energy_stream(2000, 0)
+            .start_energy_stream_identified(2000, 0)
             .unwrap()
             .actual_rate_pairs_per_second,
         2000
@@ -251,9 +251,9 @@ fn the_typed_stream_calls_drive_the_stream() {
     let mut transport = DapTransport(&mut link);
     assert!(
         VergeControl::new(&mut transport)
-            .start_energy_stream(1000, 0)
+            .start_energy_stream_identified(1000, 0)
             .is_err(),
-        "mode 5 is Verge Aux's alone"
+        "mode 9 is Verge Aux's alone"
     );
 }
 
@@ -263,7 +263,7 @@ fn driving_a_pin_during_a_stream_reports_its_edge() {
     let device = pro(&bus);
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     let mut control = VergeControl::new(&mut aux);
-    control.start_energy_stream(1000, 7).unwrap();
+    control.start_energy_stream_identified(1000, 7).unwrap();
     control.access_dio(7, 7, 1).unwrap();
     control.access_dio(1, 1, 0).unwrap();
     control.end_energy_stream().unwrap();
@@ -289,7 +289,7 @@ fn a_stream_reports_the_edges_it_asked_for_after_their_pairs() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     let mut verge = VergeControl::new(&mut aux);
     verge.set_target_power(true).unwrap();
-    verge.start_energy_stream(1000, 0x0A).unwrap();
+    verge.start_energy_stream_identified(1000, 0x0A).unwrap();
     let header = match verge.transport().message(Duration::from_secs(1)).unwrap() {
         Some(Message::Header(header)) => header,
         other => panic!("{other:?}"),
@@ -363,7 +363,7 @@ fn edges_of_a_slow_stream_split_by_span() {
     let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
     let mut verge = VergeControl::new(&mut aux);
     verge.set_target_power(true).unwrap();
-    verge.start_energy_stream(10, 0x08).unwrap();
+    verge.start_energy_stream_identified(10, 0x08).unwrap();
     bus.sleep(Duration::from_secs(12));
     verge.end_energy_stream().unwrap();
     let messages = until(verge.transport(), |m| matches!(m, Message::End(_)));
@@ -513,7 +513,7 @@ fn markers_reach_the_stream_from_either_interface() {
     ));
     control.start_energy_capture(1000).unwrap();
     assert_eq!(control.mark(2, b"").unwrap(), Marked::NoStream);
-    control.stream_energy_capture(0).unwrap();
+    control.stream_energy_capture_identified(0).unwrap();
     assert_eq!(control.mark(3, b"from aux").unwrap(), Marked::Sent);
     drop(control);
     {

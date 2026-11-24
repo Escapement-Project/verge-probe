@@ -625,13 +625,14 @@ impl SimEnergy {
 
     fn header(
         capture: &Capture,
+        id: &crate::CaptureId,
         first_sequence: u32,
         previous_low: bool,
         pins: u8,
         levels: u8,
     ) -> Vec<u8> {
         // The simulator's timer runs at the rate itself: one count a pair.
-        let mut header = vec![0xA1, 3];
+        let mut header = vec![0xA1, 4];
         header.extend_from_slice(&capture.rate.to_le_bytes());
         header.extend_from_slice(&1u32.to_le_bytes());
         header.push(1);
@@ -649,6 +650,7 @@ impl SimEnergy {
         header.extend_from_slice(&[pins, levels & pins]);
         let resolution = if pins == 0 { 0 } else { EDGE_RESOLUTION_NS };
         header.extend_from_slice(&resolution.to_le_bytes());
+        header.extend_from_slice(id.as_bytes());
         // Step 5's fields: no weight and no current before; flag bit 2 when the high range is held.
         header.extend_from_slice(&[
             0,
@@ -711,16 +713,9 @@ impl SimEnergy {
         messages
     }
 
-    /// `0x90` mode 5, which only Verge Aux has: a start, as mode 0, streamed from its first pair.
-    /// The firmware holds stream messages back while the request is out, so its reply comes
-    /// first, then the end of any stream the start restarted, then the header.
-    pub fn start_stream(
-        &mut self,
-        pro: bool,
-        now: Duration,
-        rate: [u8; 4],
-        pins: u8,
-    ) -> Vec<Vec<u8>> {
+    /// A start, as mode 0, streamed from its first pair: mode 9's stream. Its reply, then the end of
+    /// any stream the start restarted, then the header.
+    fn start_stream(&mut self, pro: bool, now: Duration, rate: [u8; 4], pins: u8) -> Vec<Vec<u8>> {
         let mut messages = self.stream_messages(now);
         let mut request = vec![0];
         request.extend_from_slice(&rate);
@@ -736,8 +731,10 @@ impl SimEnergy {
                 pins,
                 edges_after: 0,
             });
+            let id = self.capture_id.expect("a start has an identity");
             messages.push(Self::header(
                 &capture,
+                &id,
                 1,
                 !capture.high_range_only,
                 pins,
@@ -747,9 +744,9 @@ impl SimEnergy {
         messages
     }
 
-    /// `0x90` mode 6: the running capture, streamed from its next pair. Its reply, then the end of
-    /// any stream it replaces, then the header.
-    pub fn stream_running(&mut self, pro: bool, now: Duration, pins: u8) -> Vec<Vec<u8>> {
+    /// The running capture, streamed from its next pair: mode 10's stream. Its reply, then the end
+    /// of any stream it replaces, then the header.
+    fn stream_running(&mut self, pro: bool, now: Duration, pins: u8) -> Vec<Vec<u8>> {
         let mut messages = self.stream_messages(now);
         let running = self.capture.filter(|capture| capture.stopped_at.is_none());
         let result = match running {
@@ -775,8 +772,10 @@ impl SimEnergy {
                 pins,
                 edges_after: started,
             });
+            let id = self.capture_id.expect("a running capture has an identity");
             messages.push(Self::header(
                 &capture,
+                &id,
                 (next + 1) as u32,
                 previous_low,
                 pins,
@@ -817,14 +816,11 @@ impl SimEnergy {
         if rate.is_some() {
             reply.extend_from_slice(id.as_bytes());
         }
-        let mut header = messages
+        let header = messages
             .into_iter()
             .rev()
             .find(|message| message.first() == Some(&0xa1))
             .expect("successful stream has a header");
-        header[1] = 4;
-        // The identity goes before step 5's fields, where format 4 puts it.
-        header.splice(72..72, id.as_bytes().iter().copied());
         vec![reply, header]
     }
 
