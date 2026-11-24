@@ -1458,7 +1458,8 @@ impl<'a, T: VergeTransport + ?Sized> VergeControl<'a, T> {
         parse_energy_calibration(&response)
     }
 
-    /// Runs the SWD sample-position instrument.
+    /// Runs the SWD sample-position instrument, which only a code-lab firmware build has: other
+    /// builds answer [`CommandError::Unsupported`].
     pub fn sample_swd(
         &mut self,
         request: SampleRequest,
